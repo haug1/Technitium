@@ -240,10 +240,12 @@ namespace DnsServerCore
 
                 HttpRequest request = context.Request;
 
-                string clusterDomain = request.GetQueryOrForm("clusterDomain").TrimEnd('.');
+                string clusterDomain = request.GetQueryOrForm("clusterDomain");
 
                 if (!request.TryQueryOrFormArray("primaryNodeIpAddresses", IPAddress.Parse, out IPAddress[] primaryNodeIpAddresses))
                     throw new DnsWebServiceException("Parameter 'primaryNodeIpAddresses' missing.");
+
+                clusterDomain = _dnsWebService._clusterManager.PreparePrimaryInitialization(clusterDomain, primaryNodeIpAddresses, sessionUser);
 
                 bool restartWebService = false;
 

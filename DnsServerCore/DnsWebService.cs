@@ -2357,7 +2357,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/ldap/set", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.SetLdapConfig));
             _webService.MapGetAndPost("/api/admin/ldap/test", _authApi.TestLdapConnectionAsync);
             _webService.MapGetAndPost("/api/admin/cluster/state", _clusterApi.GetClusterState);
-            _webService.MapGetAndPost("/api/admin/cluster/init", _clusterApi.InitializeCluster);
+            _webService.MapGetAndPost("/api/admin/cluster/init", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.InitializeCluster));
             _webService.MapGetAndPost("/api/admin/cluster/primary/delete", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.DeleteCluster));
             _webService.MapGetAndPost("/api/admin/cluster/primary/join", _clusterApi.JoinCluster);
             _webService.MapGetAndPost("/api/admin/cluster/primary/removeSecondary", _clusterApi.RemoveSecondaryNodeAsync);

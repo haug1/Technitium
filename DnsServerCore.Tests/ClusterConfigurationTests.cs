@@ -12,6 +12,28 @@ namespace DnsServerCore.Tests
     public sealed class ClusterConfigurationTests
     {
         [Fact]
+        public async Task PrimaryInitializationChecksBothClusterZonesBeforeEnablingTlsOrCreatingZones()
+        {
+            await using var server = await LoopbackWebService.StartAsync("primary.cluster.test");
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=cluster-catalog.cluster.test&type=Primary", server.AdminToken));
+
+            JsonElement rejected = await server.CallAsync(
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("cluster-catalog.cluster.test", rejected.GetProperty("errorMessage").GetString());
+            JsonElement wildcard = await server.CallAsync(
+                "admin/cluster/init?clusterDomain=*.test&primaryNodeIpAddresses=127.0.0.1", server.AdminToken);
+            Assert.Equal("error", wildcard.GetProperty("status").GetString());
+            Assert.Contains("wildcard", wildcard.GetProperty("errorMessage").GetString());
+            Assert.False((await server.GetSettingsAsync()).GetProperty("webServiceEnableTls").GetBoolean());
+
+            JsonElement state = await server.CallAsync("admin/cluster/state", server.AdminToken);
+            LoopbackWebService.AssertOk(state);
+            Assert.False(state.GetProperty("response").GetProperty("clusterInitialized").GetBoolean());
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=cluster.test&type=Primary", server.AdminToken));
+        }
+
+        [Fact]
         public async Task JoiningSecondaryReceivesDnsSettingsAndKeepsItsLocalWebConfiguration()
         {
             await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);

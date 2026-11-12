@@ -7335,6 +7335,8 @@ Note! If the web service does not have HTTPS enabled, then the initialization pr
 
 Note! The initialization process will create two zones if they do not exist. The first zone will be the Cluster Primary zone named as the Cluster domain name specified above. The second zone will be the Cluster Catalog zone that uses 'cluster-catalog' as the subdomain name of the Cluster domain name. Use this Cluster Catalog zone for automatic provisioning of Secondary zones on all of the Cluster Secondary nodes.
 
+Initialization checks both zone names before creating zones or enabling HTTPS. Existing zones must have the expected types. Release manifest ownership of either zone before initialization.
+
 Warning! The Cluster domain name cannot be changed later. Make sure that you enter the correct domain name before proceeding. 
 
 URL:\

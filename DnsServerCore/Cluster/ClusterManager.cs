@@ -23,6 +23,7 @@ using DnsServerCore.Dns;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.ResourceRecords;
 using DnsServerCore.Dns.Zones;
+using DnsServerCore.Dns.ZoneManagers;
 using DnsServerCore.HttpApi;
 using DnsServerCore.HttpApi.Models;
 using System;
@@ -514,18 +515,38 @@ namespace DnsServerCore.Cluster
 
         #region primary node
 
-        public void InitializeCluster(string clusterDomain, IReadOnlyList<IPAddress> primaryNodeIpAddresses, UserSession session)
+        internal string PreparePrimaryInitialization(string domain, IReadOnlyList<IPAddress> addresses, User user)
         {
             if (ClusterInitialized)
                 throw new DnsServerException("Failed to initialize Cluster: the Cluster is already initialized.");
 
-            if (!_dnsWebService.IsWebServiceTlsEnabled)
-                throw new InvalidOperationException();
-
-            if (session.User.Type != UserType.Local)
+            if (user.Type != UserType.Local)
                 throw new DnsServerException("Failed to initialize Cluster: only a local administrator user can initialize cluster. Please login with a local administrator user account and try again.");
 
-            clusterDomain = clusterDomain.ToLowerInvariant();
+            if (addresses.Count is 0 or > byte.MaxValue)
+                throw new DnsServerException("Failed to initialize Cluster: specify between 1 and 255 Primary node IP addresses.");
+
+            string clusterDomain = ConfigurationManifest.CanonicalDnsName(domain, "/cluster/domain", allowRoot: false);
+            string catalogDomain = ConfigurationManifest.CanonicalDnsName("cluster-catalog." + clusterDomain, "/cluster/domain", allowRoot: false);
+            var zones = _dnsWebService.DnsServer.AuthZoneManager;
+            CheckZone(clusterDomain, AuthZoneType.Primary);
+            CheckZone(catalogDomain, AuthZoneType.Catalog);
+            return clusterDomain;
+
+            void CheckZone(string name, AuthZoneType expectedType)
+            {
+                AuthZoneManager.ValidateZoneName(name);
+                zones.CheckManifestZoneMembership(name);
+                AuthZoneInfo existing = zones.GetAuthZoneInfo(name);
+                if (existing is not null && existing.Type != expectedType)
+                    throw new DnsServerException($"Failed to initialize Cluster: zone '{name}' already exists and must be a {expectedType} zone.");
+            }
+        }
+
+        internal void InitializeCluster(string clusterDomain, IReadOnlyList<IPAddress> primaryNodeIpAddresses, UserSession session)
+        {
+            if (!_dnsWebService.IsWebServiceTlsEnabled)
+                throw new InvalidOperationException();
 
             //create self node
             string serverDomain = _dnsWebService.DnsServer.ServerDomain;

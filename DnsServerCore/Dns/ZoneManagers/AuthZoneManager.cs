@@ -1533,7 +1533,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         #region zone create / delete / convert / clone
 
-        private static void ValidateZoneName(string zoneName)
+        internal static void ValidateZoneName(string zoneName)
         {
             if (zoneName.Contains('*'))
                 throw new DnsWebServiceException("Domain name for a zone cannot contain wildcard character.");
