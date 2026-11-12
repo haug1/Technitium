@@ -1034,58 +1034,46 @@ namespace DnsServerCore.Dns.ZoneManagers
         public IReadOnlyList<string> BlockListUrls
         {
             get { return _blockListUrls; }
-            set
+            set { ApplyBlockListUrls(NormalizeBlockListUrls(value)); }
+        }
+
+        internal static IReadOnlyList<string> NormalizeBlockListUrls(IReadOnlyList<string> urls)
+        {
+            if (urls is null)
+                return [];
+
+            if (urls.Count > 255)
+                throw new ArgumentException("Cannot configure more than 255 block list URLs.", nameof(BlockListUrls));
+
+            List<string> uniqueList = new List<string>(urls.Count);
+            int commentCount = 0;
+
+            foreach (string url in urls)
             {
-                if (value is null)
+                if (url.Length > 255)
+                    throw new ArgumentException("Block list URL (or comment line) length cannot exceed 255 characters.", nameof(BlockListUrls));
+
+                if (url.TrimStart().StartsWith('#'))
                 {
-                    value = [];
-                }
-                else if (value.Count > 255)
-                {
-                    throw new ArgumentException("Cannot configure more than 255 block list URLs.", nameof(BlockListUrls));
-                }
-                else
-                {
-                    List<string> uniqueList = new List<string>(value.Count);
-                    int commentCount = 0;
-
-                    foreach (string url in value)
-                    {
-                        if (url.Length > 255)
-                            throw new ArgumentException("Block list URL (or comment line) length cannot exceed 255 characters.", nameof(BlockListUrls));
-
-                        if (url.TrimStart().StartsWith('#'))
-                        {
-                            uniqueList.Add(url);
-                            commentCount++;
-                            continue;
-                        }
-
-                        //do URL validation
-                        try
-                        {
-                            if (url.StartsWith('!'))
-                                _ = new Uri(url.Substring(1));
-                            else
-                                _ = new Uri(url);
-                        }
-                        catch (Exception ex)
-                        {
-                            throw new ArgumentException(ex.Message, nameof(BlockListUrls));
-                        }
-
-                        if (!uniqueList.Contains(url))
-                            uniqueList.Add(url);
-                    }
-
-                    if (uniqueList.Count == commentCount)
-                        uniqueList = [];
-
-                    value = uniqueList;
+                    uniqueList.Add(url);
+                    commentCount++;
+                    continue;
                 }
 
-                ApplyBlockListUrls(value);
+                try
+                {
+                    _ = new Uri(url.StartsWith('!') ? url.Substring(1) : url);
+                }
+                catch (UriFormatException ex)
+                {
+                    throw new ArgumentException(ex.Message, nameof(BlockListUrls));
+                }
+
+                if (!uniqueList.Contains(url))
+                    uniqueList.Add(url);
             }
+
+            return uniqueList.Count == commentCount ? [] : uniqueList;
         }
 
         public int BlockListUpdateIntervalHours

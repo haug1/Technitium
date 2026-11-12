@@ -49,3 +49,9 @@ An explicitly declared value takes precedence over the corresponding existing se
 | `{"schemaVersion":1,"web":{"certificate":{"password":{"environment":"MISSING_CERT_PASSWORD"}}}}` | The reference has valid JSON shape. Validation fails when the referenced value is missing and reports `web.certificate.password` without printing secret material. |
 
 Secret references select one environment variable or one file. Resolve relative reference paths from the manifest's directory. Settings that are server paths, such as a TLS certificate path, use the owning manager's path rules. Preview, diagnostics, and exports report references or missing-input markers and keep resolved values out of their output.
+
+## Previewing changes
+
+Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config plan path/to/technitium.json https://dns.example.test` against a running instance. Set `TECHNITIUM_CONFIG_API_TOKEN` to a token with Settings view permission. The command accepts HTTP for loopback development instances.
+
+The current preview covers authoritative DNS defaults, selected DNS options, web ports, logging settings other than the log folder, statistics, blocklist sources and scheduling, and the app auto-update flag. It reports changed field paths and web restarts without printing values. A declaration outside this set returns an error before producing a preview.

@@ -18,9 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore;
-using DnsServerCore.Configuration;
 using System;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
@@ -33,7 +31,7 @@ namespace DnsServerApp
         {
             if ((args.Length > 1) && (args[0] == "config"))
             {
-                Environment.ExitCode = ValidateConfiguration(args);
+                Environment.ExitCode = await ConfigurationCommand.RunAsync(args);
                 return;
             }
 
@@ -137,26 +135,5 @@ namespace DnsServerApp
             }
         }
 
-        private static int ValidateConfiguration(string[] args)
-        {
-            if ((args[1] != "validate") || (args.Length > 3))
-            {
-                Console.Error.WriteLine("Usage: DnsServerApp config validate [manifest]");
-                return 2;
-            }
-
-            try
-            {
-                ConfigurationManifest manifest = ConfigurationManifest.Load(args.Length == 3 ? args[2] : ConfigurationManifest.DefaultFileName);
-                manifest.ValidateReferences();
-                Console.WriteLine("Manifest structure and references are valid.");
-                return 0;
-            }
-            catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or ArgumentException)
-            {
-                Console.Error.WriteLine(ex is InvalidDataException ? ex.Message : "Could not open the configuration manifest.");
-                return 1;
-            }
-        }
     }
 }
