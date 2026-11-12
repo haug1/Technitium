@@ -20,7 +20,10 @@ namespace DnsServerApp
                 switch (args[1])
                 {
                     case "validate" when args.Length <= 3:
-                        LoadManifest(args.Length == 3 ? args[2] : ConfigurationManifest.DefaultFileName);
+                        ConfigurationManifest manifest = LoadManifest(args.Length == 3 ? args[2] : ConfigurationManifest.DefaultFileName);
+                        string? domainWarning = manifest.GetServerDomainEnvironmentWarning();
+                        if (domainWarning is not null)
+                            Console.Error.WriteLine(domainWarning);
                         Console.WriteLine("Manifest structure and references are valid.");
                         return 0;
 
@@ -88,6 +91,12 @@ namespace DnsServerApp
         {
             using var content = new StringContent(manifest.Settings.GetRawText(), Encoding.UTF8, "application/json");
             JsonElement preview = await ReadServerResponseAsync(serverUrl, "/api/settings/config/plan", content);
+            if (preview.TryGetProperty("warnings", out JsonElement warnings))
+            {
+                foreach (JsonElement warning in warnings.EnumerateArray())
+                    Console.Error.WriteLine(warning.GetString());
+            }
+
             JsonElement changes = preview.GetProperty("changes");
             if (changes.GetArrayLength() == 0)
                 Console.WriteLine("No setting changes.");

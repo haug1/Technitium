@@ -494,7 +494,14 @@ namespace DnsServerCore.Dns
 
         #region config
 
+        internal const string ServerDomainEnvironmentVariable = "DNS_SERVER_DOMAIN";
+
         public void LoadConfigFile()
+        {
+            LoadConfigFile(useLegacyServerDomain: true);
+        }
+
+        internal void LoadConfigFile(bool useLegacyServerDomain)
         {
             string dnsConfigFile = Path.Combine(_configFolder, "dns.config");
 
@@ -510,7 +517,7 @@ namespace DnsServerCore.Dns
             catch (FileNotFoundException)
             {
                 //general
-                string serverDomain = Environment.GetEnvironmentVariable("DNS_SERVER_DOMAIN");
+                string serverDomain = useLegacyServerDomain ? Environment.GetEnvironmentVariable(ServerDomainEnvironmentVariable) : null;
                 if (!string.IsNullOrEmpty(serverDomain))
                     ServerDomain = serverDomain;
 

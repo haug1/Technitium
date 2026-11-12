@@ -261,7 +261,7 @@ namespace DnsServerCore
 
         #region config
 
-        private void LoadConfigFile()
+        private void LoadConfigFile(bool useLegacyServerDomain)
         {
             string webServiceConfigFile = Path.Combine(_configFolder, "webservice.config");
 
@@ -328,10 +328,10 @@ namespace DnsServerCore
                     {
                         _webServiceUseSelfSignedTlsCertificate = bool.Parse(webServiceUseSelfSignedTlsCertificate);
 
-                        if (_webServiceUseSelfSignedTlsCertificate && !File.Exists(Path.Combine(_configFolder, "dns.config")))
+                        if (useLegacyServerDomain && _webServiceUseSelfSignedTlsCertificate && !File.Exists(Path.Combine(_configFolder, "dns.config")))
                         {
                             //read DNS server domain name here to generate self signed cert
-                            string serverDomain = Environment.GetEnvironmentVariable("DNS_SERVER_DOMAIN");
+                            string serverDomain = Environment.GetEnvironmentVariable(DnsServer.ServerDomainEnvironmentVariable);
                             if (!string.IsNullOrEmpty(serverDomain))
                                 _dnsServer.ServerDomain = serverDomain;
                         }
@@ -2947,6 +2947,10 @@ namespace DnsServerCore
             try
             {
                 ConfigurationManifest startupManifest = ConfigurationManifest.LoadForStartup(_configFolder);
+                bool useLegacyServerDomain = startupManifest?.GetServerDomain() is null;
+                string domainWarning = startupManifest?.GetServerDomainEnvironmentWarning();
+                if (domainWarning is not null)
+                    _log.Write(domainWarning);
 
                 //init dns server
                 _dnsServer = new DnsServer(_configFolder, Path.Combine(_appFolder, "dohwww"), _log);
@@ -2957,10 +2961,10 @@ namespace DnsServerCore
                 _dhcpServer.AuthManager = _authManager;
 
                 //load web service config file
-                LoadConfigFile();
+                LoadConfigFile(useLegacyServerDomain);
 
                 //load dns config file
-                _dnsServer.LoadConfigFile();
+                _dnsServer.LoadConfigFile(useLegacyServerDomain);
 
                 //load all dns applications
                 await _dnsServer.DnsApplicationManager.LoadAllApplicationsAsync();

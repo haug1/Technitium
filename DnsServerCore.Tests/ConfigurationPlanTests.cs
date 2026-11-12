@@ -528,6 +528,43 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task FreshStartupUsesDeclaredDomainWhenLegacyEnvironmentIsInvalid()
+        {
+            const string variable = "DNS_SERVER_DOMAIN";
+            const string invalidDomain = "invalid legacy domain";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, invalidDomain);
+            try
+            {
+                IPEndPoint endpoint = LoopbackDnsServer.GetLoopbackEndPoint();
+                string manifest = JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    dns = new { serverDomain = "declared.test", localEndpoints = new[] { endpoint.ToString() } }
+                });
+                await using var server = await LoopbackWebService.StartAsync(startupManifest: manifest, seedDnsConfiguration: false);
+                JsonElement current = await server.GetSettingsAsync();
+                Assert.Equal("declared.test", current.GetProperty("dnsServerDomain").GetString());
+                Assert.Contains(current.GetProperty("managedSettings").EnumerateArray(),
+                    path => path.GetString() == "/dns/serverDomain");
+
+                JsonElement preview = await PreviewAsync(server, manifest);
+                string warning = Assert.Single(preview.GetProperty("warnings").EnumerateArray()).GetString()!;
+                Assert.Contains("/dns/serverDomain", warning);
+                Assert.Contains(variable, warning);
+                Assert.DoesNotContain(invalidDomain, warning);
+                Assert.Empty(preview.GetProperty("changes").EnumerateArray());
+
+                Environment.SetEnvironmentVariable(variable, "DECLARED.TEST.");
+                Assert.False((await PreviewAsync(server, manifest)).TryGetProperty("warnings", out _));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

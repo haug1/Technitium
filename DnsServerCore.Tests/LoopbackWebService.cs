@@ -27,7 +27,7 @@ namespace DnsServerCore.Tests
         public string AdminToken { get; private set; } = null!;
         private IPEndPoint DnsEndPoint { get; set; } = null!;
 
-        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false, string? startupManifest = null)
+        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false, string? startupManifest = null, bool seedDnsConfiguration = true)
         {
             var server = new LoopbackWebService();
             try
@@ -47,7 +47,8 @@ namespace DnsServerCore.Tests
                 }
                 while (tlsPort == server.DnsEndPoint.Port || tlsPort == httpPort);
 
-                await server.SeedDnsConfigurationAsync(serverDomain);
+                if (seedDnsConfiguration)
+                    await server.SeedDnsConfigurationAsync(serverDomain);
                 server.WriteLegacyWebConfiguration(httpPort, tlsPort, enableTls);
                 if (startupManifest is not null)
                     await File.WriteAllTextAsync(Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName), startupManifest);

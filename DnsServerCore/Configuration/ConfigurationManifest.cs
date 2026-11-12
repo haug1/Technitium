@@ -119,6 +119,30 @@ namespace DnsServerCore.Configuration
                 ? ReadServerDomain(domain) : null;
         }
 
+        public string GetServerDomainEnvironmentWarning()
+        {
+            string declared = GetServerDomain();
+            if (declared is null)
+                return null;
+
+            const string variable = DnsServer.ServerDomainEnvironmentVariable;
+            string environment = Environment.GetEnvironmentVariable(variable);
+            if (string.IsNullOrEmpty(environment))
+                return null;
+
+            try
+            {
+                if (string.Equals(declared, DnsServer.NormalizeServerDomain(environment), StringComparison.Ordinal))
+                    return null;
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException or DnsServerException or DnsClientException)
+            {
+                // An invalid legacy value is also overridden by the manifest.
+            }
+
+            return $"/dns/serverDomain: The manifest overrides {variable}.";
+        }
+
         internal static string ReadServerDomain(JsonElement value)
         {
             if (value.ValueKind == JsonValueKind.Null)

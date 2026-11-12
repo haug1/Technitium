@@ -506,6 +506,13 @@ namespace DnsServerCore
 
                     Utf8JsonWriter response = context.GetCurrentJsonWriter();
                     response.WriteString("revision", revision);
+                    string domainWarning = manifest.GetServerDomainEnvironmentWarning();
+                    if (domainWarning is not null)
+                    {
+                        response.WriteStartArray("warnings");
+                        response.WriteStringValue(domainWarning);
+                        response.WriteEndArray();
+                    }
                     response.WriteStartArray("changes");
                     foreach (ConfigurationChange change in changes)
                     {
