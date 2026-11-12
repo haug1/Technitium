@@ -2,6 +2,8 @@
 
 The [JSON Schema](technitium.schema.json) describes the proposed version 1 manifest. See the [settings inventory](../DECLARATIVE-SETTINGS-INVENTORY.md) for existing defaults, aliases, validation, and service effects. The [example manifests](examples) show a minimal manifest, named resources, and secret references.
 
+Use `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config validate path/to/technitium.json` to check the manifest's schema and references. This command uses `technitium.json` in the current directory when the path is omitted. Effective settings and platform-specific validation will run against the candidate configuration during planning.
+
 ## Ownership and updates
 
 The applied manifest defines ownership. Preview and validation leave ownership and settings untouched. Apply updates ownership only after activation succeeds, and recovery restores the previous ownership together with the last working settings.
