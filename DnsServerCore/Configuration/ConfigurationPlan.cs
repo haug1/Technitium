@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using DnsServerCore.Dns;
 using System.Security.Cryptography;
@@ -29,11 +30,15 @@ namespace DnsServerCore.Configuration
             Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false);
 
         private const string DnsEndpointsPath = "/dns/localEndpoints";
+        private const string Ipv4SourcePath = "/dns/sourceNetworks/ipv4";
+        private const string Ipv6SourcePath = "/dns/sourceNetworks/ipv6";
         private const string WebAddressesPath = "/web/localAddresses";
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
             [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }, canApply: true),
+            [Ipv4SourcePath] = Field("dnsServerIPv4SourceAddresses", new[] { "0.0.0.0" }),
+            [Ipv6SourcePath] = Field("dnsServerIPv6SourceAddresses", new[] { "::" }),
             ["/dns/authoritative/defaultRecordTtl"] = Field("defaultRecordTtl", 3600, canApply: true),
             ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400, canApply: true),
             ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900, canApply: true),
@@ -148,7 +153,7 @@ namespace DnsServerCore.Configuration
             NetworkAddress[] ReadNetworks(string name)
             {
                 return authoritative.TryGetProperty(name, out JsonElement value)
-                    ? ConfigurationManifest.ReadAuthoritativeNetworks(value, name) : null;
+                    ? ConfigurationManifest.ReadNetworks(value, "/dns/authoritative/" + name) : null;
             }
 
 
@@ -280,11 +285,17 @@ namespace DnsServerCore.Configuration
                         candidate = SortAddresses(addresses.Select(address => address.ToString()));
                         current = SortAddresses(ReadWebAddresses(current).Select(address => address.ToString()));
                     }
+                    else if (path is Ipv4SourcePath or Ipv6SourcePath)
+                    {
+                        AddressFamily family = path == Ipv4SourcePath ? AddressFamily.InterNetwork : AddressFamily.InterNetworkV6;
+                        NetworkAddress[] networks = ConfigurationManifest.ReadNetworks(desired, path, family);
+                        candidate = networks.Length == 0 ? setting.Default : SortAddresses(networks.Select(network => network.ToString()));
+                        current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path, family).Select(network => network.ToString()));
+                    }
                     else if (path is "/dns/authoritative/zoneTransferAllowedNetworks" or "/dns/authoritative/notifyAllowedNetworks")
                     {
-                        string name = setting.ApiField;
-                        candidate = SortAddresses(ConfigurationManifest.ReadAuthoritativeNetworks(desired, name).Select(network => network.ToString()));
-                        current = SortAddresses(ConfigurationManifest.ReadAuthoritativeNetworks(current, name).Select(network => network.ToString()));
+                        candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
+                        current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
                     }
                     else if (path == DnsEndpointsPath)
                     {

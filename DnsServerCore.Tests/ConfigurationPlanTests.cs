@@ -140,6 +140,7 @@ namespace DnsServerCore.Tests
         [InlineData(true, "/dns/authoritative/defaultRecordTtl")]
         [InlineData(true, "/dns/authoritative/minSoaRefresh")]
         [InlineData(true, "/dns/authoritative/defaultResponsiblePerson")]
+        [InlineData(true, "/dns/authoritative/notifyAllowedNetworks")]
         public async Task LegacyCombinedBackupChecksManagedDnsSettingsBeforeChangingSettings(bool preserveListener, string conflictPath)
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -148,7 +149,7 @@ namespace DnsServerCore.Tests
             string manifest = JsonSerializer.Serialize(new
             {
                 schemaVersion = 1,
-                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600, minSoaRefresh = 900, defaultResponsiblePerson = "ops@example.test" } }
+                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600, minSoaRefresh = 900, defaultResponsiblePerson = "ops@example.test", notifyAllowedNetworks = new[] { "192.0.2.1" } } }
             });
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
@@ -179,6 +180,11 @@ namespace DnsServerCore.Tests
                 writer.Write(false); // SOA date serial format
                 writer.Write(conflictPath.EndsWith("minSoaRefresh", StringComparison.Ordinal) ? 300u : 900u);
                 writer.Write(300u); // SOA minimum retry
+                writer.Write((byte)0); // zone transfer networks
+                bool notifyConflict = conflictPath.EndsWith("notifyAllowedNetworks", StringComparison.Ordinal);
+                writer.Write((byte)(notifyConflict ? 0 : 1));
+                if (!notifyConflict)
+                    NetworkAddress.Parse("192.0.2.1").WriteTo(writer);
                 // The prefix is sufficient for ownership preflight.
             }
 
@@ -309,6 +315,36 @@ namespace DnsServerCore.Tests
             Assert.Empty(current.GetProperty("zoneTransferAllowedNetworks").EnumerateArray());
             Assert.Empty(current.GetProperty("notifyAllowedNetworks").EnumerateArray());
             Assert.Equal(2, current.GetProperty("managedSettings").GetArrayLength());
+        }
+
+        [Theory]
+        [InlineData("sourceNetworks", "ipv4", "2001:db8::1")]
+        [InlineData("sourceNetworks", "ipv6", "192.0.2.1")]
+        [InlineData("authoritative", "notifyAllowedNetworks", "192.0.2.1/255")]
+        public void ManifestRejectsInvalidNetworkPrefixesAndAddressFamilies(string section, string field, string network)
+        {
+            string manifest = new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["dns"] = new JsonObject { [section] = new JsonObject { [field] = new JsonArray(network) } }
+            }.ToJsonString();
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => Load(manifest));
+            Assert.Contains($"/dns/{section}/{field}/0", error.Message);
+            Assert.DoesNotContain(network, error.Message);
+        }
+
+        [Fact]
+        public async Task SourceNetworkPreviewUsesDefaultAddressesWithoutChangingSettings()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string defaults = """{"schemaVersion":1,"dns":{"sourceNetworks":{"ipv4":null,"ipv6":[]}}}""";
+            Assert.Empty((await PreviewAsync(server, defaults)).GetProperty("changes").EnumerateArray());
+
+            const string changed = """{"schemaVersion":1,"dns":{"sourceNetworks":{"ipv4":["192.0.2.129/24"]}}}""";
+            JsonElement change = Assert.Single((await PreviewAsync(server, changed)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("/dns/sourceNetworks/ipv4", change.GetProperty("path").GetString());
+            Assert.False(change.GetProperty("restartDnsService").GetBoolean());
+            Assert.Empty((await PreviewAsync(server, defaults)).GetProperty("changes").EnumerateArray());
         }
 
         [Fact]

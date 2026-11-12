@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -89,21 +90,28 @@ namespace DnsServerCore.Configuration
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
                 if (dns.TryGetProperty("localEndpoints", out JsonElement endpoints))
                     ReadDnsLocalEndPoints(endpoints);
+                if (dns.TryGetProperty("sourceNetworks", out JsonElement sourceNetworks))
+                {
+                    if (sourceNetworks.TryGetProperty("ipv4", out JsonElement ipv4))
+                        ReadNetworks(ipv4, "/dns/sourceNetworks/ipv4", AddressFamily.InterNetwork);
+                    if (sourceNetworks.TryGetProperty("ipv6", out JsonElement ipv6))
+                        ReadNetworks(ipv6, "/dns/sourceNetworks/ipv6", AddressFamily.InterNetworkV6);
+                }
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
                         ReadDefaultResponsiblePerson(responsiblePerson);
                     if (authoritative.TryGetProperty("zoneTransferAllowedNetworks", out JsonElement transfer))
-                        ReadAuthoritativeNetworks(transfer, "zoneTransferAllowedNetworks");
+                        ReadNetworks(transfer, "/dns/authoritative/zoneTransferAllowedNetworks");
                     if (authoritative.TryGetProperty("notifyAllowedNetworks", out JsonElement notify))
-                        ReadAuthoritativeNetworks(notify, "notifyAllowedNetworks");
+                        ReadNetworks(notify, "/dns/authoritative/notifyAllowedNetworks");
                 }
             }
 
             return new ConfigurationManifest(filePath, root.Clone());
         }
 
-        internal static NetworkAddress[] ReadAuthoritativeNetworks(JsonElement value, string name)
+        internal static NetworkAddress[] ReadNetworks(JsonElement value, string path, AddressFamily? family = null)
         {
             if (value.ValueKind == JsonValueKind.Null)
                 return [];
@@ -111,8 +119,13 @@ namespace DnsServerCore.Configuration
             var networks = new NetworkAddress[value.GetArrayLength()];
             for (int i = 0; i < networks.Length; i++)
             {
-                if (!NetworkAddress.TryParse(value[i].GetString(), out networks[i]))
-                    throw new InvalidDataException($"/dns/authoritative/{name}/{i}: Invalid network address.");
+                string entry = value[i].GetString();
+                int slash = entry.IndexOf('/');
+                if (!NetworkAddress.TryParse(entry, out networks[i]) ||
+                    (slash >= 0 && (!byte.TryParse(entry.AsSpan(slash + 1), out byte prefix) || prefix != networks[i].PrefixLength)))
+                    throw new InvalidDataException($"{path}/{i}: Invalid network address or prefix.");
+                if (family.HasValue && networks[i].AddressFamily != family.Value)
+                    throw new InvalidDataException($"{path}/{i}: Network address uses the wrong IP family.");
             }
             return networks.Distinct().ToArray();
         }
