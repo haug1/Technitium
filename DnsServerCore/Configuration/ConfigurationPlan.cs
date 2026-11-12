@@ -210,6 +210,11 @@ namespace DnsServerCore.Configuration
                             ConfigurationLdap.Compare(ldap, changes);
                         else if (authSection.Name == "permissions" && currentSettings.TryGetProperty("manifestPermissions", out _))
                             continue;
+                        else if (authSection.Name == "staticSessions" && currentSettings.TryGetProperty("manifestStaticSessions", out JsonElement staticSessions))
+                        {
+                            foreach (JsonProperty change in staticSessions.GetProperty("changes").EnumerateObject())
+                                changes.Add(new ConfigurationChange(change.Name, (ConfigurationChangeKind)change.Value.GetInt32(), false));
+                        }
                         else if ((authSection.Name is "groups" or "users") &&
                             currentSettings.TryGetProperty(authSection.Name == "groups" ? "manifestGroups" : "manifestUsers", out JsonElement snapshot))
                         {
@@ -315,6 +320,8 @@ namespace DnsServerCore.Configuration
                     users.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestPermissionOwnership", out JsonElement permissionOwnership))
                     permissionOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestStaticSessions", out JsonElement staticSessions))
+                    staticSessions.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestPermissions", out JsonElement permissions))
                     permissions.WriteTo(writer);
                 writer.WriteEndArray();
@@ -942,7 +949,7 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (path is ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or ConfigurationStaticSessions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 

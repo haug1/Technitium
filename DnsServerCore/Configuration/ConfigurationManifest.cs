@@ -37,6 +37,9 @@ namespace DnsServerCore.Configuration
         // Keep explicit nulls so callers can distinguish a reset from an omitted setting.
         public JsonElement Settings { get; }
 
+        internal static ConfigurationManifest ReferenceContext(string configFolder) =>
+            new(Path.Combine(configFolder, DefaultFileName), default);
+
         public static ConfigurationManifest Load(string filePath)
         {
             string fullPath = Path.GetFullPath(filePath);

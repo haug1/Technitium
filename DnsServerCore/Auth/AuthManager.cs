@@ -45,6 +45,14 @@ namespace DnsServerCore.Auth
         ConcurrentDictionary<PermissionSection, Permission> _permissions = new ConcurrentDictionary<PermissionSection, Permission>(1, 11);
         ConcurrentDictionary<string, UserSession> _sessions = new ConcurrentDictionary<string, UserSession>(1, 10);
 
+        private SortedDictionary<string, ConfigurationStaticSessions.Definition> _manifestStaticSessionDefinitions = new(StringComparer.Ordinal);
+        private IReadOnlyDictionary<string, ConfigurationStaticSessions.Entry> _manifestStaticSessionEntries =
+            new SortedDictionary<string, ConfigurationStaticSessions.Entry>(StringComparer.Ordinal);
+        private IReadOnlyDictionary<string, UserSession> _manifestStaticSessions = new Dictionary<string, UserSession>(StringComparer.Ordinal);
+        internal SortedDictionary<string, ConfigurationStaticSessions.Definition> ManifestStaticSessionDefinitions => _manifestStaticSessionDefinitions;
+        internal IReadOnlyDictionary<string, ConfigurationStaticSessions.Entry> ManifestStaticSessionEntries => _manifestStaticSessionEntries;
+        internal ConfigurationManifest StaticSessionReferenceContext => ConfigurationManifest.ReferenceContext(_configFolder);
+
         Dictionary<string, UserSession> _staticSessions; //predefined static session via environment variables
 
         readonly ConcurrentDictionary<IPAddress, int> _failedLoginAttemptNetworks = new ConcurrentDictionary<IPAddress, int>(1, 10);
@@ -94,8 +102,9 @@ namespace DnsServerCore.Auth
         internal const string PermissionOwnershipFile = "permission-ownership.config";
         private string[] _managedPermissionPaths = [];
         internal IReadOnlyList<string> ManagedPermissionPaths => _managedPermissionPaths;
-        internal bool HasManagedAuthSettings => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 ||
+        internal bool HasManagedAuthOwnership => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 ||
             _managedUserPaths.Length > 0 || _managedPermissionPaths.Length > 0;
+        internal bool HasManagedAuthSettings => HasManagedAuthOwnership || _manifestStaticSessionDefinitions.Count > 0;
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
@@ -117,6 +126,13 @@ namespace DnsServerCore.Auth
             _managedGroupPaths = ReadOwnership(GroupOwnershipFile);
             _managedUserPaths = ReadOwnership(UserOwnershipFile);
             _managedPermissionPaths = ReadOwnership(PermissionOwnershipFile);
+            string staticSessionsFile = Path.Combine(configFolder, ConfigurationStaticSessions.FileName);
+            if (File.Exists(staticSessionsFile))
+            {
+                var definitions = JsonSerializer.Deserialize<Dictionary<string, ConfigurationStaticSessions.Definition>>(File.ReadAllBytes(staticSessionsFile))
+                    ?? throw new InvalidDataException("Invalid manifest static session configuration.");
+                _manifestStaticSessionDefinitions = new SortedDictionary<string, ConfigurationStaticSessions.Definition>(definitions, StringComparer.Ordinal);
+            }
 
             _saveTimer = new Timer(delegate (object state)
             {
@@ -511,9 +527,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, ConfigurationStaticSessions.Candidate staticSessions, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null)
             {
                 persist(null);
                 return;
@@ -622,8 +638,11 @@ namespace DnsServerCore.Auth
                     }
                 }
 
+                var configuredSessions = staticSessions is null ? null : BuildManifestStaticSessions(staticSessions, stagedUsers);
                 persist(() =>
                 {
+                    if (staticSessions is not null)
+                        WriteStaticSessions(staticSessions);
                     if (permissions.Count > 0 || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null)
                         SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers);
                     if (ldapOwnership is not null)
@@ -665,6 +684,8 @@ namespace DnsServerCore.Auth
                     }
                 }
 
+                if (staticSessions is not null)
+                    PublishStaticSessions(staticSessions, configuredSessions);
                 if (ldapOwnership is not null)
                     _managedLdapFields = ldapOwnership;
                 if (groupOwnership is not null)
@@ -678,6 +699,60 @@ namespace DnsServerCore.Auth
                 if (ldap is not null)
                     SetLdapSettings(ldap);
             }
+        }
+
+        internal bool StaticTokenConflicts(string token) =>
+            _staticSessions?.ContainsKey(token) == true || _sessions.ContainsKey(token);
+
+        internal void LoadManifestStaticSessions()
+        {
+            if (_manifestStaticSessionDefinitions.Count == 0 && _manifestStaticSessionEntries.Count == 0)
+                return;
+            ConfigurationStaticSessions.Candidate candidate = ConfigurationStaticSessions.Prepare(null, this, loading: true);
+            PublishStaticSessions(candidate, BuildManifestStaticSessions(candidate, null));
+        }
+
+        private Dictionary<string, UserSession> BuildManifestStaticSessions(ConfigurationStaticSessions.Candidate candidate,
+            IReadOnlyDictionary<string, User> stagedUsers)
+        {
+            var result = new Dictionary<string, UserSession>(StringComparer.Ordinal);
+            foreach (var (name, entry) in candidate.Entries)
+            {
+                string username = entry.Definition.User;
+                User user = GetUser(username) ?? stagedUsers?.GetValueOrDefault(username);
+                if (user is null || StaticTokenConflicts(entry.Token))
+                    throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationStaticSessions.Path, name)}: The session account or token changed during apply.");
+                result.Add(entry.Token, new UserSession(entry.Token, user));
+            }
+            return result;
+        }
+
+        private void PublishStaticSessions(ConfigurationStaticSessions.Candidate candidate, Dictionary<string, UserSession> sessions)
+        {
+            var definitions = new SortedDictionary<string, ConfigurationStaticSessions.Definition>(StringComparer.Ordinal);
+            foreach (var (name, entry) in candidate.Entries)
+                definitions.Add(name, entry.Definition);
+            _manifestStaticSessionDefinitions = definitions;
+            _manifestStaticSessionEntries = candidate.Entries;
+            _manifestStaticSessions = sessions;
+        }
+
+        private void WriteStaticSessions(ConfigurationStaticSessions.Candidate candidate)
+        {
+            string file = Path.Combine(_configFolder, ConfigurationStaticSessions.FileName);
+            if (candidate.Entries.Count == 0)
+            {
+                File.Delete(file);
+                return;
+            }
+
+            string temporary = file + ".tmp";
+            using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(output, candidate.Entries.ToDictionary(entry => entry.Key, entry => entry.Value.Definition));
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, file, true);
         }
 
         private string[] ReadOwnership(string fileName)
@@ -708,7 +783,7 @@ namespace DnsServerCore.Auth
         }
 
         internal void CheckManifestRestoreOwnership(Stream stream) =>
-            ReadConfigFrom(stream, false, out _, (ldap, groups, users, permissions) =>
+            ReadConfigFrom(stream, false, out _, (ldap, groups, users, permissions, sessions) =>
             {
                 ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
                 if (_managedGroupPaths.Length > 0)
@@ -717,6 +792,13 @@ namespace DnsServerCore.Auth
                     ConfigurationUsers.CheckRestore(this, users);
                 if (_managedPermissionPaths.Length > 0)
                     ConfigurationPermissions.CheckRestore(this, permissions);
+                foreach (var (name, definition) in _manifestStaticSessionDefinitions)
+                {
+                    if (!users.ContainsKey(definition.User))
+                        throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationStaticSessions.Path, name)}/user: Restore would remove the session account.");
+                    if (_manifestStaticSessionEntries.TryGetValue(name, out var entry) && sessions.ContainsKey(entry.Token))
+                        throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationStaticSessions.Path, name)}/token: Restore would introduce a duplicate token.");
+                }
             });
 
         internal ConfigurationLdap.Settings GetManifestLdapSettings() => new(
@@ -751,7 +833,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>> inspect = null)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>, IReadOnlyDictionary<string, UserSession>> inspect = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -929,14 +1011,14 @@ namespace DnsServerCore.Auth
                         ConfigurationLdap.Settings ldap = ReadLdapSettings(bR);
                         if (inspect is not null)
                         {
-                            inspect(ldap, groups, users, permissions);
+                            inspect(ldap, groups, users, permissions, sessions);
                             return;
                         }
                         SetLdapSettings(ldap);
                     }
                     else if (inspect is not null)
                     {
-                        inspect(GetManifestLdapSettings(), groups, users, permissions);
+                        inspect(GetManifestLdapSettings(), groups, users, permissions, sessions);
                         return;
                     }
 
@@ -1551,6 +1633,7 @@ namespace DnsServerCore.Auth
 
                 ConfigurationUsers.CheckMembership(_managedUserPaths, user.Username, user.Type);
                 ConfigurationUsers.CheckMembership(_managedUserPaths, newUsername, user.Type);
+                CheckManifestStaticSessionAccount(user);
                 CheckPrincipalGrantChanges(user, newUsername);
                 string oldUsername = user.Username;
                 user.SetUsername(newUsername);
@@ -1580,6 +1663,7 @@ namespace DnsServerCore.Auth
             if (GetUser(username) is User current)
             {
                 ConfigurationUsers.CheckMembership(_managedUserPaths, username, current.Type);
+                CheckManifestStaticSessionAccount(current);
                 CheckPrincipalGrantChanges(current);
             }
             if (_users.TryRemove(username.ToLowerInvariant(), out User deletedUser))
@@ -1746,6 +1830,13 @@ namespace DnsServerCore.Auth
 
                 if ((_staticSessions is not null) && _staticSessions.TryGetValue(token, out UserSession staticSession))
                     return staticSession;
+                if (_manifestStaticSessions.TryGetValue(token, out UserSession configured))
+                {
+                    if (!_users.TryGetValue(configured.User.Username, out _))
+                        return null;
+                    configured.UpdateUserObject(_users);
+                    return configured;
+                }
             }
 
             return null;
@@ -1781,8 +1872,18 @@ namespace DnsServerCore.Auth
             }
         }
 
+        private void CheckManifestStaticSessionAccount(User user)
+        {
+            foreach (var (name, definition) in _manifestStaticSessionDefinitions)
+            {
+                if (definition.User == user.Username)
+                    throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationStaticSessions.Path, name)}/user: The account is referenced by a static session.");
+            }
+        }
+
         internal bool HasStaticSession(User user) =>
-            _staticSessions?.Values.Any(session => session.User.Equals(user)) == true;
+            _staticSessions?.Values.Any(session => session.User.Equals(user)) == true ||
+            _manifestStaticSessionDefinitions.Values.Any(definition => definition.User == user.Username);
 
         private static bool SessionRemovedByManifest(UserSession session, IReadOnlyDictionary<string, User> stagedUsers) =>
             stagedUsers?.TryGetValue(session.User.Username, out User staged) == true &&

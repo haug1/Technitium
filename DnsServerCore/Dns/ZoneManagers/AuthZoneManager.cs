@@ -790,7 +790,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             _manifestOwnedZones.TryGetValue(name, out string[] fields) && fields.Contains(field, StringComparer.Ordinal);
 
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneAndAuthChanges(ConfigurationManifest manifest, AuthManager auth, User creator,
-            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers)
+            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions)
         {
             if (ldap is not null && ConfigurationLdap.Same(ldap, auth.GetManifestLdapSettings()))
                 ldap = null;
@@ -801,6 +801,9 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             var groupChanges = ConfigurationGroups.Prepare(manifest, auth);
             var userChanges = preparedUsers ?? ConfigurationUsers.Prepare(manifest, auth, groupChanges, actor: creator);
+            var staticSessions = preparedSessions ?? ConfigurationStaticSessions.Prepare(manifest, auth, userChanges);
+            if (staticSessions?.Changes.Count == 0)
+                staticSessions = null;
             var grants = ConfigurationPermissions.Prepare(manifest, auth, groupChanges, userChanges, creator);
             ConfigurationGroups.ValidateRemovals(auth, groupChanges, ldap, userChanges, grants);
             string[] groupOwnership = ConfigurationGroups.GetOwnedPaths(manifest);
@@ -872,7 +875,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
                 !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
-            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null)
+            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null)
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
@@ -888,6 +891,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 files.Add(AuthManager.UserOwnershipFile);
             if (permissionOwnership is not null)
                 files.Add(AuthManager.PermissionOwnershipFile);
+            if (staticSessions is not null)
+                files.Add(ConfigurationStaticSessions.FileName);
             var created = new Dictionary<string, PrimaryZone>(StringComparer.Ordinal);
             var stagedRecords = new Dictionary<string, (PrimaryZone Zone, List<DnsResourceRecord> Records,
                 HashSet<(string Owner, DnsResourceRecordType Type)> ChangedSets)>(StringComparer.Ordinal);
@@ -966,7 +971,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         try
                         {
-                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, groupOwnership, userChanges, userOwnership, grants, permissionOwnership, write =>
+                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, groupOwnership, userChanges, userOwnership, grants, permissionOwnership, staticSessions, write =>
                             {
                                 writeAuth = write;
                                 persist();

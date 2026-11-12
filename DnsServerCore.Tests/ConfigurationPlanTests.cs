@@ -3343,6 +3343,73 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestStaticSessionPersistsReferencesAndRevokesRotatedTokens()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_STATIC_SESSION";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            string initial = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string rotated = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string local = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            const string declaration = """
+                {"schemaVersion":1,"auth":{"staticSessions":{"automation":{"user":"admin",
+                    "token":{"environment":"TECHNITIUM_TEST_STATIC_SESSION"}}}}}
+                """;
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, initial);
+                JsonElement preview = await PreviewAsync(server, declaration);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                    change.GetProperty("path").ValueEquals("/auth/staticSessions/automation"));
+                Assert.DoesNotContain(initial, preview.GetRawText());
+                Environment.SetEnvironmentVariable(variable, rotated);
+                Assert.Equal("error", (await ApplyAsync(server, declaration, preview.GetProperty("revision").GetString()!))
+                    .GetProperty("status").GetString());
+                Environment.SetEnvironmentVariable(variable, initial);
+                string revision = (await PreviewAsync(server, declaration)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, declaration, revision));
+                await server.RestartAsync();
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", initial));
+                Assert.Empty((await PreviewAsync(server, declaration)).GetProperty("changes").EnumerateArray());
+
+                Environment.SetEnvironmentVariable(variable, rotated);
+                revision = (await PreviewAsync(server, declaration)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, declaration, revision));
+                Assert.Equal("invalid-token", (await server.CallAsync("settings/get", initial)).GetProperty("status").GetString());
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", rotated));
+
+                string config = server.ConfigurationDirectory;
+                string startup = Path.Combine(config, ConfigurationManifest.DefaultFileName);
+                await File.WriteAllTextAsync(Path.Combine(config, "automation-token"), local);
+                await File.WriteAllTextAsync(startup, """
+                    {"schemaVersion":1,"auth":{"staticSessions":{"automation":{"user":"admin","token":{"file":"automation-token"}}}}}
+                    """);
+                await server.RestartAsync();
+                Assert.Equal("invalid-token", (await server.CallAsync("settings/get", rotated)).GetProperty("status").GetString());
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", local));
+                Assert.DoesNotContain(local, await File.ReadAllTextAsync(Path.Combine(config, "static-sessions.config")));
+                File.Delete(startup);
+                await server.RestartAsync();
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", local));
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain(local, export.GetRawText());
+                Assert.Contains(export.GetProperty("response").GetProperty("missingInputs").EnumerateArray(),
+                    path => path.ValueEquals("/auth/staticSessions/automation/token"));
+                const string clear = """{"schemaVersion":1,"auth":{"staticSessions":{"automation":null}}}""";
+                revision = (await PreviewAsync(server, clear)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, clear, revision));
+                await server.RestartAsync();
+                Assert.Equal("invalid-token", (await server.CallAsync("settings/get", local)).GetProperty("status").GetString());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task ManifestZoneGrantsApplyWithZoneCreationAndCanBeReset()
         {
             await using var server = await LoopbackWebService.StartAsync();
