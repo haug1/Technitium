@@ -575,6 +575,14 @@ namespace DnsServerCore
                         manifest.Add("dhcp", new System.Text.Json.Nodes.JsonObject { ["scopes"] = scopes });
                 }
 
+                if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
+                {
+                    var zones = ConfigurationZoneExport.Export(dns, _dnsWebService._clusterManager.ClusterInitialized,
+                        name => _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.View), missingInputs);
+                    if (zones.Count > 0)
+                        manifest.Add("zones", zones);
+                }
+
                 if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
                 if (dns.Forwarders?.Count > 0 && manifest["dns"]?["forwarding"]?["servers"] is null)

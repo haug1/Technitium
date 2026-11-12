@@ -3616,6 +3616,63 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneExportReproducesPoliciesAndRecordsOnAnotherInstance()
+        {
+            await using var source = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"migration.test":{"type":"Primary",
+                    "transfer":{"mode":"Deny"},
+                    "records":[{"owner":"www.migration.test","type":"A","ttl":600,"comments":"fixture",
+                        "data":{"zoneFile":"192.0.2.42"}}]
+                }}}
+                """;
+            string revision = (await PreviewAsync(source, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(source, manifest, revision));
+            LoopbackWebService.AssertOk(await source.CallAsync("zones/create?zone=expiring.test&type=Primary", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "zones/records/add?zone=expiring.test&domain=www.expiring.test&type=A&ipAddress=192.0.2.43&ttl=60&expiryTtl=3600",
+                source.AdminToken));
+
+            JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement response = export.GetProperty("response");
+            JsonElement zones = response.GetProperty("manifest").GetProperty("zones");
+            Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), entry => entry.ValueEquals("/zones/expiring.test/records"));
+            Assert.False(zones.GetProperty("expiring.test").TryGetProperty("records", out _));
+            JsonElement zone = zones.GetProperty("migration.test");
+            Assert.Equal("Deny", zone.GetProperty("transfer").GetProperty("mode").GetString());
+            JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray());
+            Assert.Equal("C000022A", record.GetProperty("data").GetProperty("rawHex").GetString());
+            Assert.Equal("fixture", record.GetProperty("comments").GetString());
+
+            using var user = new FormUrlEncodedContent([new("user", "zone-viewer"), new("pass", "fixture-password")]);
+            LoopbackWebService.AssertOk(await source.CallAsync("admin/users/create", source.AdminToken, user));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "admin/permissions/set?section=Settings&userPermissions=zone-viewer%7Ctrue%7Cfalse%7Cfalse", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "zones/permissions/set?zone=migration.test&userPermissions=zone-viewer%7Ctrue%7Cfalse%7Cfalse", source.AdminToken));
+            string viewerToken = await source.LoginAsync("zone-viewer", "fixture-password");
+            JsonElement restricted = await source.CallAsync("settings/config/export", viewerToken);
+            LoopbackWebService.AssertOk(restricted);
+            Assert.Contains("migration.test", restricted.GetRawText());
+            Assert.DoesNotContain("expiring.test", restricted.GetRawText());
+
+            await using var destination = await LoopbackWebService.StartAsync();
+            string exported = $$"""{"schemaVersion":1,"zones":{"migration.test":{{zone.GetRawText()}} } }""";
+            revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, revision));
+            await destination.RestartAsync();
+            DnsResourceRecord answer = Assert.Single((await destination.QueryAsync("www.migration.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
+            Assert.Equal(600u, answer.OriginalTtlValue);
+            Assert.Empty((await PreviewAsync(destination, exported)).GetProperty("changes").EnumerateArray());
+            JsonElement repeat = await destination.CallAsync("settings/config/export", destination.AdminToken);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Equal(zone.GetRawText(), repeat.GetProperty("response").GetProperty("manifest").GetProperty("zones")
+                .GetProperty("migration.test").GetRawText());
+        }
+
+        [Fact]
         public async Task ApplicableExportReproducesSettingsOnACleanInstance()
         {
             IPEndPoint endpoint;

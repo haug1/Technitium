@@ -1199,7 +1199,7 @@ namespace DnsServerCore.Configuration
             return changes;
         }
 
-        private static bool IsGeneratedRecord(string zoneName, string serverDomain, string owner, DnsResourceRecordType type, DnsResourceRecordData data)
+        internal static bool IsGeneratedRecord(string zoneName, string serverDomain, string owner, DnsResourceRecordType type, DnsResourceRecordData data)
         {
             if (type is DnsResourceRecordType.DNSKEY or DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or
                 DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM)
@@ -1210,7 +1210,7 @@ namespace DnsServerCore.Configuration
                  (data is DnsNSRecordData ns && ns.NameServer.Equals(serverDomain, StringComparison.OrdinalIgnoreCase)));
         }
 
-        private static bool IsLeaseRecord(DnsResourceRecord record)
+        internal static bool IsLeaseRecord(DnsResourceRecord record)
         {
             return record.Type is DnsResourceRecordType.A or DnsResourceRecordType.PTR &&
                 record.Tag is GenericRecordInfo { Comments: string comments } &&
