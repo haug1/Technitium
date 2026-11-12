@@ -3497,7 +3497,7 @@ namespace DnsServerCore
                 User bootstrapAdmin = _authManager.GetUser("admin");
                 var bootstrap = ConfigurationClusterOptions.PrepareStartupBootstrap(startupManifest, _clusterManager, bootstrapAdmin);
                 if (bootstrap is not null && !IsWebServiceTlsEnabled)
-                    throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before initializing the Primary.");
+                    throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before bootstrapping the node.");
                 if (startupManifest is not null && bootstrap is null)
                 {
                     ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
@@ -3577,8 +3577,12 @@ namespace DnsServerCore
                         bool declaresDhcp = startupManifest is not null && startupManifest.Settings.TryGetProperty("dhcp", out var dhcp) &&
                             dhcp.TryGetProperty("scopes", out _);
                         await _dhcpServer.StartAsync(waitForScopes: declaresDhcp);
-                        if (bootstrap is not null)
-                            _clusterManager.InitializePrimaryFromManifest(bootstrap, bootstrapAdmin);
+                        if (bootstrap is ConfigurationClusterOptions.PrimaryBootstrap primary)
+                            _clusterManager.InitializePrimaryFromManifest(primary, bootstrapAdmin);
+                        else if (bootstrap is ConfigurationClusterOptions.SecondaryBootstrap secondary)
+                            await _clusterManager.InitializeAndJoinClusterAsync(secondary.Addresses, secondary.PrimaryUrl, secondary.Username,
+                                secondary.Password, secondary.Totp, secondary.PrimaryAddress is null ? null : [secondary.PrimaryAddress],
+                                secondary.IgnoreCertificateErrors, expectedDomain: secondary.Domain);
                         else if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);

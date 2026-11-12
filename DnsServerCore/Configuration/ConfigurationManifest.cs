@@ -61,7 +61,7 @@ namespace DnsServerCore.Configuration
             }
 
             ConfigurationPlan.CheckApplySupport(manifest);
-            manifest.ValidateReferences();
+            manifest.ValidateReferences(manifest.Settings, "", deferClusterJoinSecrets: true);
             return manifest;
         }
 
@@ -453,8 +453,11 @@ namespace DnsServerCore.Configuration
             ValidateReferences(Settings, "");
         }
 
-        private void ValidateReferences(JsonElement element, string path)
+        private void ValidateReferences(JsonElement element, string path, bool deferClusterJoinSecrets = false)
         {
+            if (deferClusterJoinSecrets && path is "/cluster/bootstrap/password" or "/cluster/bootstrap/totp")
+                return;
+
             if (element.ValueKind == JsonValueKind.Object)
             {
                 if (IsReferencePath(path) && (element.TryGetProperty("environment", out _) || element.TryGetProperty("file", out _)))
@@ -469,13 +472,13 @@ namespace DnsServerCore.Configuration
                 }
 
                 foreach (JsonProperty property in element.EnumerateObject())
-                    ValidateReferences(property.Value, AppendPath(path, property.Name));
+                    ValidateReferences(property.Value, AppendPath(path, property.Name), deferClusterJoinSecrets);
             }
             else if (element.ValueKind == JsonValueKind.Array)
             {
                 int index = 0;
                 foreach (JsonElement item in element.EnumerateArray())
-                    ValidateReferences(item, path + "/" + index++);
+                    ValidateReferences(item, path + "/" + index++, deferClusterJoinSecrets);
             }
         }
 

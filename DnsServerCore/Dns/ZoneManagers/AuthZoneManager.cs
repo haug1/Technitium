@@ -323,12 +323,15 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        internal void FlushClusterBootstrapZones(string domain, string catalog)
+        internal void FlushZoneSaves(params string[] names)
         {
             lock (_saveLock)
             {
-                SaveZoneFileInternal(domain);
-                SaveZoneFileInternal(catalog);
+                foreach (string name in names)
+                {
+                    SaveZoneFileInternal(name);
+                    _pendingSaveZones.Remove(name);
+                }
             }
         }
 

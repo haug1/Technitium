@@ -23,13 +23,13 @@ namespace DnsServerCore.Tests
 
         public HttpClient Client { get; private set; } = null!;
         public string ConfigurationDirectory => _configuration.FullName;
-        public string AdminPassword { get; } = Guid.NewGuid().ToString("N");
+        public string AdminPassword { get; private init; } = null!;
         public string AdminToken { get; private set; } = null!;
         private IPEndPoint DnsEndPoint { get; set; } = null!;
 
-        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false, string? startupManifest = null, bool seedDnsConfiguration = true)
+        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false, string? startupManifest = null, bool seedDnsConfiguration = true, string? adminPassword = null)
         {
-            var server = new LoopbackWebService();
+            var server = new LoopbackWebService { AdminPassword = adminPassword ?? Guid.NewGuid().ToString("N") };
             try
             {
                 server.DnsEndPoint = LoopbackDnsServer.GetLoopbackEndPoint();

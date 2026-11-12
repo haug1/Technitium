@@ -92,6 +92,82 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupJoinChecksPrimaryDomainAndKeepsMembershipWithoutTheJoinSecret()
+        {
+            await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
+            await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true, adminPassword: primary.AdminPassword);
+            LoopbackWebService.AssertOk(await primary.CallAsync("settings/set?defaultRecordTtl=180", primary.AdminToken));
+            JsonElement initialized = await primary.CallAsync(
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", primary.AdminToken);
+            LoopbackWebService.AssertOk(initialized);
+            string primaryUrl = Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray())
+                .GetProperty("url").GetString()!;
+            string manifestFile = Path.Combine(secondary.ConfigurationDirectory, "technitium.json");
+            string passwordFile = Path.Combine(secondary.ConfigurationDirectory, "join-password");
+
+            InvalidDataException rejected = await Assert.ThrowsAsync<InvalidDataException>(() => secondary.RestartAsync(null, () =>
+            {
+                File.WriteAllText(passwordFile, primary.AdminPassword);
+                WriteManifest("wrong.test");
+            }));
+            Assert.Contains("/cluster/domain", rejected.Message);
+            Assert.False(File.Exists(Path.Combine(secondary.ConfigurationDirectory, "cluster.config")));
+            JsonElement primaryState = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            LoopbackWebService.AssertOk(primaryState);
+            Assert.Single(primaryState.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
+
+            string blockedFile = Path.Combine(secondary.ConfigurationDirectory, "cluster.tmp");
+            Exception failure = await Assert.ThrowsAnyAsync<Exception>(() => secondary.RestartAsync(null, () =>
+            {
+                WriteManifest("cluster.test");
+                Directory.CreateDirectory(blockedFile);
+            }));
+            Assert.True(failure is IOException or UnauthorizedAccessException, failure.ToString());
+            Assert.False(File.Exists(Path.Combine(secondary.ConfigurationDirectory, "cluster.config")));
+            primaryState = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            LoopbackWebService.AssertOk(primaryState);
+            Assert.Single(primaryState.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
+
+            await secondary.RestartAsync(null, () => Directory.Delete(blockedFile));
+            int joinedId = await GetSecondaryIdAsync();
+            Assert.Equal(180, (await secondary.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+
+            await secondary.RestartAsync(null, () => File.Delete(passwordFile));
+            Assert.Equal(joinedId, await GetSecondaryIdAsync());
+
+            void WriteManifest(string domain)
+            {
+                string declaration = JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    cluster = new
+                    {
+                        domain,
+                        bootstrap = new
+                        {
+                            role = "Secondary", primaryUrl, primaryAddress = "127.0.0.1", username = "admin",
+                            password = new { file = "join-password" }, ignoreCertificateErrors = true
+                        },
+                        node = new { addresses = new[] { "127.0.0.1" } }
+                    }
+                });
+                File.WriteAllText(manifestFile, declaration);
+            }
+
+            async Task<int> GetSecondaryIdAsync()
+            {
+                JsonElement state = await secondary.CallAsync("admin/cluster/state", secondary.AdminToken);
+                LoopbackWebService.AssertOk(state);
+                foreach (JsonElement node in state.GetProperty("response").GetProperty("clusterNodes").EnumerateArray())
+                {
+                    if (node.GetProperty("state").ValueEquals("Self") && node.GetProperty("type").ValueEquals("Secondary"))
+                        return node.GetProperty("id").GetInt32();
+                }
+                throw new InvalidDataException("The local Secondary was not present in cluster state.");
+            }
+        }
+
+        [Fact]
         public async Task JoiningSecondaryReceivesDnsSettingsAndKeepsItsLocalWebConfiguration()
         {
             await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);

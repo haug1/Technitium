@@ -7678,7 +7678,7 @@ WHERE:
 
 Cluster state includes `managedOptionPaths` for the local node. An options request that changes a manifest-managed interval is rejected before any interval changes. Release manifest ownership before deleting the cluster or restoring its configuration from backup.
 
-Configuration preview and apply accept `cluster.domain`, `cluster.bootstrap.role`, and `cluster.node.addresses` as assertions on an initialized node. The API rejects a conflicting assertion before changing cluster settings.
+Configuration preview and apply accept `cluster.domain`, `cluster.bootstrap.role`, and `cluster.node.addresses` as assertions on an initialized node. The API rejects a conflicting assertion before changing cluster settings. Secondary join credentials in a manifest are used only during startup bootstrap.
 
 RESPONSE:
 ```

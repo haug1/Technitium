@@ -1,0 +1,17 @@
+{
+  "$schema": "../technitium.schema.json",
+  "schemaVersion": 1,
+  "cluster": {
+    "domain": "cluster.example.test",
+    "bootstrap": {
+      "role": "Secondary",
+      "primaryUrl": "https://primary.cluster.example.test:53443/",
+      "primaryAddress": "192.0.2.10",
+      "username": "admin",
+      "password": { "environment": "TECHNITIUM_CLUSTER_JOIN_PASSWORD" }
+    },
+    "node": {
+      "addresses": ["192.0.2.11"]
+    }
+  }
+}

@@ -693,7 +693,7 @@ namespace DnsServerCore.Cluster
                 try
                 {
                     InitializeCluster(bootstrap.Domain, bootstrap.Addresses, admin, IPAddress.Loopback, null, bootstrap.Options);
-                    zones.FlushClusterBootstrapZones(bootstrap.Domain, catalog);
+                    zones.FlushZoneSaves(bootstrap.Domain, catalog);
                     WriteManifestOwnership(bootstrap.Ownership);
                 }
                 finally
@@ -1426,7 +1426,7 @@ namespace DnsServerCore.Cluster
 
         #region secondary node
 
-        public async Task InitializeAndJoinClusterAsync(IReadOnlyList<IPAddress> secondaryNodeIpAddresses, Uri primaryNodeUrl, string primaryNodeUsername, string primaryNodePassword, string primaryNodeTotp = null, IReadOnlyList<IPAddress> primaryNodeIpAddresses = null, bool ignoreCertificateErrors = false, CancellationToken cancellationToken = default)
+        public async Task InitializeAndJoinClusterAsync(IReadOnlyList<IPAddress> secondaryNodeIpAddresses, Uri primaryNodeUrl, string primaryNodeUsername, string primaryNodePassword, string primaryNodeTotp = null, IReadOnlyList<IPAddress> primaryNodeIpAddresses = null, bool ignoreCertificateErrors = false, CancellationToken cancellationToken = default, string expectedDomain = null)
         {
             if (ClusterInitialized)
                 throw new DnsServerException("Failed to join Cluster: the Cluster is already initialized.");
@@ -1473,6 +1473,11 @@ namespace DnsServerCore.Cluster
                 //do validations
                 if (!primaryNodeClusterInfo.ClusterInitialized)
                     throw new DnsServerException("Failed to join Cluster: the Primary node does not have a Cluster initialized.");
+
+                if (expectedDomain is not null &&
+                    (!expectedDomain.Equals(primaryNodeClusterInfo.ClusterDomain, StringComparison.OrdinalIgnoreCase) ||
+                     !primaryNodeClusterInfo.ClusterNodes.Any(node => node.Type == "Primary" && node.State == "Self")))
+                    throw new InvalidDataException("/cluster/domain: The supplied endpoint is not the Primary of the declared cluster.");
 
                 string clusterCatalogDomain = "cluster-catalog." + primaryNodeClusterInfo.ClusterDomain;
 
@@ -1538,15 +1543,25 @@ namespace DnsServerCore.Cluster
                     //set cluster secondary catalog zone permissions
                     _dnsWebService.AuthManager.SetPermission(PermissionSection.Zones, clusterSecondaryCatalogZoneInfo.Name, _dnsWebService.AuthManager.GetGroup(Group.ADMINISTRATORS), PermissionFlag.ViewModifyDelete);
                     _dnsWebService.AuthManager.SetPermission(PermissionSection.Zones, clusterSecondaryCatalogZoneInfo.Name, _dnsWebService.AuthManager.GetGroup(Group.DNS_ADMINISTRATORS), PermissionFlag.View);
+
+                    _dnsWebService.DnsServer.ServerDomain = selfSecondaryNode.Name;
+                    bool immediately = expectedDomain is not null;
+                    if (immediately)
+                        _dnsWebService.DnsServer.AuthZoneManager.FlushZoneSaves(clusterCatalogDomain);
+                    _dnsWebService.DnsServer.SaveConfigFile(immediately);
+                    _dnsWebService.AuthManager.SaveConfigFile(immediately);
+                    SaveConfigFile(immediately);
                 }
                 catch
                 {
                     try
                     {
-                        await primaryNodeApiClient.DeleteSecondaryNodeAsync(selfSecondaryNode.Id, cancellationToken);
+                        await primaryNodeApiClient.DeleteSecondaryNodeAsync(selfSecondaryNode.Id, CancellationToken.None);
                     }
-                    catch
-                    { }
+                    catch (Exception ex)
+                    {
+                        _dnsWebService.LogManager.Write("Failed to remove the incomplete Secondary registration from the Primary.", ex);
+                    }
 
                     try
                     {
@@ -1566,13 +1581,6 @@ namespace DnsServerCore.Cluster
                 //start config refresh timer to refresh as per config refresh interval as config was just synced
                 UpdateConfigRefreshTimer(_configRefreshIntervalSeconds * 1000);
 
-                //finalize
-                _dnsWebService.DnsServer.ServerDomain = selfSecondaryNode.Name;
-
-                //save all changes
-                _dnsWebService.DnsServer.SaveConfigFile();
-                _dnsWebService.AuthManager.SaveConfigFile();
-                SaveConfigFile();
             }
             finally
             {

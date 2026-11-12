@@ -34,8 +34,9 @@ namespace DnsServerCore.Configuration
                 {
                     foreach (JsonProperty input in field.Value.EnumerateObject())
                     {
-                        if (input.Name != "role")
-                            throw new InvalidDataException($"{Path}/bootstrap/{input.Name}: Cluster join from a manifest is not implemented.");
+                        if (input.Name != "role" &&
+                            (!field.Value.TryGetProperty("role", out JsonElement role) || role.GetString() != "Secondary"))
+                            throw new InvalidDataException($"{Path}/bootstrap/{input.Name}: Join inputs require the Secondary role.");
                     }
                 }
                 else if (field.Name is not ("domain" or "node") && !IsInterval(field.Name))
@@ -45,28 +46,59 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal sealed record PrimaryBootstrap(string Domain, IPAddress[] Addresses, Settings Options, string[] Ownership);
+        internal abstract record Bootstrap(string Domain, IPAddress[] Addresses);
+        internal sealed record PrimaryBootstrap(string Domain, IPAddress[] Addresses, Settings Options, string[] Ownership) : Bootstrap(Domain, Addresses);
+        internal sealed record SecondaryBootstrap(string Domain, IPAddress[] Addresses, Uri PrimaryUrl, IPAddress PrimaryAddress,
+            string Username, string Password, string Totp, bool IgnoreCertificateErrors) : Bootstrap(Domain, Addresses)
+        {
+            public override string ToString() => nameof(SecondaryBootstrap);
+        }
 
-        internal static PrimaryBootstrap PrepareStartupBootstrap(ConfigurationManifest manifest, ClusterManager cluster, Auth.User admin)
+        internal static Bootstrap PrepareStartupBootstrap(ConfigurationManifest manifest, ClusterManager cluster, Auth.User admin)
         {
             if (cluster.ClusterInitialized || !IsDeclared(manifest))
                 return null;
 
             JsonElement section = manifest.Settings.GetProperty("cluster");
             if (!section.TryGetProperty("bootstrap", out JsonElement bootstrap) ||
-                !bootstrap.TryGetProperty("role", out JsonElement role) || role.GetString() != "Primary")
+                !bootstrap.TryGetProperty("role", out JsonElement role) || role.ValueKind == JsonValueKind.Null)
                 return null;
 
             if (manifest.Settings.EnumerateObject().Any(field => field.Name is not ("schemaVersion" or "$schema" or "cluster")))
-                throw new InvalidDataException("/cluster/bootstrap: Initialize the Primary in a cluster-only startup manifest before applying other settings.");
+                throw new InvalidDataException("/cluster/bootstrap: Bootstrap the node in a cluster-only startup manifest before applying other settings.");
 
             string domain = section.TryGetProperty("domain", out JsonElement declaredDomain) ? declaredDomain.GetString() : null;
             if (string.IsNullOrWhiteSpace(domain))
-                throw new InvalidDataException("/cluster/domain: A domain is required to initialize a Primary.");
+                throw new InvalidDataException("/cluster/domain: A domain is required to bootstrap a node.");
 
             IPAddress[] addresses = ReadAddresses(section);
             if (addresses is null || addresses.Length == 0)
-                throw new InvalidDataException("/cluster/node/addresses: Advertised addresses are required to initialize a Primary.");
+                throw new InvalidDataException("/cluster/node/addresses: Advertised addresses are required to bootstrap a node.");
+
+            if (role.GetString() == "Secondary")
+            {
+                if (GetDeclaredIntervals(section).Length != 0)
+                    throw new InvalidDataException("/cluster: Only the Primary can declare cluster intervals.");
+
+                domain = ConfigurationManifest.CanonicalDnsName(domain, "/cluster/domain", allowRoot: false);
+                if (!Uri.TryCreate(ReadText("primaryUrl"), UriKind.Absolute, out Uri url) ||
+                    url.Scheme != Uri.UriSchemeHttps || url.HostNameType != UriHostNameType.Dns ||
+                    url.UserInfo.Length != 0 || url.Query.Length != 0 || url.Fragment.Length != 0 || url.AbsolutePath != "/")
+                    throw new InvalidDataException("/cluster/bootstrap/primaryUrl: Supply an HTTPS origin with a DNS hostname.");
+
+                string username = ReadText("username");
+                if (string.IsNullOrWhiteSpace(username))
+                    throw new InvalidDataException("/cluster/bootstrap/username: A Primary account name is required.");
+                string password = ResolveSecret("password");
+                if (password is null)
+                    throw new InvalidDataException("/cluster/bootstrap/password: A password reference is required.");
+
+                string address = ReadText("primaryAddress");
+                bool ignoreCertificateErrors = bootstrap.TryGetProperty("ignoreCertificateErrors", out JsonElement ignore) &&
+                    ignore.ValueKind == JsonValueKind.True;
+                return new SecondaryBootstrap(domain, addresses, url, address is null ? null : IPAddress.Parse(address),
+                    username, password, ResolveSecret("totp"), ignoreCertificateErrors);
+            }
 
             if (admin is null || admin.Disabled)
                 throw new InvalidDataException("/cluster/bootstrap: An enabled local administrator is required.");
@@ -74,6 +106,10 @@ namespace DnsServerCore.Configuration
             domain = cluster.PreparePrimaryInitialization(domain, addresses, admin);
             Settings options = ReadOptions(section, ClusterManager.DefaultManifestOptions);
             return new PrimaryBootstrap(domain, addresses, options, GetDeclaredIntervals(section));
+
+            string ReadText(string field) => bootstrap.TryGetProperty(field, out JsonElement value) ? value.GetString() : null;
+            string ResolveSecret(string field) => bootstrap.TryGetProperty(field, out JsonElement reference) && reference.ValueKind != JsonValueKind.Null
+                ? manifest.ResolveReference(reference, $"{Path}/bootstrap/{field}") : null;
         }
 
         private static IPAddress[] ReadAddresses(JsonElement section)
