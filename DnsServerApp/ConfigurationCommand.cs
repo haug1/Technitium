@@ -33,8 +33,10 @@ namespace DnsServerApp
 
                     case "apply" when args.Length == 5:
                         await ApplyAsync(LoadManifest(args[2]), ParseServerUrl(args[3]), args[4]);
-                        Console.WriteLine("Configuration applied.");
                         return 0;
+
+                    case "status" when args.Length == 4:
+                        return await ReadApplyStatusAsync(ParseServerUrl(args[2]), args[3]);
 
                     case "export" when args.Length == 3 || (args.Length == 4 && args[3] == "--include-preview-only"):
                         bool includePreviewOnly = args.Length == 4;
@@ -52,6 +54,7 @@ namespace DnsServerApp
                         Console.Error.WriteLine("Usage: DnsServerApp config validate [manifest]");
                         Console.Error.WriteLine("       DnsServerApp config plan <manifest> <server-url>");
                         Console.Error.WriteLine("       DnsServerApp config apply <manifest> <server-url> <revision>");
+                        Console.Error.WriteLine("       DnsServerApp config status <server-url> <operation-id>");
                         Console.Error.WriteLine("       DnsServerApp config export <server-url> [--include-preview-only]");
                         return 2;
                 }
@@ -121,7 +124,32 @@ namespace DnsServerApp
                 throw new InvalidDataException("Supply the revision printed by config plan.");
 
             using var content = new StringContent(manifest.Settings.GetRawText(), Encoding.UTF8, "application/json");
-            await ReadServerResponseAsync(serverUrl, "/api/settings/config/apply", content, revision.ToUpperInvariant());
+            JsonElement response = await ReadServerResponseAsync(serverUrl, "/api/settings/config/apply", content, revision.ToUpperInvariant());
+            if (response.TryGetProperty("operationId", out JsonElement id))
+            {
+                Console.WriteLine($"Configuration apply is pending. Operation {id.GetString()}");
+                Console.WriteLine("Use config status with the server origin and operation ID to check the result.");
+            }
+            else
+            {
+                Console.WriteLine("Configuration applied.");
+            }
+        }
+
+        private static async Task<int> ReadApplyStatusAsync(Uri serverUrl, string operationId)
+        {
+            if (!Guid.TryParseExact(operationId, "N", out Guid id))
+                throw new InvalidDataException("Supply the operation ID printed by config apply.");
+
+            JsonElement result = await ReadServerResponseAsync(serverUrl, "/api/settings/config/status?operationId=" + id.ToString("N"));
+            string? state = result.GetProperty("state").GetString();
+            if (state == "failed")
+            {
+                Console.Error.WriteLine(result.GetProperty("message").GetString());
+                return 1;
+            }
+            Console.WriteLine(state == "applied" ? "Configuration applied." : "Configuration apply is pending.");
+            return 0;
         }
 
         private static async Task<JsonElement> ReadServerResponseAsync(Uri serverUrl, string apiPath, HttpContent? content = null, string? revision = null)

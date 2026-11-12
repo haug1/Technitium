@@ -174,6 +174,7 @@ namespace DnsServerCore
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
+        bool _manifestWebRestart;
         readonly Timer _saveTimer;
         const int SAVE_TIMER_INITIAL_INTERVAL = 5000;
 
@@ -217,7 +218,7 @@ namespace DnsServerCore
             {
                 lock (_saveLock)
                 {
-                    if (_pendingSave)
+                    if (_pendingSave && !_manifestWebRestart)
                     {
                         try
                         {
@@ -250,7 +251,7 @@ namespace DnsServerCore
             {
                 _saveTimer?.Dispose();
 
-                if (_pendingSave)
+                if (_pendingSave && !_manifestWebRestart)
                 {
                     try
                     {
@@ -1611,8 +1612,11 @@ namespace DnsServerCore
 
                         try
                         {
-                            await StopWebServiceAsync();
-                            await TryStartWebServiceAsync(oldWebServiceLocalAddresses, oldWebServiceHttpPort, oldWebServiceTlsPort);
+                            await _settingsApi.WithConfigurationLockAsync(async () =>
+                            {
+                                await StopWebServiceAsync();
+                                await TryStartWebServiceAsync(oldWebServiceLocalAddresses, oldWebServiceHttpPort, oldWebServiceTlsPort);
+                            });
 
                             _log.Write("Web service was restarted successfully.");
                         }
@@ -2223,6 +2227,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/settings/get", _settingsApi.GetDnsSettings);
             _webService.MapPost("/api/settings/config/plan", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.PreviewConfigurationAsync));
             _webService.MapPost("/api/settings/config/apply", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.ApplyConfigurationAsync));
+            _webService.MapGet("/api/settings/config/status", _settingsApi.GetConfigurationApplyStatus);
             _webService.MapGetAndPost("/api/settings/set", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.SetDnsSettingsAsync));
             _webService.MapGetAndPost("/api/settings/getTsigKeyNames", _settingsApi.GetTsigKeyNames);
             _webService.MapGetAndPost("/api/settings/forceUpdateBlockLists", _settingsApi.ForceUpdateBlockLists);
@@ -2875,6 +2880,59 @@ namespace DnsServerCore
                 DnsServer.ValidateQuicSupport("HTTP/3");
         }
 
+        private WebListeners CaptureWebListeners()
+        {
+            return new WebListeners(_webServiceLocalAddresses, _webServiceHttpPort, _webServiceTlsPort,
+                _webServiceEnableTls, _webServiceEnableHttp3, _webServiceHttpToTlsRedirect);
+        }
+
+        private bool WebListenersChange(WebListeners listeners)
+        {
+            return (listeners.Addresses is not null && !_webServiceLocalAddresses.HasSameItems(listeners.Addresses)) ||
+                (listeners.HttpPort.HasValue && listeners.HttpPort != _webServiceHttpPort) ||
+                (listeners.TlsPort.HasValue && listeners.TlsPort != _webServiceTlsPort) ||
+                (listeners.TlsEnabled.HasValue && listeners.TlsEnabled != _webServiceEnableTls) ||
+                (listeners.Http3Enabled.HasValue && listeners.Http3Enabled != _webServiceEnableHttp3) ||
+                (listeners.RedirectToTls.HasValue && listeners.RedirectToTls != _webServiceHttpToTlsRedirect);
+        }
+
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners)
+        {
+            WebListeners previous = CaptureWebListeners();
+            SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
+            lock (_saveLock)
+                _manifestWebRestart = true;
+
+            try
+            {
+                await StopWebServiceAsync();
+                StageWebListeners(listeners);
+                if (previous.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
+                    ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
+                await StartWebServiceAsync(false);
+                bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
+                await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), listeners: listeners,
+                    listenersChanged: true, webAddressesChanged: addressesChanged);
+            }
+            catch
+            {
+                await StopWebServiceAsync();
+                StageWebListeners(previous);
+                _webServiceSslServerAuthenticationOptions = previousTlsOptions;
+                await StartWebServiceAsync(false);
+                throw;
+            }
+            finally
+            {
+                lock (_saveLock)
+                {
+                    _manifestWebRestart = false;
+                    if (_pendingSave)
+                        _saveTimer.Change(SAVE_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
+                }
+            }
+        }
+
         private bool StageWebListeners(WebListeners listeners)
         {
             bool changed = false;
@@ -3196,8 +3254,7 @@ namespace DnsServerCore
                 }
 
                 WebListeners listeners = ConfigurationPlan.GetWebListeners(startupManifest);
-                var previousWebListeners = new WebListeners(_webServiceLocalAddresses, _webServiceHttpPort, _webServiceTlsPort,
-                    _webServiceEnableTls, _webServiceEnableHttp3, _webServiceHttpToTlsRedirect);
+                WebListeners previousWebListeners = CaptureWebListeners();
                 SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
                 try
                 {

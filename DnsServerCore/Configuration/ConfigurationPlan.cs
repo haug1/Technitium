@@ -26,7 +26,7 @@ namespace DnsServerCore.Configuration
     public static class ConfigurationPlan
     {
         private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService,
-            Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false, bool CanApplyAtStartup = false);
+            Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false);
 
         private const string BlockListSourcesPath = "/blocklists/sources";
         private const string ServerDomainPath = "/dns/serverDomain";
@@ -54,12 +54,12 @@ namespace DnsServerCore.Configuration
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232, canApply: true),
-            [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true, canApplyAtStartup: true),
-            ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true, canApplyAtStartup: true),
-            ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true, canApplyAtStartup: true),
-            ["/web/tlsEnabled"] = Field("webServiceEnableTls", false, restartWebService: true, canApplyAtStartup: true),
-            ["/web/http3Enabled"] = Field("webServiceEnableHttp3", false, restartWebService: true, canApplyAtStartup: true),
-            ["/web/redirectHttpToTls"] = Field("webServiceHttpToTlsRedirect", false, restartWebService: true, canApplyAtStartup: true),
+            [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true, canApply: true),
+            ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true, canApply: true),
+            ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true, canApply: true),
+            ["/web/tlsEnabled"] = Field("webServiceEnableTls", false, restartWebService: true, canApply: true),
+            ["/web/http3Enabled"] = Field("webServiceEnableHttp3", false, restartWebService: true, canApply: true),
+            ["/web/redirectHttpToTls"] = Field("webServiceHttpToTlsRedirect", false, restartWebService: true, canApply: true),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
@@ -127,7 +127,7 @@ namespace DnsServerCore.Configuration
 
         internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive)
         {
-            CheckApplySupport(manifest, startup: alreadyActive);
+            CheckApplySupport(manifest);
 
             manifest.Settings.TryGetProperty("logging", out JsonElement logging);
             JsonElement? destination = GetLoggingValue(logging, "destination");
@@ -257,37 +257,30 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }
 
-        internal static void CheckApplySupport(ConfigurationManifest manifest, bool startup = false)
+        internal static void CheckApplySupport(ConfigurationManifest manifest)
         {
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
             {
                 if (section.Name is "schemaVersion" or "$schema")
                     continue;
-                CheckApplySupport(section.Value, AppendPath("", section.Name), startup);
+                CheckApplySupport(section.Value, AppendPath("", section.Name));
             }
         }
 
-        private static void CheckApplySupport(JsonElement value, string path, bool startup)
+        private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (_settings.TryGetValue(path, out Setting setting) && SupportsApply(setting, startup))
+            if (_settings.TryGetValue(path, out Setting setting) && setting.CanApply)
                 return;
 
             if ((value.ValueKind == JsonValueKind.Object) &&
-                _settings.Any(entry => SupportsApply(entry.Value, startup) && entry.Key.StartsWith(path + "/", StringComparison.Ordinal)))
+                _settings.Any(entry => entry.Value.CanApply && entry.Key.StartsWith(path + "/", StringComparison.Ordinal)))
             {
                 foreach (JsonProperty field in value.EnumerateObject())
-                    CheckApplySupport(field.Value, AppendPath(path, field.Name), startup);
+                    CheckApplySupport(field.Value, AppendPath(path, field.Name));
                 return;
             }
 
-            if (_settings.TryGetValue(path, out setting) && setting.CanApplyAtStartup)
-                throw new InvalidDataException($"{path}: This setting can currently be applied only at startup.");
             throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Applying this setting is not implemented.");
-        }
-
-        private static bool SupportsApply(Setting setting, bool startup)
-        {
-            return setting.CanApply || (startup && setting.CanApplyAtStartup);
         }
 
         internal static DnsWebService.WebListeners GetWebListeners(ConfigurationManifest manifest)
@@ -524,9 +517,9 @@ namespace DnsServerCore.Configuration
             return JsonSerializer.SerializeToElement(sources.Count == 0 ? null : sources);
         }
 
-        private static Setting Field<T>(string apiField, T defaultValue, bool restartWebService = false, bool canApply = false, bool canApplyAtStartup = false)
+        private static Setting Field<T>(string apiField, T defaultValue, bool restartWebService = false, bool canApply = false)
         {
-            return new Setting(apiField, JsonSerializer.SerializeToElement(defaultValue), restartWebService, CanApply: canApply, CanApplyAtStartup: canApplyAtStartup);
+            return new Setting(apiField, JsonSerializer.SerializeToElement(defaultValue), restartWebService, CanApply: canApply);
         }
 
         private static string AppendPath(string path, string name)

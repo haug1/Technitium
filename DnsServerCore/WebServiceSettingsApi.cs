@@ -54,6 +54,15 @@ namespace DnsServerCore
 
             readonly DnsWebService _dnsWebService;
             readonly byte[] _configurationRevisionKey = RandomNumberGenerator.GetBytes(32);
+            private sealed class WebApplyOperation
+            {
+                internal readonly Guid Id = Guid.NewGuid();
+                internal volatile string State = "pending";
+                internal string Error;
+            }
+
+            private volatile WebApplyOperation _lastWebApply;
+            private readonly Lock _webApplyGate = new();
             readonly SemaphoreSlim _configurationLock = new(1, 1);
 
             #endregion
@@ -571,13 +580,28 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
-                    using JsonDocument current = CaptureConfigurationSnapshot();
-                    string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
-                    if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
-                        throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
-
+                    CheckApplyRevision(manifest, expected);
+                    ConfigurationPlan.CheckApplySupport(manifest);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                    await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints());
+                    WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
+                    _dnsWebService.ValidateManifestWebListeners(listeners);
+
+                    if (_dnsWebService.WebListenersChange(listeners))
+                    {
+                        var operation = new WebApplyOperation();
+                        lock (_webApplyGate)
+                            _lastWebApply = operation;
+                        context.GetCurrentJsonWriter().WriteString("operationId", operation.Id.ToString("N"));
+                        context.Response.OnCompleted(() =>
+                        {
+                            _ = Task.Run(() => CompleteWebApplyAsync(manifest, listeners, expected, operation));
+                            return Task.CompletedTask;
+                        });
+                    }
+                    else
+                    {
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), listeners: listeners);
+                    }
                 }
                 catch (InvalidDataException ex)
                 {
@@ -593,9 +617,79 @@ namespace DnsServerCore
                 }
             }
 
-            public Task WithConfigurationLockAsync(HttpContext context, Func<HttpContext, Task> action)
+            private void CheckApplyRevision(ConfigurationManifest manifest, string expected)
             {
-                return WithConfigurationLockAsync(() => action(context), context.RequestAborted);
+                using JsonDocument current = CaptureConfigurationSnapshot();
+                string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
+                if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
+                    throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+            }
+
+            private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation)
+            {
+                try
+                {
+                    await WithConfigurationLockAsync(async () =>
+                    {
+                        CheckApplyRevision(manifest, expected);
+                        ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
+                        _dnsWebService.ValidateManifestWebListeners(listeners);
+                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners);
+                    });
+                    operation.State = "applied";
+                }
+                catch (Exception ex)
+                {
+                    operation.Error = ex is InvalidDataException or DnsWebServiceException
+                        ? ex.Message : "Could not bind the web listeners or persist the configuration settings.";
+                    _dnsWebService._log.Write("Manifest web listener apply failed.", ex);
+                    operation.State = "failed";
+                }
+            }
+
+            public void GetConfigurationApplyStatus(HttpContext context)
+            {
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                WebApplyOperation operation = _lastWebApply;
+                if (operation is null || !Guid.TryParseExact(context.Request.QueryOrForm("operationId"), "N", out Guid id) || operation.Id != id)
+                    throw new DnsWebServiceException("Configuration apply operation was not found.");
+
+                string state = operation.State;
+                Utf8JsonWriter writer = context.GetCurrentJsonWriter();
+                writer.WriteString("state", state);
+                if (state == "failed")
+                    writer.WriteString("message", operation.Error);
+            }
+
+            public async Task WithConfigurationLockAsync(HttpContext context, Func<HttpContext, Task> action)
+            {
+                Task waitForConfiguration;
+                lock (_webApplyGate)
+                {
+                    // Requests that arrive during a restart must not wait for the old web service to stop.
+                    RejectPendingWebApply();
+                    waitForConfiguration = _configurationLock.WaitAsync(context.RequestAborted);
+                }
+
+                await waitForConfiguration;
+                try
+                {
+                    RejectPendingWebApply();
+                    await action(context);
+                }
+                finally
+                {
+                    _configurationLock.Release();
+                }
+            }
+
+            private void RejectPendingWebApply()
+            {
+                if (_lastWebApply?.State == "pending")
+                    throw new DnsWebServiceException("A manifest web listener apply is in progress.");
             }
 
             internal async Task WithConfigurationLockAsync(Func<Task> action, CancellationToken cancellationToken = default)

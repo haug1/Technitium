@@ -786,6 +786,76 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LiveWebListenerApplyReportsBindFailureAndMovesTheConsoleOnSuccess()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            int originalPort = server.Client.BaseAddress!.Port;
+            using var occupied = new TcpListener(IPAddress.Loopback, 0);
+            occupied.Start();
+            int occupiedPort = ((IPEndPoint)occupied.LocalEndpoint).Port;
+            string manifest = ListenerChange(occupiedPort);
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            JsonElement queued = await ApplyAsync(server, manifest, revision);
+            LoopbackWebService.AssertOk(queued);
+            string id = queued.GetProperty("response").GetProperty("operationId").GetString()!;
+            Assert.Equal("failed", await WaitForWebApplyAsync(originalPort, server.AdminToken, id));
+
+            JsonElement previous = await server.GetSettingsAsync();
+            Assert.Equal(originalPort, previous.GetProperty("webServiceHttpPort").GetInt32());
+            Assert.Equal(365, previous.GetProperty("maxLogFileDays").GetInt32());
+
+            int candidatePort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+            manifest = ListenerChange(candidatePort);
+            revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            queued = await ApplyAsync(server, manifest, revision);
+            LoopbackWebService.AssertOk(queued);
+            id = queued.GetProperty("response").GetProperty("operationId").GetString()!;
+            Assert.Equal("applied", await WaitForWebApplyAsync(candidatePort, server.AdminToken, id));
+
+            await server.RestartAsync(candidatePort);
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(candidatePort, current.GetProperty("webServiceHttpPort").GetInt32());
+            Assert.Equal(180, current.GetProperty("maxLogFileDays").GetInt32());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            static string ListenerChange(int port) => JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                web = new { httpPort = port },
+                logging = new { retentionDays = 180 }
+            });
+        }
+
+        private static async Task<string> WaitForWebApplyAsync(int port, string token, string operationId)
+        {
+            using var client = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false })
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{port}"),
+                Timeout = TimeSpan.FromSeconds(2)
+            };
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                try
+                {
+                    using HttpResponseMessage response = await client.GetAsync("/api/settings/config/status?operationId=" + operationId);
+                    response.EnsureSuccessStatusCode();
+                    using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+                    LoopbackWebService.AssertOk(body.RootElement);
+                    string state = body.RootElement.GetProperty("response").GetProperty("state").GetString()!;
+                    if (state != "pending")
+                        return state;
+                }
+                catch (HttpRequestException)
+                {
+                    // The old and new listeners can both be unavailable briefly during restart.
+                }
+                await Task.Delay(100);
+            }
+            throw new TimeoutException("The web listener apply did not reach a terminal state.");
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -1084,20 +1154,25 @@ namespace DnsServerCore.Tests
         {
             IPEndPoint endpoint;
             string exported;
+            int httpPort;
             await using (var source = await LoopbackWebService.StartAsync())
             {
                 LoopbackWebService.AssertOk(await source.CallAsync(
                     "settings/set?maxLogFileDays=180&noStackTrace=true&useLocalTime=true&logFolder=archive", source.AdminToken));
                 JsonElement settings = await source.GetSettingsAsync();
+                httpPort = settings.GetProperty("webServiceHttpPort").GetInt32();
                 endpoint = IPEndPoint.Parse(settings.GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
                 exported = ConfigurationPlan.Export(settings, includePreviewOnly: false).ToJsonString();
             }
 
             await using var destination = await LoopbackWebService.StartAsync();
             string revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
-            LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, revision));
+            JsonElement queued = await ApplyAsync(destination, exported, revision);
+            LoopbackWebService.AssertOk(queued);
+            if (queued.GetProperty("response").TryGetProperty("operationId", out JsonElement operation))
+                Assert.Equal("applied", await WaitForWebApplyAsync(httpPort, destination.AdminToken, operation.GetString()!));
 
-            await destination.RestartAsync();
+            await destination.RestartAsync(httpPort);
             await AssertListenerAnswersAsync(endpoint);
             JsonElement applied = await destination.GetSettingsAsync();
             Assert.Equal(exported, ConfigurationPlan.Export(applied, includePreviewOnly: false).ToJsonString());
