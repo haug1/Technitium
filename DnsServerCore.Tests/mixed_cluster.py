@@ -123,6 +123,8 @@ def wait_for(check, description, timeout=45):
 def verify(current, previous, folder, propagation, graceful):
     ports = allocate_ports()
     password = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_TSIG_SECRET"] = base64.b64encode(secrets.token_bytes(32)).decode()
+    os.environ["TECHNITIUM_TEST_CLUSTER_TSIG_ROTATED_SECRET"] = base64.b64encode(secrets.token_bytes(32)).decode()
     os.environ["TECHNITIUM_TEST_CLUSTER_PROXY_PASSWORD"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_PROXY_ROTATED_PASSWORD"] = secrets.token_hex(16)
     primary = Node(current, folder / "primary", "primary.cluster.test", ports[:3], password)
@@ -149,6 +151,8 @@ def verify(current, previous, folder, propagation, graceful):
         proxy_revision = ok(primary.call("settings/config/plan", manifest=proxy_policy))["revision"]
         tuning_policy = {"schemaVersion": 1, "dns": {"tuning": {"tcpSendTimeoutMs": 12000}}}
         tuning_revision = ok(primary.call("settings/config/plan", manifest=tuning_policy))["revision"]
+        tsig_policy = {"schemaVersion": 1, "dns": {"tsigKeys": {"managed.fixture.net": None}}}
+        tsig_revision = ok(primary.call("settings/config/plan", manifest=tsig_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -161,12 +165,26 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeRateLimits"] is True
             assert joined["supportsDeclarativeProxy"] is True
             assert joined["supportsDeclarativeDnsTuning"] is True
+            assert joined["supportsDeclarativeTsig"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeDnsTuning"), joined
+        assert not joined.get("supportsDeclarativeTsig"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=tsig_policy),
+            primary.call("settings/config/apply", manifest=tsig_policy, revision=tsig_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative TSIG" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            assert "/dns/tsigKeys/managed.fixture.net" not in ok(node.call("settings/get"))["managedSettings"]
+        if joined.get("supportsDeclarativeDnsTuning"):
+            plan = ok(primary.call("settings/config/plan", manifest=tuning_policy))
+            ok(primary.call("settings/config/apply", manifest=tuning_policy, revision=plan["revision"]))
+            assert ok(primary.call("settings/get"))["tcpSendTimeout"] == 12000
+            print("Mixed-build check passed. Existing DNS tuning support allowed the update and rejected TSIG ownership.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=tuning_policy),
             primary.call("settings/config/apply", manifest=tuning_policy, revision=tuning_revision),
@@ -489,6 +507,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_dns_policy(primary, secondary, release, local_web)
     verify_proxy_policy(primary, secondary, release, local_web)
     verify_dns_tuning(primary, secondary, release, local_web)
+    verify_tsig_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -789,6 +808,70 @@ def verify_dns_tuning(primary, secondary, cluster_manifest, local_web):
     assert not apply(primary, desired)["changes"]
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(13000, 3200, set()), "the Secondary to release DNS tuning ownership")
+
+
+def verify_tsig_policy(primary, secondary, cluster_manifest, local_web):
+    first = "TECHNITIUM_TEST_CLUSTER_TSIG_SECRET"
+    rotated = "TECHNITIUM_TEST_CLUSTER_TSIG_ROTATED_SECRET"
+    name = "managed.fixture.net"
+    catalog_name = "cluster-catalog.cluster.test"
+    path = f"/dns/tsigKeys/{name}"
+
+    def settings(node):
+        state = ok(node.call("settings/get"))
+        return {item["keyName"]: item for item in state["tsigKeys"]}, state["managedSettings"]
+
+    catalog = settings(primary)[0][catalog_name]
+
+    def manifest(keys):
+        return {**cluster_manifest, "dns": {"tsigKeys": keys}}
+
+    def apply(node, desired):
+        def preview():
+            result = node.call("settings/config/plan", manifest=desired)
+            if result["status"] == "error" and "has not advertised support for declarative TSIG" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm declarative TSIG support")
+        assert all(os.environ[var] not in json.dumps(plan) for var in (first, rotated))
+        ok(node.call("settings/config/apply", manifest=desired, revision=plan["revision"]))
+        return plan
+
+    def matches(reference, owned_path):
+        keys, managed = settings(secondary)
+        assert keys.get(catalog_name) == catalog
+        key_matches = name not in keys if reference is None else keys.get(name, {}).get("sharedSecret") == os.environ[reference]
+        return key_matches and {entry for entry in managed if entry.startswith("/dns/tsigKeys")} == owned_path
+
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "dns": {"tsigKeys": {name: None}}})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+    protected = primary.call("settings/config/plan", manifest=manifest({catalog_name: None}))
+    assert protected["status"] == "error" and "cluster catalog" in protected["errorMessage"], protected
+    policy = {name: {"algorithm": "hmac-sha256", "secret": {"environment": first}}}
+    apply(primary, manifest(policy))
+    wait_for(lambda: matches(first, {path}), "the Secondary to inherit the TSIG key and ownership")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(first, {path})
+    apply(secondary, local_web)
+    assert matches(first, {path})
+
+    legacy = "|".join(catalog[field] for field in ("keyName", "sharedSecret", "algorithmName"))
+    denied = secondary.call("settings/set", form={"tsigKeys": legacy})
+    assert denied["status"] == "error" and path in denied["errorMessage"], denied
+    exported = ok(secondary.call("settings/config/export"))
+    assert path + "/secret" in exported["missingInputs"]
+    assert os.environ[first] not in json.dumps(exported)
+    assert catalog_name not in exported["manifest"]["dns"]["tsigKeys"]
+
+    policy[name]["secret"]["environment"] = rotated
+    apply(primary, manifest(policy))
+    wait_for(lambda: matches(rotated, {path}), "the Secondary to receive the rotated TSIG key")
+    assert not apply(primary, manifest(policy))["changes"]
+    apply(primary, manifest(None))
+    wait_for(lambda: matches(None, {"/dns/tsigKeys"}), "the Secondary to clear operator keys and retain the catalog key")
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(None, set()), "the Secondary to release TSIG ownership")
 
 
 def assert_promoted_policy(state):

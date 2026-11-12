@@ -1112,12 +1112,19 @@ namespace DnsServerCore
                                 throw new DnsWebServiceException("Access was denied.");
 
                             if (_dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary)
-                                preparedProxy ??= ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
+                            {
+                                if (ConfigurationTsig.TryGetDeclaration(manifest, out _) &&
+                                    !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                                    throw new DnsWebServiceException("Access was denied.");
 
-                            if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager, preparedProxy) is { } dnsPolicy)
+                                preparedTsig ??= _dnsWebService.PrepareTsigKeys(manifest);
+                                preparedProxy ??= ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
+                            }
+
+                            if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager, preparedProxy, preparedTsig) is { } dnsPolicy)
                             {
                                 writer.WritePropertyName("dnsPolicyPeers");
-                                JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy, dnsPolicy.RequiresDnsTuning });
+                                JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy, dnsPolicy.RequiresDnsTuning, dnsPolicy.RequiresTsig });
                             }
                         }
                         if (ConfigurationPlan.CheckClusterDomainListSupport(manifest, _dnsWebService._clusterManager) is { } domainLists)

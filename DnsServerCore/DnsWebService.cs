@@ -3255,7 +3255,7 @@ namespace DnsServerCore
             bool secondary = clustered && _clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
             var blockLists = _dnsServer.BlockListZoneManager;
             var domainListChange = ConfigurationPlan.CheckClusterDomainListSupport(manifest, _clusterManager);
-            var dnsPolicyChange = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager, proxy);
+            var dnsPolicyChange = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager, proxy, tsig);
             var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
                 blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval);
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3295,7 +3295,7 @@ namespace DnsServerCore
                 } : null;
                 Action checkDnsPolicyPeers = dnsPolicyChange is { } dnsPolicy ? () =>
                 {
-                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy, dnsPolicy.RequiresDnsTuning).SequenceEqual(dnsPolicy.Peers))
+                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy, dnsPolicy.RequiresDnsTuning, dnsPolicy.RequiresTsig).SequenceEqual(dnsPolicy.Peers))
                         throw new InvalidDataException("/dns: Cluster membership changed during apply. Create a new preview.");
                 } : null;
                 var clusterFiles = new List<string>(2);

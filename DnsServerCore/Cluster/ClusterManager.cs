@@ -870,7 +870,7 @@ namespace DnsServerCore.Cluster
             return Convert.ToHexString(SHA256.HashData(payload));
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false, bool supportsDeclarativeProxy = false, bool supportsDeclarativeDnsTuning = false)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false, bool supportsDeclarativeProxy = false, bool supportsDeclarativeDnsTuning = false, bool supportsDeclarativeTsig = false)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
@@ -900,6 +900,9 @@ namespace DnsServerCore.Cluster
             if (_dnsWebService.DnsServer.HasManagedDnsTuning && !supportsDeclarativeDnsTuning)
                 throw new DnsServerException("/dns/tuning: The Secondary must support declarative DNS tuning before joining.");
 
+            if (_dnsWebService.DnsServer.HasManagedTsigKeys && !supportsDeclarativeTsig)
+                throw new DnsServerException("/dns/tsigKeys: The Secondary must support declarative TSIG before joining.");
+
             string secondaryNodeDomain = secondaryNodeUrl.Host.ToLowerInvariant();
 
             if (!secondaryNodeDomain.EndsWith("." + _clusterDomain, StringComparison.OrdinalIgnoreCase))
@@ -924,7 +927,8 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeResolverPolicy = supportsDeclarativeResolverPolicy,
                 SupportsDeclarativeRateLimits = supportsDeclarativeRateLimits,
                 SupportsDeclarativeProxy = supportsDeclarativeProxy,
-                SupportsDeclarativeDnsTuning = supportsDeclarativeDnsTuning
+                SupportsDeclarativeDnsTuning = supportsDeclarativeDnsTuning,
+                SupportsDeclarativeTsig = supportsDeclarativeTsig
             };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
@@ -1287,11 +1291,13 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        internal int[] CheckDeclarativeDnsPolicyPeers(bool requiresResolverPolicy, bool requiresRateLimits, bool requiresProxy, bool requiresDnsTuning)
+        internal int[] CheckDeclarativeDnsPolicyPeers(bool requiresResolverPolicy, bool requiresRateLimits, bool requiresProxy, bool requiresDnsTuning, bool requiresTsig)
         {
             var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id).ToArray();
             foreach (ClusterNode peer in peers)
             {
+                if (requiresTsig && !peer.SupportsDeclarativeTsig)
+                    throw new InvalidDataException($"/dns/tsigKeys: Node '{peer.Name}' has not advertised support for declarative TSIG.");
                 if (requiresDnsTuning && !peer.SupportsDeclarativeDnsTuning)
                     throw new InvalidDataException($"/dns/tuning: Node '{peer.Name}' has not advertised support for declarative DNS tuning.");
                 if (requiresProxy && !peer.SupportsDeclarativeProxy)
@@ -1908,7 +1914,7 @@ namespace DnsServerCore.Cluster
 
                 //join cluster
                 primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
-                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, supportsDeclarativeProxy: true, supportsDeclarativeDnsTuning: true, cancellationToken);
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, supportsDeclarativeProxy: true, supportsDeclarativeDnsTuning: true, supportsDeclarativeTsig: true, cancellationToken);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);

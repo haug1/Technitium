@@ -239,7 +239,8 @@ namespace DnsServerCore.Dns
             BindingHttpsSocketEnabled = 1UL << 39,
             BindingHttpsSocketPath = 1UL << 40,
             DnsCertificatePath = 1UL << 41,
-            DnsCertificatePassword = 1UL << 42
+            DnsCertificatePassword = 1UL << 42,
+            TsigOwnershipFromPrimary = 1UL << 43
         }
 
         internal readonly record struct DnsBindings(
@@ -690,9 +691,25 @@ namespace DnsServerCore.Dns
         bool _manifestOwnsAllTsigKeys;
         internal bool HasManagedTsigKeys => _manifestOwnsAllTsigKeys || _managedTsigKeyNames?.Count > 0;
 
-        internal void CheckManagedTsigKeys(IReadOnlyDictionary<string, TsigKey> candidate)
+        private bool TsigOwnershipFromPrimary =>
+            _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TsigOwnershipFromPrimary);
+
+        internal bool ClusterTsigChanges(ConfigurationTsig.Candidate candidate) =>
+            TsigOwnershipFromPrimary || TsigOwnershipChanges(candidate) || TsigValuesChange(candidate);
+
+        private bool TsigOwnershipChanges(ConfigurationTsig.Candidate candidate) =>
+            candidate.OwnsAll != _manifestOwnsAllTsigKeys ||
+            (_managedTsigKeyNames is null ? candidate.OwnedNames?.Count > 0 :
+                !_managedTsigKeyNames.SetEquals(candidate.OwnedNames is null ? Array.Empty<string>() : candidate.OwnedNames));
+
+        private bool TsigValuesChange(ConfigurationTsig.Candidate candidate) =>
+            candidate.Keys is not null && (candidate.Keys.Count != (_tsigKeys?.Count ?? 0) ||
+                candidate.Keys.Any(entry => _tsigKeys is null || !_tsigKeys.TryGetValue(entry.Key, out TsigKey existing) ||
+                    !ConfigurationTsig.SameKey(existing, entry.Value)));
+
+        internal void CheckManagedTsigKeys(IReadOnlyDictionary<string, TsigKey> candidate, bool isConfigTransfer = false)
         {
-            if (!HasManagedTsigKeys)
+            if (!HasManagedTsigKeys || (isConfigTransfer && TsigOwnershipFromPrimary))
                 return;
 
             IEnumerable<string> names = _manifestOwnsAllTsigKeys
@@ -717,7 +734,7 @@ namespace DnsServerCore.Dns
             if (removed.Length == 0)
                 return;
             var declarations = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-            if (manifest.Settings.TryGetProperty("zones", out JsonElement declaredZones))
+            if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement declaredZones))
             {
                 foreach (JsonProperty declaration in declaredZones.EnumerateObject())
                 {
@@ -2750,7 +2767,6 @@ namespace DnsServerCore.Dns
             if (readTuning is not null)
             {
                 readTuning(CheckManifestDnsTuning(dnsTuning, validateRanges: false, isConfigTransfer: true));
-                return;
             }
             if (apply)
             {
@@ -2876,6 +2892,7 @@ namespace DnsServerCore.Dns
             }
 
             //tsig
+            IReadOnlyDictionary<string, TsigKey> transferredTsigKeys = null;
             {
                 int count = bR.ReadByte();
                 Dictionary<string, TsigKey> tsigKeys = new Dictionary<string, TsigKey>(count);
@@ -2890,7 +2907,9 @@ namespace DnsServerCore.Dns
                 }
 
                 if (!readOwnership)
-                    CheckManagedTsigKeys(tsigKeys);
+                    CheckManagedTsigKeys(tsigKeys, isConfigTransfer);
+                if (!apply && isConfigTransfer)
+                    transferredTsigKeys = tsigKeys;
                 if (apply)
                     _tsigKeys = tsigKeys;
             }
@@ -3124,47 +3143,69 @@ namespace DnsServerCore.Dns
             if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsStatisticsRetention))
                 _statsManager.MaxStatFileDays = maxStatFileDays;
 
-            if (!apply)
+            if (!apply && !isConfigTransfer)
             {
-                if (!isConfigTransfer)
-                {
-                    CheckManifestDnsLogging(new DnsLoggingSettings(ignoreResolverLogs, logQueries));
-                    CheckManifestStatistics(new StatisticsSettings(enableInMemoryStats, maxStatFileDays));
-                }
+                CheckManifestDnsLogging(new DnsLoggingSettings(ignoreResolverLogs, logQueries));
+                CheckManifestStatistics(new StatisticsSettings(enableInMemoryStats, maxStatFileDays));
                 return;
             }
 
-            if (isConfigTransfer)
+            if (isConfigTransfer || readOwnership)
             {
                 var transferred = version >= 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
+                var transferredExtension = version >= 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
+                var (ownsAll, names) = version >= 8 ? ReadTsigOwnership(bR) : (false, null);
+
+                if (!apply)
+                {
+                    bool inheritsTsig = ownsAll || names?.Count > 0;
+                    if (HasManagedTsigKeys && !TsigOwnershipFromPrimary && inheritsTsig)
+                        throw new InvalidDataException("/dns/tsigKeys: Release local TSIG ownership before inheriting the Primary policy.");
+                    if (inheritsTsig || TsigOwnershipFromPrimary)
+                        ValidateManifestTsigRemovals(transferredTsigKeys, null);
+                    return;
+                }
+
+                if (!isConfigTransfer)
+                {
+                    _managedDnsSettings = transferred;
+                    _managedDnsSettingsExtension = transferredExtension;
+                    _manifestOwnsAllTsigKeys = ownsAll;
+                    _managedTsigKeyNames = names;
+                    _inheritedDnsPolicy = (ManagedDnsSettings)ReadOwnershipWord(s) & _managedDnsSettings & TransferableDnsPolicyOwnership;
+                    _inheritedExtendedDnsPolicy = (ManagedDnsSettingsExtension)ReadOwnershipWord(s) & _managedDnsSettingsExtension & TransferableExtendedDnsPolicyOwnership;
+                    return;
+                }
+
                 var local = _managedDnsSettings & ~_inheritedDnsPolicy;
                 _inheritedDnsPolicy = transferred & TransferableDnsPolicyOwnership & ~local;
                 _managedDnsSettings = local | _inheritedDnsPolicy;
-                var transferredExtension = version >= 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
                 var localExtension = _managedDnsSettingsExtension & ~_inheritedExtendedDnsPolicy;
                 _inheritedExtendedDnsPolicy = transferredExtension & TransferableExtendedDnsPolicyOwnership & ~localExtension;
                 _managedDnsSettingsExtension = localExtension | _inheritedExtendedDnsPolicy;
-            }
-            else if (readOwnership)
-            {
-                _managedDnsSettings = version >= 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
-                _managedDnsSettingsExtension = version >= 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
-                _manifestOwnsAllTsigKeys = version >= 8 && bR.ReadBoolean();
-                _managedTsigKeyNames = null;
-                if (version >= 8)
+                if (!HasManagedTsigKeys || TsigOwnershipFromPrimary)
                 {
-                    int count = bR.ReadUInt16();
-                    if (count > 0)
-                    {
-                        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                        for (int i = 0; i < count; i++)
-                            names.Add(s.ReadShortString());
-                        _managedTsigKeyNames = names;
-                    }
+                    _manifestOwnsAllTsigKeys = ownsAll;
+                    _managedTsigKeyNames = names;
+                    if (HasManagedTsigKeys)
+                        _managedDnsSettingsExtension |= ManagedDnsSettingsExtension.TsigOwnershipFromPrimary;
+                    else
+                        _managedDnsSettingsExtension &= ~ManagedDnsSettingsExtension.TsigOwnershipFromPrimary;
                 }
-                _inheritedDnsPolicy = (ManagedDnsSettings)ReadOwnershipWord(s) & _managedDnsSettings & TransferableDnsPolicyOwnership;
-                _inheritedExtendedDnsPolicy = (ManagedDnsSettingsExtension)ReadOwnershipWord(s) & _managedDnsSettingsExtension & TransferableExtendedDnsPolicyOwnership;
             }
+        }
+
+        private static (bool OwnsAll, IReadOnlySet<string> Names) ReadTsigOwnership(BinaryReader reader)
+        {
+            bool ownsAll = reader.ReadBoolean();
+            int count = reader.ReadUInt16();
+            if (count == 0)
+                return (ownsAll, null);
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < count; i++)
+                names.Add(reader.BaseStream.ReadShortString());
+            return (ownsAll, names);
         }
 
         private static ulong ReadOwnershipWord(Stream stream)
@@ -9018,6 +9059,12 @@ namespace DnsServerCore.Dns
                         (listenerPolicy.RealIpHeader is not null && listenerPolicy.RealIpHeader != _dnsOverHttpRealIpHeader) ||
                         (listenerPolicy.ReverseProxyAcl is not null && !listenerPolicy.ReverseProxyAcl.SequenceEqual(_dnsReverseProxyNetworkACL ?? []));
 
+                    if (isClusterSecondary && TsigOwnershipFromPrimary)
+                    {
+                        extendedOwnership |= ManagedDnsSettingsExtension.TsigOwnershipFromPrimary;
+                        tsig = new ConfigurationTsig.Candidate(null, _managedTsigKeyNames, _manifestOwnsAllTsigKeys);
+                    }
+
                     var previousInheritedExtension = _inheritedExtendedDnsPolicy;
                     var inheritedExtension = isClusterSecondary ? previousInheritedExtension : 0;
                     extendedOwnership |= GetRateLimitOwnership(rateLimits) | inheritedExtension;
@@ -9137,11 +9184,8 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
                     if (tsig.Keys is not null)
                         ValidateManifestTsigRemovals(tsig.Keys, manifest);
-                    bool tsigChanged = tsig.Keys is not null && (tsig.Keys.Count != (_tsigKeys?.Count ?? 0) ||
-                        tsig.Keys.Any(entry => _tsigKeys is null || !_tsigKeys.TryGetValue(entry.Key, out TsigKey existing) ||
-                            !ConfigurationTsig.SameKey(existing, entry.Value)));
-                    bool tsigOwnershipChanged = tsig.OwnsAll != _manifestOwnsAllTsigKeys ||
-                        (_managedTsigKeyNames is null ? tsig.OwnedNames?.Count > 0 : !_managedTsigKeyNames.SetEquals(tsig.OwnedNames is null ? Array.Empty<string>() : tsig.OwnedNames));
+                    bool tsigChanged = TsigValuesChange(tsig);
+                    bool tsigOwnershipChanged = TsigOwnershipChanges(tsig);
                     if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !tsigChanged && !tsigOwnershipChanged && !certificateChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (inherited == previousInherited) && (inheritedExtension == previousInheritedExtension) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {

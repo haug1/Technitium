@@ -33,6 +33,7 @@ namespace DnsServerCore.HttpApi.Models
         public bool SupportsDeclarativeRateLimits { get; set; }
         public bool SupportsDeclarativeProxy { get; set; }
         public bool SupportsDeclarativeDnsTuning { get; set; }
+        public bool SupportsDeclarativeTsig { get; set; }
         public bool SupportsDeclarativeClusterHandoff { get; set; }
         public string[]? ManagedOptionPaths { get; set; }
         public string? ClusterDomain { get; set; }

@@ -892,16 +892,14 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
             CheckClusterDomainListSupport(manifest, cluster);
             CheckClusterDnsPolicySupport(manifest, cluster);
-            if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
-                throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             CheckClusterWebListenerSupport(manifest, cluster);
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
         }
 
-        internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits, bool RequiresProxy, bool RequiresDnsTuning)? CheckClusterDnsPolicySupport(
-            ConfigurationManifest manifest, ClusterManager cluster, ConfigurationProxy.Candidate? proxy = null)
+        internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits, bool RequiresProxy, bool RequiresDnsTuning, bool RequiresTsig)? CheckClusterDnsPolicySupport(
+            ConfigurationManifest manifest, ClusterManager cluster, ConfigurationProxy.Candidate? proxy = null, ConfigurationTsig.Candidate? tsig = null)
         {
             if (!cluster.ClusterInitialized)
                 return null;
@@ -917,6 +915,8 @@ namespace DnsServerCore.Configuration
             var tuning = GetDnsTuning(manifest);
             if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
             {
+                if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
+                    throw new InvalidDataException("/dns/tsigKeys: Only the Primary can apply cluster TSIG settings.");
                 if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxyDeclaration) && proxyDeclaration.EnumerateObject().Any())
                     throw new InvalidDataException("/dns/proxy: Only the Primary can apply cluster proxy settings.");
                 if (defaults.HasValues || resolver.HasValues || subnet != default || autoUpdate.HasValue ||
@@ -930,11 +930,12 @@ namespace DnsServerCore.Configuration
             bool rateLimitChanges = dns.ClusterRateLimitPolicyChanges(rateLimits);
             bool proxyChanges = proxy.HasValue && dns.ClusterProxyChanges(proxy.Value);
             bool tuningChanges = dns.ClusterDnsTuningChanges(tuning);
-            if (!resolverPolicyChanges && !rateLimitChanges && !proxyChanges && !tuningChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
+            bool tsigChanges = tsig.HasValue && dns.ClusterTsigChanges(tsig.Value);
+            if (!resolverPolicyChanges && !rateLimitChanges && !proxyChanges && !tuningChanges && !tsigChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
                 return null;
 
-            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges, rateLimitChanges, proxyChanges, tuningChanges),
-                resolverPolicyChanges, rateLimitChanges, proxyChanges, tuningChanges);
+            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges, rateLimitChanges, proxyChanges, tuningChanges, tsigChanges),
+                resolverPolicyChanges, rateLimitChanges, proxyChanges, tuningChanges, tsigChanges);
         }
 
         internal static (string Path, int[] Peers)? CheckClusterDomainListSupport(ConfigurationManifest manifest, ClusterManager cluster)
