@@ -1544,24 +1544,51 @@ namespace DnsServerCore.Cluster
                 {
                     //sync entire config from primary node first to get TSIG keys for secondary catalog zone transfer
                     _configLastSynced = DateTime.UnixEpoch; //reset last sync time to ensure full sync
-                    await SyncConfigFromAsync(primaryNodeApiClient, cancellationToken: cancellationToken);
+                    bool manifestJoin = expectedDomain is not null;
+                    await SyncConfigFromAsync(primaryNodeApiClient, cancellationToken: cancellationToken, persistMembership: !manifestJoin);
 
-                    //create cluster secondary catalog zone
-                    AuthZoneInfo clusterSecondaryCatalogZoneInfo = _dnsWebService.DnsServer.AuthZoneManager.CreateSecondaryCatalogZone(clusterCatalogDomain, primaryNodeIpAddresses.Convert(delegate (IPAddress ipAddress) { return new NameServerAddress(primaryNodeUrl.Host, ipAddress); }), DnsTransportProtocol.Tcp, clusterCatalogDomain);
-                    if (clusterSecondaryCatalogZoneInfo is null)
-                        throw new DnsServerException($"Failed to join Cluster: the zone '{clusterCatalogDomain}' already exists. Please delete the '{clusterCatalogDomain}' zone and try again.");
+                    if (manifestJoin)
+                    {
+                        var zones = _dnsWebService.DnsServer.AuthZoneManager;
+                        ConfigurationJournal.Persist(_dnsWebService.ConfigFolder, () =>
+                        {
+                            try
+                            {
+                                FinishJoin();
+                                WriteManifestOwnership([ConfigurationClusterOptions.AddressName]);
+                            }
+                            finally
+                            {
+                                zones.ClearClusterBootstrapSaves(clusterCatalogDomain);
+                            }
+                        }, "dns.config", "auth.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile,
+                            Path.Combine("zones", clusterCatalogDomain + ".zone"));
+                        _managedOptionNames = [ConfigurationClusterOptions.AddressName];
+                    }
+                    else
+                    {
+                        FinishJoin();
+                    }
 
-                    //set cluster secondary catalog zone permissions
-                    _dnsWebService.AuthManager.SetPermission(PermissionSection.Zones, clusterSecondaryCatalogZoneInfo.Name, _dnsWebService.AuthManager.GetGroup(Group.ADMINISTRATORS), PermissionFlag.ViewModifyDelete);
-                    _dnsWebService.AuthManager.SetPermission(PermissionSection.Zones, clusterSecondaryCatalogZoneInfo.Name, _dnsWebService.AuthManager.GetGroup(Group.DNS_ADMINISTRATORS), PermissionFlag.View);
+                    void FinishJoin()
+                    {
+                        var zones = _dnsWebService.DnsServer.AuthZoneManager;
+                        var nameServers = primaryNodeIpAddresses.Convert(ipAddress => new NameServerAddress(primaryNodeUrl.Host, ipAddress));
+                        AuthZoneInfo catalog = zones.CreateSecondaryCatalogZone(clusterCatalogDomain, nameServers, DnsTransportProtocol.Tcp, clusterCatalogDomain);
+                        if (catalog is null)
+                            throw new DnsServerException($"Failed to join Cluster: the zone '{clusterCatalogDomain}' already exists. Please delete the '{clusterCatalogDomain}' zone and try again.");
 
-                    _dnsWebService.DnsServer.ServerDomain = selfSecondaryNode.Name;
-                    bool immediately = expectedDomain is not null;
-                    if (immediately)
-                        _dnsWebService.DnsServer.AuthZoneManager.FlushZoneSaves(clusterCatalogDomain);
-                    _dnsWebService.DnsServer.SaveConfigFile(immediately);
-                    _dnsWebService.AuthManager.SaveConfigFile(immediately);
-                    SaveConfigFile(immediately);
+                        var auth = _dnsWebService.AuthManager;
+                        auth.SetPermission(PermissionSection.Zones, catalog.Name, auth.GetGroup(Group.ADMINISTRATORS), PermissionFlag.ViewModifyDelete);
+                        auth.SetPermission(PermissionSection.Zones, catalog.Name, auth.GetGroup(Group.DNS_ADMINISTRATORS), PermissionFlag.View);
+                        _dnsWebService.DnsServer.ServerDomain = selfSecondaryNode.Name;
+
+                        if (manifestJoin)
+                            zones.FlushZoneSaves(clusterCatalogDomain);
+                        _dnsWebService.DnsServer.SaveConfigFile(manifestJoin);
+                        auth.SaveConfigFile(manifestJoin);
+                        SaveConfigFile(manifestJoin);
+                    }
                 }
                 catch
                 {
@@ -1847,7 +1874,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        public async Task SyncConfigFromAsync(HttpApiClient primaryNodeApiClient, IReadOnlyCollection<string> includeZones = null, CancellationToken cancellationToken = default)
+        public async Task SyncConfigFromAsync(HttpApiClient primaryNodeApiClient, IReadOnlyCollection<string> includeZones = null, CancellationToken cancellationToken = default, bool persistMembership = true)
         {
             string tmpFile = Path.GetTempFileName();
             try
@@ -1886,7 +1913,8 @@ namespace DnsServerCore.Cluster
                     _configLastSynced = response.Item2;
 
                     //save config
-                    SaveConfigFile();
+                    if (persistMembership)
+                        SaveConfigFile();
                 }
 
                 _dnsWebService.LogManager.Write("Server configuration was synced from the Primary node successfully.");

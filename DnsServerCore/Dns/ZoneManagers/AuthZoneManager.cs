@@ -335,12 +335,12 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        internal void ClearClusterBootstrapSaves(string domain, string catalog)
+        internal void ClearClusterBootstrapSaves(params string[] names)
         {
             lock (_saveLock)
             {
-                _pendingSaveZones.Remove(domain);
-                _pendingSaveZones.Remove(catalog);
+                foreach (string name in names)
+                    _pendingSaveZones.Remove(name);
             }
         }
 

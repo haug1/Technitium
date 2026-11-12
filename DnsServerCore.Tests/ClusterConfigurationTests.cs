@@ -127,7 +127,7 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(primaryState);
             Assert.Single(primaryState.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
 
-            string blockedFile = Path.Combine(secondary.ConfigurationDirectory, "cluster.tmp");
+            string blockedFile = Path.Combine(secondary.ConfigurationDirectory, "cluster-ownership.config.tmp");
             Exception failure = await Assert.ThrowsAnyAsync<Exception>(() => secondary.RestartAsync(null, () =>
             {
                 WriteManifest("cluster.test");
@@ -135,11 +135,16 @@ namespace DnsServerCore.Tests
             }));
             Assert.True(failure is IOException or UnauthorizedAccessException, failure.ToString());
             Assert.False(File.Exists(Path.Combine(secondary.ConfigurationDirectory, "cluster.config")));
+            Assert.False(File.Exists(Path.Combine(secondary.ConfigurationDirectory, "zones", "cluster-catalog.cluster.test.zone")));
             primaryState = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
             LoopbackWebService.AssertOk(primaryState);
             Assert.Single(primaryState.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
 
             await secondary.RestartAsync(null, () => Directory.Delete(blockedFile));
+            JsonElement joined = await secondary.CallAsync("admin/cluster/state", secondary.AdminToken);
+            LoopbackWebService.AssertOk(joined);
+            Assert.Contains(joined.GetProperty("response").GetProperty("managedOptionPaths").EnumerateArray(),
+                path => path.ValueEquals("/cluster/node/addresses"));
             int joinedId = await GetSecondaryIdAsync();
             Assert.Equal(180, (await secondary.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
 
