@@ -89,9 +89,24 @@ namespace DnsServerCore.Configuration
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
                 if (dns.TryGetProperty("localEndpoints", out JsonElement endpoints))
                     ReadDnsLocalEndPoints(endpoints);
+                if (dns.TryGetProperty("authoritative", out JsonElement authoritative) &&
+                    authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
+                    ReadDefaultResponsiblePerson(responsiblePerson);
             }
 
             return new ConfigurationManifest(filePath, root.Clone());
+        }
+
+        internal static string ReadDefaultResponsiblePerson(JsonElement value)
+        {
+            try
+            {
+                return DnsServer.NormalizeDefaultResponsiblePerson(value.GetString() ?? "");
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException)
+            {
+                throw new InvalidDataException("/dns/authoritative/defaultResponsiblePerson: Invalid email address.");
+            }
         }
 
         internal IReadOnlyList<IPEndPoint> GetDnsLocalEndPoints()

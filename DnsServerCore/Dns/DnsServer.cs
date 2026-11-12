@@ -134,14 +134,15 @@ namespace DnsServerCore.Dns
             SoaTtl = 8,
             SerialDateScheme = 16,
             MinRefresh = 32,
-            MinRetry = 64
+            MinRetry = 64,
+            ResponsiblePerson = 128
         }
 
         internal readonly record struct AuthoritativeDefaults(uint? Record, uint? Ns, uint? Soa,
-            bool? SerialDateScheme = null, uint? MinRefresh = null, uint? MinRetry = null)
+            bool? SerialDateScheme = null, uint? MinRefresh = null, uint? MinRetry = null, string ResponsiblePerson = null)
         {
             internal bool HasValues => Record.HasValue || Ns.HasValue || Soa.HasValue ||
-                SerialDateScheme.HasValue || MinRefresh.HasValue || MinRetry.HasValue;
+                SerialDateScheme.HasValue || MinRefresh.HasValue || MinRetry.HasValue || (ResponsiblePerson is not null);
         }
         readonly LogManager _log;
 
@@ -694,6 +695,7 @@ namespace DnsServerCore.Dns
         internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
         internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
+        internal bool ManifestOwnsResponsiblePerson => _managedDnsSettings.HasFlag(ManagedDnsSettings.ResponsiblePerson);
         internal bool HasManagedSoaTiming => (_managedDnsSettings &
             (ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh | ManagedDnsSettings.MinRetry)) != 0;
         internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
@@ -714,6 +716,8 @@ namespace DnsServerCore.Dns
                 yield return "/dns/authoritative/minSoaRefresh";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRetry))
                 yield return "/dns/authoritative/minSoaRetry";
+            if (ManifestOwnsResponsiblePerson)
+                yield return "/dns/authoritative/defaultResponsiblePerson";
         }
 
         internal void CheckManifestAuthoritativeDefaults(AuthoritativeDefaults defaults)
@@ -730,6 +734,9 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/dns/authoritative/minSoaRefresh: Setting is managed by the configuration manifest.");
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRetry) && defaults.MinRetry.HasValue && defaults.MinRetry != _authZoneManager.MinSoaRetry)
                 throw new DnsWebServiceException("/dns/authoritative/minSoaRetry: Setting is managed by the configuration manifest.");
+            if (ManifestOwnsResponsiblePerson && (defaults.ResponsiblePerson is not null) &&
+                !string.Equals(defaults.ResponsiblePerson, _defaultResponsiblePerson?.Address ?? "", StringComparison.Ordinal))
+                throw new DnsWebServiceException("/dns/authoritative/defaultResponsiblePerson: Setting is managed by the configuration manifest.");
         }
 
         private static AuthoritativeDefaults ReadAuthoritativeTtls(BinaryReader reader, int version)
@@ -751,7 +758,7 @@ namespace DnsServerCore.Dns
         private AuthoritativeDefaults GetAuthoritativeDefaults()
         {
             return new AuthoritativeDefaults(_authZoneManager.DefaultRecordTtl, _authZoneManager.DefaultNsRecordTtl, _authZoneManager.DefaultSoaRecordTtl,
-                _authZoneManager.UseSoaSerialDateScheme, _authZoneManager.MinSoaRefresh, _authZoneManager.MinSoaRetry);
+                _authZoneManager.UseSoaSerialDateScheme, _authZoneManager.MinSoaRefresh, _authZoneManager.MinSoaRetry, _defaultResponsiblePerson?.Address ?? "");
         }
 
         internal void SetAuthoritativeDefaults(AuthoritativeDefaults defaults)
@@ -768,6 +775,9 @@ namespace DnsServerCore.Dns
                 _authZoneManager.MinSoaRefresh = defaults.MinRefresh.Value;
             if (defaults.MinRetry.HasValue && defaults.MinRetry != _authZoneManager.MinSoaRetry)
                 _authZoneManager.MinSoaRetry = defaults.MinRetry.Value;
+            if ((defaults.ResponsiblePerson is not null) &&
+                !string.Equals(defaults.ResponsiblePerson, _defaultResponsiblePerson?.Address ?? "", StringComparison.Ordinal))
+                _defaultResponsiblePerson = defaults.ResponsiblePerson.Length == 0 ? null : new MailAddress(defaults.ResponsiblePerson);
         }
 
         internal void CheckManifestLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints)
@@ -788,10 +798,12 @@ namespace DnsServerCore.Dns
                 AuthZoneInfo.ReadNetworkAddressesFrom(reader);
                 AuthZoneInfo.ReadNetworkAddressesFrom(reader);
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
-                if (HasManagedSoaTiming)
+                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson)
                 {
-                    reader.ReadString(); // responsible person
-                    defaults = ReadSoaTiming(reader, defaults);
+                    string responsiblePerson = reader.BaseStream.ReadShortString();
+                    defaults = defaults with { ResponsiblePerson = NormalizeDefaultResponsiblePerson(responsiblePerson) };
+                    if (HasManagedSoaTiming)
+                        defaults = ReadSoaTiming(reader, defaults);
                 }
 
                 CheckManifestAuthoritativeDefaults(defaults);
@@ -835,7 +847,7 @@ namespace DnsServerCore.Dns
 
             AuthoritativeDefaults defaults = ReadAuthoritativeTtls(bR, version);
 
-            string rp = bR.ReadString();
+            string rp = s.ReadShortString();
             if (rp.Length == 0)
                 _defaultResponsiblePerson = null;
             else
@@ -1340,7 +1352,7 @@ namespace DnsServerCore.Dns
             if (readOwnership)
                 {
                 int ownership = version == 7 ? s.ReadByte() : -1;
-                _managedDnsSettings = ownership is >= 0 and <= 127 ? (ManagedDnsSettings)ownership : 0;
+                _managedDnsSettings = ownership >= 0 ? (ManagedDnsSettings)ownership : 0;
             }
         }
 
@@ -7131,12 +7143,14 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.MinRefresh;
                     if (defaults.MinRetry.HasValue)
                         ownership |= ManagedDnsSettings.MinRetry;
+                    if (defaults.ResponsiblePerson is not null)
+                        ownership |= ManagedDnsSettings.ResponsiblePerson;
 
                     AuthoritativeDefaults previousDefaults = GetAuthoritativeDefaults();
                     var effectiveDefaults = new AuthoritativeDefaults(defaults.Record ?? previousDefaults.Record,
                         defaults.Ns ?? previousDefaults.Ns, defaults.Soa ?? previousDefaults.Soa,
                         defaults.SerialDateScheme ?? previousDefaults.SerialDateScheme, defaults.MinRefresh ?? previousDefaults.MinRefresh,
-                        defaults.MinRetry ?? previousDefaults.MinRetry);
+                        defaults.MinRetry ?? previousDefaults.MinRetry, defaults.ResponsiblePerson ?? previousDefaults.ResponsiblePerson);
                     if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults))
                     {
                         persist(null);
@@ -7197,6 +7211,20 @@ namespace DnsServerCore.Dns
 
         public LogManager LogManager
         { get { return _log; } }
+
+        internal static string NormalizeDefaultResponsiblePerson(string address)
+        {
+            if (address.Length == 0)
+                return "";
+            if (address.Length > 255)
+                throw new ArgumentException("Default responsible person email address length cannot exceed 255 characters.");
+
+            string normalized = new MailAddress(address).Address;
+            if (Encoding.UTF8.GetByteCount(normalized) > 255)
+                throw new ArgumentException("Default responsible person email address cannot exceed 255 UTF-8 bytes.");
+
+            return normalized;
+        }
 
         internal MailAddress DefaultResponsiblePerson
         {

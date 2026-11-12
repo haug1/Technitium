@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.Mail;
 using System.Threading.Tasks;
 using DnsServerCore.Dns;
 using System.Security.Cryptography;
@@ -38,7 +37,7 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400, canApply: true),
             ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900, canApply: true),
             ["/dns/authoritative/defaultResponsiblePerson"] = new("defaultResponsiblePerson",
-                JsonSerializer.SerializeToElement<string>(null), false, NormalizeResponsiblePerson),
+                JsonSerializer.SerializeToElement<string>(null), false, NormalizeResponsiblePerson, CanApply: true),
             ["/dns/authoritative/minSoaRefresh"] = Field("minSoaRefresh", 300, canApply: true),
             ["/dns/authoritative/minSoaRetry"] = Field("minSoaRetry", 300, canApply: true),
             ["/dns/authoritative/useSoaSerialDateScheme"] = Field("useSoaSerialDateScheme", false, canApply: true),
@@ -135,8 +134,13 @@ namespace DnsServerCore.Configuration
                 !dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 return default;
 
+            JsonElement? responsible = ReadValue("defaultResponsiblePerson");
+            string responsiblePerson = responsible.HasValue
+                ? ConfigurationManifest.ReadDefaultResponsiblePerson(responsible.Value) : null;
+
             return new DnsServer.AuthoritativeDefaults(ReadTtl("defaultRecordTtl"), ReadTtl("defaultNsRecordTtl"), ReadTtl("defaultSoaRecordTtl"),
-                ReadValue("useSoaSerialDateScheme")?.GetBoolean(), ReadTtl("minSoaRefresh"), ReadTtl("minSoaRetry"));
+                ReadValue("useSoaSerialDateScheme")?.GetBoolean(), ReadTtl("minSoaRefresh"), ReadTtl("minSoaRetry"), responsiblePerson);
+
 
             uint? ReadTtl(string name)
             {
@@ -329,8 +333,8 @@ namespace DnsServerCore.Configuration
 
         private static JsonElement NormalizeResponsiblePerson(JsonElement value)
         {
-            string address = value.GetString();
-            return JsonSerializer.SerializeToElement(address.Length == 0 ? null : new MailAddress(address).Address);
+            string address = ConfigurationManifest.ReadDefaultResponsiblePerson(value);
+            return JsonSerializer.SerializeToElement(address.Length == 0 ? null : address);
         }
 
         private static JsonElement NormalizeBlockListSources(JsonElement value)

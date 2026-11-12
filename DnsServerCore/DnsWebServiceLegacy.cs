@@ -222,15 +222,17 @@ namespace DnsServerCore
                     ReadLegacyWebConfiguration(reader, version);
                     stream.ReadShortString(); // server domain
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming)
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson)
                     {
                         var (_, _, recordTtl) = ReadLegacyDnsDefaults(reader, version);
                         var defaults = new DnsServer.AuthoritativeDefaults(recordTtl, null, null);
-                        if (_dnsServer.HasManagedSoaTiming)
+                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson)
                         {
-                            if (version >= 36)
-                                reader.ReadString(); // responsible person
-                            defaults = ReadLegacySoaTiming(reader, version) with { Record = recordTtl };
+                            string responsiblePerson = version >= 36 ? reader.BaseStream.ReadShortString() : "";
+                            if (_dnsServer.HasManagedSoaTiming)
+                                defaults = ReadLegacySoaTiming(reader, version) with { Record = recordTtl };
+                            if (_dnsServer.ManifestOwnsResponsiblePerson)
+                                defaults = defaults with { ResponsiblePerson = DnsServer.NormalizeDefaultResponsiblePerson(responsiblePerson) };
                         }
                         _dnsServer.CheckManifestAuthoritativeDefaults(defaults);
                     }
@@ -248,7 +250,7 @@ namespace DnsServerCore
                         throw new InvalidDataException("/dns/authoritative/defaultRecordTtl: Cannot verify the default record TTL in this backup format.");
 
                     _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(
-                        version < 23 ? 3600u : null, null, null, false, 300, 300));
+                        version < 23 ? 3600u : null, null, null, false, 300, 300, ""));
                     return;
                 }
             }
@@ -307,7 +309,7 @@ namespace DnsServerCore
 
                 if (version >= 36)
                 {
-                    string rp = bR.ReadString();
+                    string rp = bR.BaseStream.ReadShortString();
                     if (rp.Length == 0)
                         _dnsServer.DefaultResponsiblePerson = null;
                     else

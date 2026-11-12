@@ -29,7 +29,6 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
-using System.Net.Mail;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -645,13 +644,15 @@ namespace DnsServerCore
                     _dnsWebService._dnsServer.CheckManifestLocalEndPoints(requestedDnsEndpoints);
                 }
 
+                string defaultResponsiblePerson = request.QueryOrForm("defaultResponsiblePerson");
                 var authoritativeDefaults = new DnsServer.AuthoritativeDefaults(
                     request.TryGetQueryOrForm("defaultRecordTtl", ZoneFile.ParseTtl, out uint defaultRecordTtl) ? defaultRecordTtl : null,
                     request.TryGetQueryOrForm("defaultNsRecordTtl", ZoneFile.ParseTtl, out uint defaultNsRecordTtl) ? defaultNsRecordTtl : null,
                     request.TryGetQueryOrForm("defaultSoaRecordTtl", ZoneFile.ParseTtl, out uint defaultSoaRecordTtl) ? defaultSoaRecordTtl : null,
                     request.TryGetQueryOrForm("useSoaSerialDateScheme", bool.Parse, out bool useSoaSerialDateScheme) ? useSoaSerialDateScheme : null,
                     request.TryGetQueryOrForm("minSoaRefresh", ZoneFile.ParseTtl, out uint minSoaRefresh) ? minSoaRefresh : null,
-                    request.TryGetQueryOrForm("minSoaRetry", ZoneFile.ParseTtl, out uint minSoaRetry) ? minSoaRetry : null);
+                    request.TryGetQueryOrForm("minSoaRetry", ZoneFile.ParseTtl, out uint minSoaRetry) ? minSoaRetry : null,
+                    defaultResponsiblePerson is null ? null : DnsServer.NormalizeDefaultResponsiblePerson(defaultResponsiblePerson));
                 _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
 
                 try
@@ -699,18 +700,8 @@ namespace DnsServerCore
                         if (authoritativeDefaults.Soa.HasValue)
                             clusterParameters.Add("defaultSoaRecordTtl", defaultSoaRecordTtl.ToString());
 
-                        string defaultResponsiblePerson = request.QueryOrForm("defaultResponsiblePerson");
                         if (defaultResponsiblePerson is not null)
-                        {
-                            if (defaultResponsiblePerson.Length == 0)
-                                _dnsWebService._dnsServer.DefaultResponsiblePerson = null;
-                            else if (defaultResponsiblePerson.Length > 255)
-                                throw new ArgumentException("Default responsible person email address length cannot exceed 255 characters.", nameof(defaultResponsiblePerson));
-                            else
-                                _dnsWebService._dnsServer.DefaultResponsiblePerson = new MailAddress(defaultResponsiblePerson);
-
                             clusterParameters.Add("defaultResponsiblePerson", defaultResponsiblePerson);
-                        }
 
                         if (authoritativeDefaults.SerialDateScheme.HasValue)
                             clusterParameters.Add("useSoaSerialDateScheme", useSoaSerialDateScheme.ToString());

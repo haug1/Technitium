@@ -139,6 +139,7 @@ namespace DnsServerCore.Tests
         [InlineData(false, "/dns/localEndpoints")]
         [InlineData(true, "/dns/authoritative/defaultRecordTtl")]
         [InlineData(true, "/dns/authoritative/minSoaRefresh")]
+        [InlineData(true, "/dns/authoritative/defaultResponsiblePerson")]
         public async Task LegacyCombinedBackupChecksManagedDnsSettingsBeforeChangingSettings(bool preserveListener, string conflictPath)
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -147,7 +148,7 @@ namespace DnsServerCore.Tests
             string manifest = JsonSerializer.Serialize(new
             {
                 schemaVersion = 1,
-                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600, minSoaRefresh = 900 } }
+                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600, minSoaRefresh = 900, defaultResponsiblePerson = "ops@example.test" } }
             });
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
@@ -174,9 +175,9 @@ namespace DnsServerCore.Tests
                 writer.Write((byte)0); // IPv4 source networks
                 writer.Write((byte)0); // IPv6 source networks
                 writer.Write(conflictPath.EndsWith("defaultRecordTtl", StringComparison.Ordinal) ? 3600u : 600u);
-                writer.Write(string.Empty); // responsible person
+                writer.Write(conflictPath.EndsWith("defaultResponsiblePerson", StringComparison.Ordinal) ? string.Empty : "ops@example.test");
                 writer.Write(false); // SOA date serial format
-                writer.Write(300u); // SOA minimum refresh
+                writer.Write(conflictPath.EndsWith("minSoaRefresh", StringComparison.Ordinal) ? 300u : 900u);
                 writer.Write(300u); // SOA minimum retry
                 // The prefix is sufficient for ownership preflight.
             }
@@ -239,6 +240,41 @@ namespace DnsServerCore.Tests
 
             LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=10m&maxLogFileDays=180", server.AdminToken));
             Assert.Equal(180, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+        }
+
+        [Fact]
+        public async Task ResponsiblePersonNormalizesPersistsAndCanBeExplicitlyReset()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            // Exercise a valid address whose stored short-string length exceeds 127 bytes.
+            string label = new('a', 48);
+            string address = $"ops@{label}.{label}.{label}.test";
+            string manifest = JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                dns = new { authoritative = new { defaultResponsiblePerson = $"Lab <{address}>" } }
+            });
+
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal("Add", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(address, current.GetProperty("defaultResponsiblePerson").GetString());
+            Assert.Equal("/dns/authoritative/defaultResponsiblePerson",
+                Assert.Single(current.GetProperty("managedSettings").EnumerateArray()).GetString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement conflict = await server.CallAsync("settings/set?defaultResponsiblePerson=other%40example.test", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/authoritative/defaultResponsiblePerson", conflict.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"dns":{"authoritative":{"defaultResponsiblePerson":null}}}""";
+            JsonElement resetPreview = await PreviewAsync(server, reset);
+            Assert.Equal("Remove", Assert.Single(resetPreview.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, resetPreview.GetProperty("revision").GetString()!));
+            Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("defaultResponsiblePerson").ValueKind);
         }
 
         [Fact]
