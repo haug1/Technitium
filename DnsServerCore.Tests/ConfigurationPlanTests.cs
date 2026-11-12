@@ -2670,17 +2670,18 @@ namespace DnsServerCore.Tests
                 {
                     // Scope files end with the active lease count and lease records.
                     output.Position = output.Length - sizeof(int);
-                    writer.Write(2);
+                    writer.Write(3);
                     WriteLease(LeaseType.Reserved, "02000000000A", "192.168.1.20");
                     WriteLease(LeaseType.Dynamic, "02000000000B", "192.168.1.21");
+                    WriteLease(LeaseType.Dynamic, "02000000000D", "192.168.1.23", new ClientIdentifierOption(0, [0xDD]));
 
-                    void WriteLease(LeaseType type, string mac, string address)
+                    void WriteLease(LeaseType type, string mac, string address, ClientIdentifierOption? identifier = null)
                     {
                         byte[] bytes = Convert.FromHexString(mac);
                         DateTimeOffset now = DateTimeOffset.UtcNow;
                         writer.Write((byte)2); // Lease file format version.
                         writer.Write((byte)type);
-                        new ClientIdentifierOption(1, bytes).WriteTo(output);
+                        (identifier ?? new ClientIdentifierOption(1, bytes)).WriteTo(output);
                         writer.Write((byte)0); // Empty hostname.
                         writer.Write((byte)bytes.Length);
                         writer.Write(bytes);
@@ -2707,6 +2708,21 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "dhcp/scopes/addReservedLease?name=Default&hardwareAddress=02-00-00-00-00-0C&ipAddress=192.168.1.22", server.AdminToken));
             Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonNode updated = JsonNode.Parse(manifest)!;
+            updated["dhcp"]!["scopes"]!["Default"]!["ignoreClientIdentifierOption"] = false;
+            updated["dhcp"]!["scopes"]!["Default"]!["reservations"]!["02-00-00-00-00-0D"] =
+                new JsonObject { ["address"] = "192.168.1.23" };
+            string updatedManifest = updated.ToJsonString();
+            revision = (await PreviewAsync(server, updatedManifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, updatedManifest, revision));
+            using (FileStream stored = File.OpenRead(scopeFile))
+            using (var persisted = new Scope(stored, null, null, resolveLocalDns: false))
+            {
+                Lease lease = persisted.Leases[new ClientIdentifierOption(0, [0xDD])];
+                Assert.Equal(LeaseType.Reserved, lease.Type);
+                Assert.Equal(IPAddress.Parse("192.168.1.23"), lease.Address);
+            }
 
             async Task RejectAsync(string endpoint, string suffix)
             {
@@ -3030,8 +3046,8 @@ namespace DnsServerCore.Tests
                     "startingAddress":"192.0.2.10","endingAddress":"192.0.2.50","subnetMask":"255.255.255.0","enabled":true,
                     "reservations":{"02-00-00-00-00-0A":{"address":"192.0.2.20","hostName":null,"comments":null,"hardwareAddress":"02-00-00-00-00-0A"}},
                     "activeLeases":[
-                        {"clientKey":"02-00-00-00-00-0A","address":"192.0.2.20"},
-                        {"clientKey":"02-00-00-00-00-0C","address":"192.0.2.22"}
+                        {"clientKey":"02-00-00-00-00-0A","hardwareKey":"02-00-00-00-00-0A","address":"192.0.2.20"},
+                        {"clientKey":"02-00-00-00-00-0C","hardwareKey":"02-00-00-00-00-0C","address":"192.0.2.22"}
                     ],
                     "exclusions":[]
                 }}}
@@ -3057,7 +3073,7 @@ namespace DnsServerCore.Tests
             using JsonDocument snapshot = JsonDocument.Parse($$"""
                 {"manifestDhcpScopes":{"Lab":{
                   "startingAddress":"192.0.2.10","endingAddress":"192.0.2.50","subnetMask":"255.255.255.0","enabled":true,
-                  "activeLeases":[{"clientKey":"02-00-00-00-00-0A","address":"192.0.2.20","dynamic":{{dynamicFlag}} }],
+                  "activeLeases":[{"clientKey":"02-00-00-00-00-0A","hardwareKey":"02-00-00-00-00-0A","address":"192.0.2.20","dynamic":{{dynamicFlag}} }],
                   "exclusions":[]
                 } } }
                 """);

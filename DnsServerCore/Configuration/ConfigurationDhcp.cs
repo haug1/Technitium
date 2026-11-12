@@ -144,6 +144,7 @@ namespace DnsServerCore.Configuration
                 {
                     writer.WriteStartObject();
                     writer.WriteString("clientKey", ReservationKey(lease.ClientIdentifier));
+                    writer.WriteString("hardwareKey", ReservationKey(new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress)));
                     writer.WriteString("address", lease.Address.ToString());
                     writer.WriteBoolean("dynamic", lease.Type == LeaseType.Dynamic);
                     writer.WriteEndObject();
@@ -359,6 +360,7 @@ namespace DnsServerCore.Configuration
             }
 
             var existing = scope.ReservedLeases.ToDictionary(lease => lease.ClientIdentifier);
+            var declared = new HashSet<ClientIdentifierOption>();
             foreach (JsonProperty entry in declarations.EnumerateObject())
             {
                 string entryPath = ConfigurationPlan.AppendPath(path, entry.Name);
@@ -376,7 +378,9 @@ namespace DnsServerCore.Configuration
                 string hostName = entry.Value.TryGetProperty("hostName", out JsonElement host) ? host.GetString() : previous?.HostName;
                 string comments = entry.Value.TryGetProperty("comments", out JsonElement comment) ? comment.GetString() : previous?.Comments;
                 scope.SetManifestReservation(identifier, hardwareAddress, address, hostName, comments);
+                declared.Add(identifier);
             }
+            scope.ReconcileManifestReservationLeases(declared);
         }
 
         private static void ApplyOptions(Scope scope, JsonObject options, string path)
@@ -850,7 +854,7 @@ namespace DnsServerCore.Configuration
             string path = scopePath + "/reservations";
             bool exists = current.ValueKind == JsonValueKind.Object;
             var reservations = new Dictionary<string, Reservation>(StringComparer.Ordinal);
-            var activeLeases = new List<(string ClientKey, IPAddress Address)>();
+            var activeLeases = new List<(string ClientKey, string HardwareKey, IPAddress Address)>();
             if (exists)
             {
                 foreach (JsonProperty entry in current.GetProperty("reservations").EnumerateObject())
@@ -861,9 +865,15 @@ namespace DnsServerCore.Configuration
                         value.GetProperty("hardwareAddress").GetString()));
                 }
                 foreach (JsonElement lease in current.GetProperty("activeLeases").EnumerateArray())
-                    activeLeases.Add((lease.GetProperty("clientKey").GetString(), ReadAddress(lease, "address")));
+                    activeLeases.Add((lease.GetProperty("clientKey").GetString(), lease.GetProperty("hardwareKey").GetString(),
+                        ReadAddress(lease, "address")));
             }
 
+            var previousReservations = new HashSet<string>(reservations.Keys, StringComparer.Ordinal);
+            bool ignoredClientIdentifier = exists && current.TryGetProperty("options", out JsonElement options) &&
+                options.TryGetProperty("ignoreClientIdentifierOption", out JsonElement previousIgnore) && previousIgnore.GetBoolean();
+            bool ignoreClientIdentifier = scope.TryGetProperty("ignoreClientIdentifierOption", out JsonElement ignore)
+                ? ignore.ValueKind != JsonValueKind.False : ignoredClientIdentifier;
             var changedAddresses = new Dictionary<string, string>(StringComparer.Ordinal);
             if (scope.TryGetProperty("reservations", out JsonElement desired))
             {
@@ -915,10 +925,6 @@ namespace DnsServerCore.Configuration
                             if (previous is not null)
                                 CheckRemoval(key, previous, entryPath);
                             CheckRange(entryPath + "/address", address, start, end);
-                            if (activeLeases.Any(lease => lease.Address.Equals(address) && lease.ClientKey != key))
-                                throw new InvalidDataException($"{entryPath}/address: The address belongs to an active lease for another client.");
-                            if (activeLeases.Any(lease => lease.ClientKey == key && !lease.Address.Equals(address)))
-                                throw new InvalidDataException($"{entryPath}/address: This client has an active lease at a different address.");
                             changedAddresses.Add(key, entryPath);
                         }
                         reservations[key] = candidate;
@@ -936,13 +942,22 @@ namespace DnsServerCore.Configuration
 
             foreach ((string key, string entryPath) in changedAddresses)
             {
-                if (reservations.Any(other => other.Key != key && other.Value.Address.Equals(reservations[key].Address)))
+                IPAddress address = reservations[key].Address;
+                if (activeLeases.Any(lease => lease.Address.Equals(address) && EffectiveKey(lease.ClientKey, lease.HardwareKey) != key))
+                    throw new InvalidDataException($"{entryPath}/address: The address belongs to an active lease for another client.");
+                if (activeLeases.Any(lease => EffectiveKey(lease.ClientKey, lease.HardwareKey) == key && !lease.Address.Equals(address)))
+                    throw new InvalidDataException($"{entryPath}/address: This client has an active lease at a different address.");
+                if (reservations.Any(other => other.Key != key && other.Value.Address.Equals(address)))
                     throw new InvalidDataException($"{entryPath}/address: The address is reserved for another client.");
             }
 
+            string EffectiveKey(string clientKey, string hardwareKey) =>
+                !ignoreClientIdentifier && reservations.ContainsKey(clientKey) ? clientKey : hardwareKey;
+
             void CheckRemoval(string key, Reservation previous, string entryPath)
             {
-                if (activeLeases.Any(lease => lease.ClientKey == key && lease.Address.Equals(previous.Address)))
+                if (activeLeases.Any(lease => lease.Address.Equals(previous.Address) &&
+                    (!ignoredClientIdentifier && previousReservations.Contains(lease.ClientKey) ? lease.ClientKey : lease.HardwareKey) == key))
                     throw new InvalidDataException($"{entryPath}: This reservation has an active lease.");
             }
         }

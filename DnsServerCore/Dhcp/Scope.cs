@@ -1640,9 +1640,18 @@ namespace DnsServerCore.Dhcp
             }
 
             _reservedLeases[identifier] = new Lease(LeaseType.Reserved, identifier, hostName, hardwareAddress, address, comments, 0);
+        }
+
+        internal void ReconcileManifestReservationLeases(IReadOnlySet<ClientIdentifierOption> declared)
+        {
             foreach (Lease lease in _leases.Values)
             {
-                if (lease.Type == LeaseType.Dynamic && lease.Address.Equals(address) && lease.ClientIdentifier.Equals(identifier))
+                if (lease.Type != LeaseType.Dynamic)
+                    continue;
+
+                var hardwareIdentifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress);
+                Lease reservation = FindReservedLease(_ignoreClientIdentifierOption ? hardwareIdentifier : lease.ClientIdentifier, hardwareIdentifier);
+                if (reservation is not null && declared.Contains(reservation.ClientIdentifier) && reservation.Address.Equals(lease.Address))
                     lease.ConvertToReserved();
             }
         }
