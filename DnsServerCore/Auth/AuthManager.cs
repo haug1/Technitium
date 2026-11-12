@@ -540,6 +540,7 @@ namespace DnsServerCore.Auth
                 ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants,
                     membership.Where(entry => !entry.Value).Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal));
                 ConfigurationStaticSessions.CheckAccountRemovals(this, userChanges, staticSessions);
+                ConfigurationUsers.CheckSsoIdentities(this, userChanges);
 
                 Dictionary<string, User> stagedUsers = null;
                 if (userChanges.Count > 0)
@@ -1322,12 +1323,21 @@ namespace DnsServerCore.Auth
             adminUser.AddToGroup(adminGroup);
         }
 
+        internal void SyncRemoteDisplayName(User user, string displayName)
+        {
+            lock (_saveLock)
+            {
+                if (!ConfigurationUsers.OwnsField(_managedUserPaths, user, "displayName") && user.DisplayName != displayName)
+                    user.DisplayName = displayName;
+            }
+        }
+
         internal IReadOnlyCollection<string> SyncRemoteGroups(User user, IEnumerable<string> remoteGroups, bool sso)
         {
             lock (_saveLock)
             {
                 var mapping = sso ? _ssoGroupMap : _ldapGroupMap;
-                if (mapping is null)
+                if (mapping is null || ConfigurationUsers.OwnsField(_managedUserPaths, user, "groups"))
                     return null;
 
                 var groups = new Dictionary<string, Group>();
@@ -1438,7 +1448,7 @@ namespace DnsServerCore.Auth
                         LdapAuthProvider.AuthInfo authInfo = await ldapProvider.AuthenticateAsync(username, password);
 
                         //sync display name
-                        user.DisplayName = authInfo.DisplayName;
+                        SyncRemoteDisplayName(user, authInfo.DisplayName);
 
                         SyncRemoteGroups(user, authInfo.Groups, sso: false);
                     }
@@ -1612,6 +1622,8 @@ namespace DnsServerCore.Auth
                 if (_users.Count >= byte.MaxValue)
                     throw new DnsWebServiceException("Cannot create more than 255 users.");
 
+                if (user.Type == UserType.RemoteSSO && GetSsoUser(user.SsoIdentifier) is not null)
+                    throw new DnsWebServiceException("The SSO identifier is already in use.");
                 user.AddToGroup(GetGroup(Group.EVERYONE));
                 if (!_users.TryAdd(user.Username, user))
                     throw new DnsWebServiceException("User already exists: " + user.Username);

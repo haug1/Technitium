@@ -710,7 +710,8 @@ namespace DnsServerCore
                         currentUsername = user.Username;
 
                         //sync username
-                        if (!user.Username.Equals(email, StringComparison.OrdinalIgnoreCase) && !user.Username.Equals(username, StringComparison.OrdinalIgnoreCase))
+                        if (!ConfigurationUsers.OwnsMembership(_dnsWebService._authManager.ManagedUserPaths, user.Username, user.Type) &&
+                            !user.Username.Equals(email, StringComparison.OrdinalIgnoreCase) && !user.Username.Equals(username, StringComparison.OrdinalIgnoreCase))
                         {
                             //find available local username
                             if (User.IsUsernameValid(email) && (_dnsWebService._authManager.GetUser(email) is null))
@@ -727,8 +728,7 @@ namespace DnsServerCore
                         }
 
                         //sync display name
-                        if (!user.DisplayName.Equals(displayName, StringComparison.Ordinal))
-                            user.DisplayName = displayName;
+                        _dnsWebService._authManager.SyncRemoteDisplayName(user, displayName);
                     }
 
                     memberOfGroups = _dnsWebService._authManager.SyncRemoteGroups(user, remoteGroups, sso: true);

@@ -107,6 +107,7 @@ namespace DnsServerCore.Configuration
                 CheckField(paths, current, "groups", !SameGroups(current, restored.MemberOfGroups.Select(group => group.Name.ToLowerInvariant())));
                 CheckField(paths, current, "passwordIterations", current.PasswordIterations != restored.PasswordIterations);
                 CheckField(paths, current, "password", !current.HasSamePasswordState(restored));
+                CheckField(paths, current, "externalIdentifier", current.SsoIdentifier != restored.SsoIdentifier);
                 CheckField(paths, current, "totp/enabled", current.TOTPEnabled != restored.TOTPEnabled);
                 CheckField(paths, current, "totp/enrollment", !SameEnrollment(current.TOTPKeyUri, restored.TOTPKeyUri));
             }
@@ -147,11 +148,16 @@ namespace DnsServerCore.Configuration
         }
 
         internal sealed record Change(User Current, string Name, string DisplayName, bool Disabled, int Timeout,
-            string[] Groups, string Password, int Iterations, string[] Fields, bool Remove = false, bool TotpEnabled = false, AuthenticatorKeyUri Enrollment = null)
+            string[] Groups, string Password, int Iterations, string[] Fields, bool Remove = false, bool TotpEnabled = false, AuthenticatorKeyUri Enrollment = null, UserType Type = UserType.Local, string ExternalIdentifier = null)
         {
             internal User Stage(AuthManager auth, IReadOnlyDictionary<string, Group> groupChanges)
             {
-                User user = Current?.CopyForManifest() ?? User.CreateLocalUser(DisplayName, Name, Password, Iterations);
+                User user = Current?.CopyForManifest() ?? (Type switch
+                {
+                    UserType.RemoteSSO => User.CreateSsoUser(DisplayName, Name, ExternalIdentifier),
+                    UserType.RemoteLDAP => User.CreateLdapUser(DisplayName, Name),
+                    _ => User.CreateLocalUser(DisplayName, Name, Password, Iterations)
+                });
                 user.DisplayName = DisplayName;
                 user.Disabled = Disabled;
                 user.SessionTimeoutSeconds = Timeout;
@@ -175,7 +181,7 @@ namespace DnsServerCore.Configuration
         }
 
         internal static SortedDictionary<string, Change> Prepare(ConfigurationManifest manifest, AuthManager auth,
-            IReadOnlyDictionary<string, Group> groupChanges, bool includeUnchanged = false, User actor = null)
+            IReadOnlyDictionary<string, Group> groupChanges, bool includeUnchanged = false, User actor = null, ConfigurationLdap.Settings ldap = null)
         {
             var changes = new SortedDictionary<string, Change>(StringComparer.Ordinal);
             if (!TryGetDeclaration(manifest, out JsonElement users))
@@ -208,15 +214,31 @@ namespace DnsServerCore.Configuration
                         Remove(current);
                     continue;
                 }
-                if (current is not null && current.Type != UserType.Local ||
-                    declaration.TryGetProperty("type", out JsonElement type) && type.ValueKind != JsonValueKind.Null && !type.ValueEquals("Local"))
-                    throw new InvalidDataException($"{path}/type: Only local accounts can be reconciled.");
-                if (declaration.TryGetProperty("externalIdentifier", out _))
-                    throw new InvalidDataException($"{path}/externalIdentifier: Local users have no external identifier.");
+                UserType type = current?.Type ?? UserType.Local;
+                if (declaration.TryGetProperty("type", out JsonElement typeValue))
+                    type = typeValue.ValueKind == JsonValueKind.Null ? UserType.Local : Enum.Parse<UserType>(typeValue.GetString());
+                if (current is not null && current.Type != type)
+                    throw new InvalidDataException($"{path}/type: Changing an existing account type is not supported.");
+                if (name == "admin" && type != UserType.Local)
+                    throw new InvalidDataException($"{path}/type: The built-in administrator must remain a local account.");
+
+                string identifier = current?.SsoIdentifier;
+                if (declaration.TryGetProperty("externalIdentifier", out JsonElement external))
+                {
+                    if (type != UserType.RemoteSSO)
+                        throw new InvalidDataException($"{path}/externalIdentifier: Only SSO accounts use an external identifier.");
+                    identifier = external.GetString();
+                    if (current is not null && current.SsoIdentifier != identifier)
+                        throw new InvalidDataException($"{path}/externalIdentifier: Changing an existing SSO identity is not supported.");
+                }
+                if (type == UserType.RemoteSSO && (string.IsNullOrWhiteSpace(identifier) || Encoding.UTF8.GetByteCount(identifier) > byte.MaxValue))
+                    throw new InvalidDataException($"{path}/externalIdentifier: An SSO account requires an external identifier within 255 UTF-8 bytes.");
                 bool totpEnabled = current?.TOTPEnabled ?? false;
                 AuthenticatorKeyUri enrollment = current?.TOTPKeyUri;
                 if (declaration.TryGetProperty("totp", out JsonElement totp))
                 {
+                    if (type == UserType.RemoteSSO)
+                        throw new InvalidDataException($"{path}/totp: The identity provider manages SSO authentication.");
                     if (totp.TryGetProperty("enabled", out JsonElement enabled))
                         totpEnabled = enabled.ValueKind == JsonValueKind.True;
                     if (totp.TryGetProperty("enrollment", out JsonElement enrollmentRef))
@@ -228,18 +250,22 @@ namespace DnsServerCore.Configuration
                 string password = null;
                 if (declaration.TryGetProperty("password", out JsonElement reference))
                 {
+                    if (type != UserType.Local)
+                        throw new InvalidDataException($"{path}/password: Only local accounts accept a password.");
                     if (reference.ValueKind == JsonValueKind.Null)
                         throw new InvalidDataException($"{path}/password: A local password requires a secret reference.");
                     password = manifest.ResolveReference(reference, path + "/password");
                     if (string.IsNullOrEmpty(password))
                         throw new InvalidDataException($"{path}/password: A local password cannot be empty.");
                 }
-                if (current is null && password is null)
+                if (current is null && type == UserType.Local && password is null)
                     throw new InvalidDataException($"{path}/password: Creating a local user requires a secret reference.");
 
                 int iterations = User.DEFAULT_ITERATIONS;
                 if (declaration.TryGetProperty("passwordIterations", out JsonElement configured))
                 {
+                    if (type != UserType.Local)
+                        throw new InvalidDataException($"{path}/passwordIterations: Only local accounts use password iterations.");
                     if (configured.ValueKind != JsonValueKind.Null)
                         iterations = configured.GetInt32();
                     if (password is null && current?.PasswordIterations != iterations)
@@ -262,6 +288,10 @@ namespace DnsServerCore.Configuration
                 var groups = new SortedDictionary<string, Group>(StringComparer.Ordinal);
                 if (declaration.TryGetProperty("groups", out JsonElement groupList))
                 {
+                    bool providerManagesGroups = type == UserType.RemoteSSO && auth.SsoManagedGroups ||
+                        type == UserType.RemoteLDAP && (ldap is null ? auth.LdapManagedGroups : ldap.GroupMap?.Count > 0);
+                    if (providerManagesGroups)
+                        throw new InvalidDataException($"{path}/groups: The identity provider manages this account's groups.");
                     if (groupList.ValueKind != JsonValueKind.Null)
                     {
                         foreach (JsonElement item in groupList.EnumerateArray())
@@ -311,10 +341,11 @@ namespace DnsServerCore.Configuration
                         fields.Add("totp/enrollment");
                 }
                 if (current is null || fields.Count > 0 || includeUnchanged)
-                    changes.Add(name, new Change(current, name, displayName, disabled, timeout, groups.Keys.ToArray(), password, iterations, fields.ToArray(), TotpEnabled: totpEnabled, Enrollment: enrollment));
+                    changes.Add(name, new Change(current, name, displayName, disabled, timeout, groups.Keys.ToArray(), password, iterations, fields.ToArray(), TotpEnabled: totpEnabled, Enrollment: enrollment, Type: type, ExternalIdentifier: identifier));
             }
             if (auth.Users.Count + additions - changes.Values.Count(change => change.Remove) > byte.MaxValue)
                 throw new InvalidDataException($"{Path}: At most 255 users can be stored.");
+            CheckSsoIdentities(auth, changes);
             return changes;
 
             void Remove(User user)
@@ -329,15 +360,25 @@ namespace DnsServerCore.Configuration
             string path = ConfigurationPlan.AppendPath(Path, user.Username);
             if (user.Username == "admin" || ReferenceEquals(actor, user))
                 throw new InvalidDataException($"{path}: The built-in or applying administrator cannot be removed.");
-            if (user.Type != UserType.Local)
-                throw new InvalidDataException($"{path}: Only local accounts can be removed through the manifest.");
             if (auth.HasLegacyStaticSession(user) || auth.GetSessions(user).Any(session => session.Type == UserSessionType.ClusterApiToken))
                 throw new InvalidDataException($"{path}: An account with a legacy static or cluster session cannot be removed.");
         }
 
+        internal static void CheckSsoIdentities(AuthManager auth, IReadOnlyDictionary<string, Change> changes)
+        {
+            var identifiers = auth.Users.Where(user => user.Type == UserType.RemoteSSO &&
+                (!changes.TryGetValue(user.Username, out Change change) || !change.Remove))
+                .Select(user => user.SsoIdentifier).ToHashSet(StringComparer.Ordinal);
+            foreach (Change change in changes.Values)
+            {
+                if (change.Current is null && change.Type == UserType.RemoteSSO && !identifiers.Add(change.ExternalIdentifier))
+                    throw new InvalidDataException($"{UserPath(change.Name)}/externalIdentifier: The SSO identifier is already in use.");
+            }
+        }
+
         private static JsonObject Profile(User user) => new()
         {
-            ["type"] = "Local",
+            ["type"] = user.Type.ToString(),
             ["displayName"] = user.DisplayName,
             ["disabled"] = user.Disabled,
             ["sessionTimeoutSeconds"] = user.SessionTimeoutSeconds,
@@ -350,16 +391,20 @@ namespace DnsServerCore.Configuration
             foreach (User user in auth.Users.OrderBy(user => user.Username, StringComparer.Ordinal))
             {
                 string path = ConfigurationPlan.AppendPath(Path, user.Username);
-                if (user.Type != UserType.Local)
-                {
-                    missingInputs.Add(path);
-                    continue;
-                }
                 JsonObject profile = Profile(user);
-                if (user.PasswordIterations >= User.DEFAULT_ITERATIONS)
-                    profile["passwordIterations"] = user.PasswordIterations;
+                if (user.Type == UserType.Local)
+                {
+                    if (user.PasswordIterations >= User.DEFAULT_ITERATIONS)
+                        profile["passwordIterations"] = user.PasswordIterations;
+                    missingInputs.Add(path + "/password");
+                }
+                else if (user.Type == UserType.RemoteSSO)
+                {
+                    profile["externalIdentifier"] = user.SsoIdentifier;
+                }
+                if (user.Type == UserType.RemoteSSO && auth.SsoManagedGroups || user.Type == UserType.RemoteLDAP && auth.LdapManagedGroups)
+                    profile.Remove("groups");
                 users.Add(user.Username, profile);
-                missingInputs.Add(path + "/password");
                 if (user.TOTPKeyUri is not null)
                 {
                     profile["totp"] = new JsonObject { ["enabled"] = user.TOTPEnabled };
@@ -381,7 +426,10 @@ namespace DnsServerCore.Configuration
                     writer.WritePropertyName("profile");
                     Profile(current).WriteTo(writer);
                     writer.WriteNumber("iterations", current.PasswordIterations);
-                    writer.WriteString("passwordRevision", Fingerprint(current.PasswordHash));
+                    if (current.Type == UserType.Local)
+                        writer.WriteString("passwordRevision", Fingerprint(current.PasswordHash));
+                    if (current.Type == UserType.RemoteSSO)
+                        writer.WriteString("externalIdentifier", current.SsoIdentifier);
                     writer.WriteBoolean("totpEnabled", current.TOTPEnabled);
                     if (current.TOTPKeyUri is not null)
                         writer.WriteString("totpEnrollmentRevision", Fingerprint(current.TOTPKeyUri.ToString()));

@@ -800,7 +800,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 ldapOwnership = null;
 
             var groupChanges = ConfigurationGroups.Prepare(manifest, auth);
-            var userChanges = preparedUsers ?? ConfigurationUsers.Prepare(manifest, auth, groupChanges, actor: creator);
+            var userChanges = preparedUsers ?? ConfigurationUsers.Prepare(manifest, auth, groupChanges, actor: creator, ldap: ldap);
             var staticSessions = preparedSessions ?? ConfigurationStaticSessions.Prepare(manifest, auth, userChanges);
             ConfigurationStaticSessions.CheckAccountRemovals(auth, userChanges, staticSessions);
             if (staticSessions?.Changes.Count == 0)

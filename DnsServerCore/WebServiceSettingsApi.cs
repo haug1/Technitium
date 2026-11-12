@@ -789,7 +789,7 @@ namespace DnsServerCore
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
                 ConfigurationLdap.Settings ldap = PrepareLdapForSession(manifest, sessionUser);
-                var users = PrepareUsersForSession(manifest, sessionUser);
+                var users = PrepareUsersForSession(manifest, sessionUser, ldap);
                 var staticSessions = PrepareStaticSessionsForSession(manifest, sessionUser, users);
                 using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot, preparedLdap: ldap, preparedUsers: users, preparedStaticSessions: staticSessions);
                 if (dhcpSnapshot is not null)
@@ -975,7 +975,7 @@ namespace DnsServerCore
                 return ConfigurationLdap.Prepare(manifest, _dnsWebService._authManager);
             }
 
-            private IReadOnlyDictionary<string, ConfigurationUsers.Change> PrepareUsersForSession(ConfigurationManifest manifest, User user, IReadOnlyDictionary<string, Group> groups = null)
+            private IReadOnlyDictionary<string, ConfigurationUsers.Change> PrepareUsersForSession(ConfigurationManifest manifest, User user, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, Group> groups = null)
             {
                 if (!ConfigurationUsers.TryGetDeclaration(manifest, out _))
                     return null;
@@ -983,7 +983,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 groups ??= ConfigurationGroups.Prepare(manifest, _dnsWebService._authManager);
-                return ConfigurationUsers.Prepare(manifest, _dnsWebService._authManager, groups, includeUnchanged: true, actor: user);
+                return ConfigurationUsers.Prepare(manifest, _dnsWebService._authManager, groups, includeUnchanged: true, actor: user, ldap: ldap);
             }
 
             private ConfigurationStaticSessions.Candidate PrepareStaticSessionsForSession(ConfigurationManifest manifest, User user,
@@ -1023,7 +1023,7 @@ namespace DnsServerCore
                         ConfigurationLdap.WriteSnapshot(writer, _dnsWebService._authManager.GetManifestLdapSettings(), ldap, _configurationRevisionKey);
                     var auth = _dnsWebService._authManager;
                     var groups = ConfigurationGroups.Prepare(manifest, auth);
-                    var users = preparedUsers ?? PrepareUsersForSession(manifest, sessionUser, groups);
+                    var users = preparedUsers ?? PrepareUsersForSession(manifest, sessionUser, ldap, groups);
                     var staticSessions = preparedStaticSessions ?? PrepareStaticSessionsForSession(manifest, sessionUser, users);
                     ConfigurationStaticSessions.CheckAccountRemovals(auth, users, staticSessions);
                     if (staticSessions is not null)

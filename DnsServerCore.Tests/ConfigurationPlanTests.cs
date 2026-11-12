@@ -3824,6 +3824,71 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DirectoryAccountsCanBeProvisionedAndExportedWithoutLocalPasswords()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"auth":{"groups":{"Directory Readers":{}},"users":{
+                    "ldap-reader":{"type":"RemoteLDAP","displayName":"LDAP Reader","groups":["Directory Readers"]},
+                    "sso-reader":{"type":"RemoteSSO","externalIdentifier":"fixture-identity","sessionTimeoutSeconds":90}
+                }}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement ldap = await server.CallAsync("admin/users/get?user=ldap-reader", server.AdminToken);
+            LoopbackWebService.AssertOk(ldap);
+            Assert.Equal("RemoteLDAP", ldap.GetProperty("response").GetProperty("type").GetString());
+            Assert.Contains(ldap.GetProperty("response").GetProperty("memberOfGroups").EnumerateArray(),
+                group => group.ValueEquals("Directory Readers"));
+
+            const string duplicate = """
+                {"schemaVersion":1,"auth":{"users":{"duplicate":{"type":"RemoteSSO","externalIdentifier":"fixture-identity"}}}}
+                """;
+            using var content = new StringContent(duplicate, Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/auth/users/duplicate/externalIdentifier", rejected.GetProperty("errorMessage").GetString());
+
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement response = export.GetProperty("response");
+            JsonElement auth = response.GetProperty("manifest").GetProperty("auth");
+            JsonElement users = auth.GetProperty("users");
+            Assert.Equal("fixture-identity", users.GetProperty("sso-reader").GetProperty("externalIdentifier").GetString());
+            Assert.DoesNotContain(response.GetProperty("missingInputs").EnumerateArray(),
+                path => path.GetString()!.StartsWith("/auth/users/ldap-reader", StringComparison.Ordinal) ||
+                    path.GetString()!.StartsWith("/auth/users/sso-reader", StringComparison.Ordinal));
+
+            await using var target = await LoopbackWebService.StartAsync();
+            JsonObject targetUsers = new()
+            {
+                ["ldap-reader"] = JsonNode.Parse(users.GetProperty("ldap-reader").GetRawText()),
+                ["sso-reader"] = JsonNode.Parse(users.GetProperty("sso-reader").GetRawText())
+            };
+            string migration = new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["auth"] = new JsonObject
+                {
+                    ["groups"] = JsonNode.Parse(auth.GetProperty("groups").GetRawText()),
+                    ["users"] = targetUsers
+                }
+            }.ToJsonString();
+            revision = (await PreviewAsync(target, migration)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(target, migration, revision));
+            await target.RestartAsync();
+            Assert.Empty((await PreviewAsync(target, migration)).GetProperty("changes").EnumerateArray());
+
+            const string remove = """{"schemaVersion":1,"auth":{"users":{"sso-reader":null}}}""";
+            revision = (await PreviewAsync(server, remove)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, remove, revision));
+            Assert.Equal("error", (await server.CallAsync("admin/users/get?user=sso-reader", server.AdminToken)).GetProperty("status").GetString());
+        }
+
+        [Fact]
         public async Task LocalUserManifestRequiresSecretsAndPreservesAdministrativeAccess()
         {
             await using var server = await LoopbackWebService.StartAsync();
