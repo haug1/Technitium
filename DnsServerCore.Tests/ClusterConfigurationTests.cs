@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
@@ -11,6 +12,63 @@ namespace DnsServerCore.Tests
     [Collection("Web service")]
     public sealed class ClusterConfigurationTests
     {
+        [Fact]
+        public async Task StartupManifestInitializesPrimaryOnceAndPersistsOwnedOptions()
+        {
+            const string manifest = """
+                {"schemaVersion":1,"cluster":{"domain":"cluster.test","bootstrap":{"role":"Primary"},
+                  "node":{"addresses":["127.0.0.1"]},"configRefreshSeconds":120}}
+                """;
+            await using var server = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true, startupManifest: manifest);
+            JsonElement first = await ReadStateAsync();
+            Assert.Equal("cluster.test", first.GetProperty("clusterDomain").GetString());
+            Assert.Equal(120, first.GetProperty("configRefreshIntervalSeconds").GetInt32());
+            Assert.Equal("/cluster/configRefreshSeconds", Assert.Single(first.GetProperty("managedOptionPaths").EnumerateArray()).GetString());
+            JsonElement originalNode = Assert.Single(first.GetProperty("clusterNodes").EnumerateArray());
+            Assert.Equal("Primary", originalNode.GetProperty("type").GetString());
+            Assert.True(File.Exists(Path.Combine(server.ConfigurationDirectory, "zones", "cluster.test.zone")));
+            Assert.True(File.Exists(Path.Combine(server.ConfigurationDirectory, "zones", "cluster-catalog.cluster.test.zone")));
+
+            await server.RestartAsync();
+            JsonElement second = await ReadStateAsync();
+            Assert.Equal(originalNode.GetProperty("id").GetInt32(), Assert.Single(second.GetProperty("clusterNodes").EnumerateArray()).GetProperty("id").GetInt32());
+            Assert.Equal(120, second.GetProperty("configRefreshIntervalSeconds").GetInt32());
+
+            async Task<JsonElement> ReadStateAsync()
+            {
+                JsonElement state = await server.CallAsync("admin/cluster/state", server.AdminToken);
+                LoopbackWebService.AssertOk(state);
+                return state.GetProperty("response");
+            }
+        }
+
+        [Fact]
+        public async Task FailedStartupBootstrapRestoresFilesAndCanBeRetried()
+        {
+            const string manifest = """
+                {"schemaVersion":1,"cluster":{"domain":"cluster.test","bootstrap":{"role":"Primary"},
+                  "node":{"addresses":["127.0.0.1"]},"configRefreshSeconds":120}}
+                """;
+            await using var server = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
+            string folder = server.ConfigurationDirectory;
+            string blockedFile = Path.Combine(folder, "cluster-ownership.config.tmp");
+
+            Exception failure = await Assert.ThrowsAnyAsync<Exception>(() => server.RestartAsync(null, () =>
+            {
+                File.WriteAllText(Path.Combine(folder, "technitium.json"), manifest);
+                Directory.CreateDirectory(blockedFile);
+            }));
+            Assert.True(failure is IOException or UnauthorizedAccessException, failure.ToString());
+            Assert.False(File.Exists(Path.Combine(folder, "cluster.config")));
+            Assert.False(File.Exists(Path.Combine(folder, "zones", "cluster.test.zone")));
+            Assert.False(File.Exists(Path.Combine(folder, "zones", "cluster-catalog.cluster.test.zone")));
+
+            await server.RestartAsync(null, () => Directory.Delete(blockedFile));
+            JsonElement state = await server.CallAsync("admin/cluster/state", server.AdminToken);
+            LoopbackWebService.AssertOk(state);
+            Assert.True(state.GetProperty("response").GetProperty("clusterInitialized").GetBoolean());
+        }
+
         [Fact]
         public async Task PrimaryInitializationChecksBothClusterZonesBeforeEnablingTlsOrCreatingZones()
         {

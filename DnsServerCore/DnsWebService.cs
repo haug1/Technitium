@@ -3494,7 +3494,11 @@ namespace DnsServerCore
 
                 //init cluster manager and load config file
                 _clusterManager = new ClusterManager(this);
-                if (startupManifest is not null)
+                User bootstrapAdmin = _authManager.GetUser("admin");
+                var bootstrap = ConfigurationClusterOptions.PrepareStartupBootstrap(startupManifest, _clusterManager, bootstrapAdmin);
+                if (bootstrap is not null && !IsWebServiceTlsEnabled)
+                    throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before initializing the Primary.");
+                if (startupManifest is not null && bootstrap is null)
                 {
                     ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
                     ConfigurationClusterOptions.Prepare(startupManifest, _clusterManager);
@@ -3573,7 +3577,9 @@ namespace DnsServerCore
                         bool declaresDhcp = startupManifest is not null && startupManifest.Settings.TryGetProperty("dhcp", out var dhcp) &&
                             dhcp.TryGetProperty("scopes", out _);
                         await _dhcpServer.StartAsync(waitForScopes: declaresDhcp);
-                        if (startupManifest is not null)
+                        if (bootstrap is not null)
+                            _clusterManager.InitializePrimaryFromManifest(bootstrap, bootstrapAdmin);
+                        else if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
                             await _dhcpServer.EnterManifestGateAsync();

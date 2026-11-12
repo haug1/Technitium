@@ -258,7 +258,9 @@ namespace DnsServerCore
 
                 try
                 {
-                    _dnsWebService._clusterManager.InitializeCluster(clusterDomain, primaryNodeIpAddresses, context.GetCurrentSession());
+                    UserSession session = context.GetCurrentSession();
+                    _dnsWebService._clusterManager.InitializeCluster(clusterDomain, primaryNodeIpAddresses, sessionUser,
+                        session.LastSeenRemoteAddress, session.LastSeenUserAgent);
 
                     _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Cluster (" + _dnsWebService._clusterManager.ClusterDomain + ") was initialized successfully.");
 

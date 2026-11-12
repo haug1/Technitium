@@ -323,6 +323,24 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
+        internal void FlushClusterBootstrapZones(string domain, string catalog)
+        {
+            lock (_saveLock)
+            {
+                SaveZoneFileInternal(domain);
+                SaveZoneFileInternal(catalog);
+            }
+        }
+
+        internal void ClearClusterBootstrapSaves(string domain, string catalog)
+        {
+            lock (_saveLock)
+            {
+                _pendingSaveZones.Remove(domain);
+                _pendingSaveZones.Remove(catalog);
+            }
+        }
+
         private static uint GetMinExpiryTtlFor(IReadOnlyList<DnsResourceRecord> records)
         {
             uint minExpiryTtl = 0u;

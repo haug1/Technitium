@@ -543,7 +543,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        internal void InitializeCluster(string clusterDomain, IReadOnlyList<IPAddress> primaryNodeIpAddresses, UserSession session)
+        internal void InitializeCluster(string clusterDomain, IReadOnlyList<IPAddress> primaryNodeIpAddresses, User user, IPAddress remoteAddress, string userAgent, ConfigurationClusterOptions.Settings? options = null)
         {
             if (!_dnsWebService.IsWebServiceTlsEnabled)
                 throw new InvalidOperationException();
@@ -636,7 +636,7 @@ namespace DnsServerCore.Cluster
 
             //create cluster API token if it does not exist
             {
-                List<UserSession> userSessions = _dnsWebService.AuthManager.GetSessions(session.User);
+                List<UserSession> userSessions = _dnsWebService.AuthManager.GetSessions(user);
                 bool apiTokenExists = false;
 
                 foreach (UserSession existingSession in userSessions)
@@ -649,7 +649,7 @@ namespace DnsServerCore.Cluster
                 }
 
                 if (!apiTokenExists)
-                    _dnsWebService.AuthManager.CreateSession(UserSessionType.ClusterApiToken, clusterZoneInfo.Name, session.User.Username, session.LastSeenRemoteAddress, session.LastSeenUserAgent);
+                    _dnsWebService.AuthManager.CreateSession(UserSessionType.ClusterApiToken, clusterZoneInfo.Name, user.Username, remoteAddress, userAgent);
             }
 
             //dispose existing nodes, if any
@@ -662,10 +662,7 @@ namespace DnsServerCore.Cluster
             };
 
             _clusterDomain = clusterZoneInfo.Name;
-            _heartbeatRefreshIntervalSeconds = HEARTBEAT_REFRESH_INTERVAL_SECONDS;
-            _heartbeatRetryIntervalSeconds = HEARTBEAT_RETRY_INTERVAL_SECONDS;
-            _configRefreshIntervalSeconds = CONFIG_REFRESH_INTERVAL_SECONDS;
-            _configRetryIntervalSeconds = CONFIG_RETRY_INTERVAL_SECONDS;
+            SetManifestOptions(options ?? DefaultManifestOptions);
 
             //update cluster primary zone and save zone file
             FindExistingRecordTtlValues(out uint nsTtl, out uint aTtl); //find existing record TTL values
@@ -681,7 +678,31 @@ namespace DnsServerCore.Cluster
             //save all changes
             _dnsWebService.DnsServer.SaveConfigFile(true);
             _dnsWebService.AuthManager.SaveConfigFile(true);
-            SaveConfigFile();
+            SaveConfigFile(immediately: options.HasValue);
+        }
+
+        internal static ConfigurationClusterOptions.Settings DefaultManifestOptions => new(
+            HEARTBEAT_REFRESH_INTERVAL_SECONDS, HEARTBEAT_RETRY_INTERVAL_SECONDS, CONFIG_REFRESH_INTERVAL_SECONDS, CONFIG_RETRY_INTERVAL_SECONDS);
+
+        internal void InitializePrimaryFromManifest(ConfigurationClusterOptions.PrimaryBootstrap bootstrap, User admin)
+        {
+            string catalog = "cluster-catalog." + bootstrap.Domain;
+            var zones = _dnsWebService.DnsServer.AuthZoneManager;
+            ConfigurationJournal.Persist(_dnsWebService.ConfigFolder, () =>
+            {
+                try
+                {
+                    InitializeCluster(bootstrap.Domain, bootstrap.Addresses, admin, IPAddress.Loopback, null, bootstrap.Options);
+                    zones.FlushClusterBootstrapZones(bootstrap.Domain, catalog);
+                    WriteManifestOwnership(bootstrap.Ownership);
+                }
+                finally
+                {
+                    zones.ClearClusterBootstrapSaves(bootstrap.Domain, catalog);
+                }
+            }, "dns.config", "auth.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile,
+                Path.Combine("zones", bootstrap.Domain + ".zone"), Path.Combine("zones", catalog + ".zone"));
+            _managedOptionNames = bootstrap.Ownership;
         }
 
         public void DeleteCluster(bool forceDelete)

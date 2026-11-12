@@ -1,0 +1,14 @@
+{
+  "$schema": "../technitium.schema.json",
+  "schemaVersion": 1,
+  "cluster": {
+    "domain": "cluster.example.test",
+    "bootstrap": {
+      "role": "Primary"
+    },
+    "node": {
+      "addresses": ["192.0.2.10"]
+    },
+    "configRefreshSeconds": 120
+  }
+}
