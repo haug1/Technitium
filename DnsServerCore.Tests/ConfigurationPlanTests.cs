@@ -1216,6 +1216,51 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupRecoversZoneFilesAndPermissionsFromInterruptedApply()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=previous.test&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=previous.test&domain=www.previous.test&type=A&ipAddress=192.0.2.31", server.AdminToken));
+            await server.RestartAsync();
+
+            string zoneDirectory = Path.Combine(server.ConfigurationDirectory, "zones");
+            byte[] previousZone = await File.ReadAllBytesAsync(Path.Combine(zoneDirectory, "previous.test.zone"));
+            byte[] previousPermissions = await File.ReadAllBytesAsync(Path.Combine(server.ConfigurationDirectory, "auth.config"));
+
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/delete?zone=previous.test", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=candidate.test&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=candidate.test&domain=www.candidate.test&type=A&ipAddress=192.0.2.32", server.AdminToken));
+            await server.RestartAsync();
+            Assert.Single((await server.QueryAsync("www.candidate.test", DnsResourceRecordType.A)).Answer);
+
+            // A pending journal has an empty entry for a target that did not previously exist.
+            string journal = Path.Combine(server.ConfigurationDirectory, ".manifest-pending");
+            string previousEntry = Directory.CreateDirectory(Path.Combine(journal, "zones", "previous.test.zone")).FullName;
+            Directory.CreateDirectory(Path.Combine(journal, "zones", "candidate.test.zone"));
+            await File.WriteAllBytesAsync(Path.Combine(previousEntry, "previous"), previousZone);
+            string permissionsEntry = Directory.CreateDirectory(Path.Combine(journal, "auth.config")).FullName;
+            await File.WriteAllBytesAsync(Path.Combine(permissionsEntry, "previous"), previousPermissions);
+
+            await server.RestartAsync();
+            DnsResourceRecord restored = Assert.Single((await server.QueryAsync("www.previous.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.31"), Assert.IsType<DnsARecordData>(restored.RDATA).Address);
+            Assert.Empty((await server.QueryAsync("www.candidate.test", DnsResourceRecordType.A)).Answer);
+            Assert.False(File.Exists(Path.Combine(zoneDirectory, "candidate.test.zone")));
+            Assert.False(Directory.Exists(journal));
+
+            JsonElement permissions = await server.CallAsync("zones/permissions/get?zone=previous.test", server.AdminToken);
+            LoopbackWebService.AssertOk(permissions);
+            JsonElement creator = Assert.Single(permissions.GetProperty("response").GetProperty("userPermissions").EnumerateArray());
+            Assert.Equal("admin", creator.GetProperty("username").GetString());
+            Assert.True(creator.GetProperty("canDelete").GetBoolean());
+
+            await server.RestartAsync();
+            Assert.Single((await server.QueryAsync("www.previous.test", DnsResourceRecordType.A)).Answer);
+        }
+
+        [Fact]
         public async Task InvalidStartupTlsManifestLeavesPreviousLoggingConfigurationIntact()
         {
             await using var server = await LoopbackWebService.StartAsync();

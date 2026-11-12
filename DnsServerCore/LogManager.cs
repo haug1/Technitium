@@ -106,7 +106,7 @@ namespace DnsServerCore
         {
             _isPortableApp = isPortableApp;
             _configFolder = configFolder;
-            ConfigurationJournal.Recover(_configFolder, "dns.config", "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config");
+            ConfigurationJournal.Recover(_configFolder);
 
             AppDomain.CurrentDomain.UnhandledException += delegate (object sender, UnhandledExceptionEventArgs e)
             {
