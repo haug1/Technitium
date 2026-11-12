@@ -774,10 +774,17 @@ namespace DnsServerCore
                     {
                         string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
                         declaredZones.Add(name);
-                        bool exists = current.RootElement.GetProperty("manifestZones").GetProperty(name).TryGetProperty("type", out _);
+                        JsonElement currentZone = current.RootElement.GetProperty("manifestZones").GetProperty(name);
+                        bool exists = currentZone.TryGetProperty("type", out _);
                         bool deletion = declaration.Value.ValueKind == JsonValueKind.Null;
                         if (deletion && !exists)
                             continue;
+
+                        if (currentZone.TryGetProperty("recordChanges", out JsonElement recordChanges) &&
+                            recordChanges.EnumerateArray().Any(change => change.ValueKind == JsonValueKind.Number &&
+                                change.GetInt32() == (int)ConfigurationChangeKind.Remove) &&
+                            !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Delete))
+                            throw new DnsWebServiceException("Access was denied.");
 
                         PermissionFlag flag = deletion ? PermissionFlag.Delete : PermissionFlag.Modify;
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, flag) ||
@@ -1045,7 +1052,8 @@ namespace DnsServerCore
                         }
                         writer.WriteStartArray("recordChanges");
                         foreach (ConfigurationChangeKind? change in ConfigurationPlan.CompareZoneRecords(
-                            name, declaration.Name, _dnsWebService._dnsServer.ServerDomain, records, currentRecords))
+                            name, declaration.Name, _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
+                            _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records")))
                         {
                             if (change.HasValue)
                                 writer.WriteNumberValue((int)change.Value);

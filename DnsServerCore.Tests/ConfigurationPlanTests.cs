@@ -3346,12 +3346,49 @@ namespace DnsServerCore.Tests
             Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
             Assert.Equal(600u, Assert.Single((await server.QueryAsync("www.records.test", DnsResourceRecordType.A)).Answer).OriginalTtlValue);
 
+            const string release = """{"schemaVersion":1,"zones":{"records.test":{"type":"Primary"}}}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
             const string emptyRecords = """{"schemaVersion":1,"zones":{"records.test":{"records":[]}}}""";
             using var content = new StringContent(emptyRecords, Encoding.UTF8, "application/json");
             JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.Contains("/zones/records.test/records", rejected.GetProperty("errorMessage").GetString());
             Assert.DoesNotContain("192.0.2.", rejected.GetRawText());
+        }
+
+        [Fact]
+        public async Task ZoneRecordApplyRemovesOwnedRecordsAndRetainsApexRecords()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string initial = """
+                {"schemaVersion":1,"zones":{"prune.test":{"type":"Primary","updates":{"mode":"Allow"},"records":[
+                    {"owner":"www.prune.test","type":"A","data":{"zoneFile":"192.0.2.42"}}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, initial)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, initial, revision));
+
+            IPEndPoint endpoint = IPEndPoint.Parse((await server.GetSettingsAsync()).GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
+            var client = new DnsClient(endpoint) { Timeout = 2000, Retries = 1 };
+            var update = new DnsDatagram(1, false, DnsOpcode.Update, false, false, false, false, false, false, DnsResponseCode.NoError,
+                [new DnsQuestionRecord("prune.test", DnsResourceRecordType.SOA, DnsClass.IN)],
+                authority: [new DnsResourceRecord("other.prune.test", DnsResourceRecordType.A, DnsClass.IN, 60,
+                    new DnsARecordData(IPAddress.Parse("192.0.2.43")))]);
+            Assert.Equal(DnsResponseCode.Refused, (await client.RawResolveAsync(update)).RCODE);
+
+            const string reset = """{"schemaVersion":1,"zones":{"prune.test":{"records":null}}}""";
+            JsonElement preview = await PreviewAsync(server, reset);
+            JsonElement change = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal("Remove", change.GetProperty("kind").GetString());
+            Assert.Equal("/zones/prune.test/records", change.GetProperty("path").GetString());
+            Assert.Single((await server.QueryAsync("www.prune.test", DnsResourceRecordType.A)).Answer);
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, preview.GetProperty("revision").GetString()!));
+            Assert.Empty((await server.QueryAsync("www.prune.test", DnsResourceRecordType.A)).Answer);
+            Assert.Single((await server.QueryAsync("prune.test", DnsResourceRecordType.SOA)).Answer);
+            await server.RestartAsync();
+            Assert.Empty((await server.QueryAsync("www.prune.test", DnsResourceRecordType.A)).Answer);
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
         }
 
         [Fact]

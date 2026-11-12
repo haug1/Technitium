@@ -814,6 +814,8 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
+        internal void RemoveManifestRecordSet(DnsResourceRecordType type) => _entries.TryRemove(type, out _);
+
         public void LoadRecords(DnsResourceRecordType type, IReadOnlyList<DnsResourceRecord> records)
         {
             _entries[type] = records;

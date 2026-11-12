@@ -825,7 +825,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         DateTime revision = zone.LastModified;
                         var currentRecords = new List<DnsResourceRecord>();
                         ListAllZoneRecords(name, currentRecords);
-                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(name, name, serverDomain, records, currentRecords)
+                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"))
                             .Any(edit => edit.Kind.HasValue);
                         if (editRecords)
                             recordRevisions.Add(name, revision);
@@ -980,6 +980,19 @@ namespace DnsServerCore.Dns.ZoneManagers
                                 ApexZone live = current?.ApexZone ?? stage.Zone;
                                 List<DnsResourceRecord> recordsToPublish = current is null ? stage.Records : stage.Records
                                     .Where(record => stage.ChangedSets.Contains((record.Name.ToLowerInvariant(), record.Type))).ToList();
+                                if (current is not null)
+                                {
+                                    var retained = recordsToPublish.Select(record => (record.Name.ToLowerInvariant(), record.Type)).ToHashSet();
+                                    foreach (var (owner, type) in stage.ChangedSets)
+                                    {
+                                        if (!retained.Contains((owner, type)) && TryGetAuthZone(name, owner, out AuthZone node))
+                                        {
+                                            node.RemoveManifestRecordSet(type);
+                                            if (node is SubDomainZone subdomain)
+                                                subdomain.AutoUpdateState();
+                                        }
+                                    }
+                                }
                                 foreach (var owner in DnsResourceRecord.GroupRecords(recordsToPublish))
                                 {
                                     AuthZone node = owner.Key.Equals(name, StringComparison.OrdinalIgnoreCase)
@@ -1050,7 +1063,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             IReadOnlyDictionary<string, bool> membership, string serverDomain)
         {
             string path = ConfigurationPlan.AppendPath("/zones", zone.Name) + "/records";
-            var edits = ConfigurationPlan.PrepareZoneRecordEdits(zone.Name, zone.Name, serverDomain, declaration, records);
+            var edits = ConfigurationPlan.PrepareZoneRecordEdits(zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"));
             var owners = DnsResourceRecord.GroupRecords(records);
             var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
             // The staging zone uses the normal record setters and SOA history, with notifications disabled.
@@ -1085,7 +1098,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         node.LoadRecords(type, existing);
                 }
 
-                foreach (var rrset in group.GroupBy(edit => edit.Type))
+                foreach (var rrset in group.GroupBy(edit => edit.Type).OrderBy(set => set.All(edit => edit.Kind == ConfigurationChangeKind.Remove) ? 0 : 1))
                 {
                     if (!rrset.Any(edit => edit.Kind.HasValue))
                         continue;
@@ -1105,7 +1118,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             replacement.Add(record);
                         }
                     }
-                    foreach (var edit in rrset)
+                    foreach (var edit in rrset.Where(edit => edit.Kind != ConfigurationChangeKind.Remove))
                     {
                         DnsResourceRecord record = edit.Existing is null
                             ? new DnsResourceRecord(edit.Owner, edit.Type, DnsClass.IN, ttl, edit.Data)
@@ -1118,18 +1131,24 @@ namespace DnsServerCore.Dns.ZoneManagers
                         info.LastModified = DateTime.UtcNow;
                         replacement.Add(record);
                     }
-                    if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count != 1)
+                    if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count > 1)
                         throw new InvalidDataException($"{path}: This record type requires a single record at the owner name.");
 
                     try
                     {
-                        node.SetRecords(rrset.Key, replacement);
+                        if (replacement.Count == 0)
+                            node.DeleteRecords(rrset.Key);
+                        else
+                            node.SetRecords(rrset.Key, replacement);
                     }
                     catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or DnsServerException)
                     {
                         throw new InvalidDataException($"{path}: The record set is invalid for this primary zone.");
                     }
-                    rrsets[rrset.Key] = replacement;
+                    if (replacement.Count == 0)
+                        rrsets.Remove(rrset.Key);
+                    else
+                        rrsets[rrset.Key] = replacement;
                     changed.Add((group.Key.ToLowerInvariant(), rrset.Key));
                 }
             }

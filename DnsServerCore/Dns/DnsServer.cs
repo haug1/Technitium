@@ -4638,6 +4638,9 @@ namespace DnsServerCore.Dns
 
             async Task<bool> IsUpdatePermittedAsync()
             {
+                if (_authZoneManager.OwnsManifestZoneField(zoneInfo.Name, "records"))
+                    return false;
+
                 bool isUpdateAllowed;
 
                 switch (zoneInfo.Update)

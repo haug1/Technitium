@@ -1096,12 +1096,21 @@ namespace DnsServerCore.Configuration
                 if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
                 {
                     int index = 0;
+                    bool removesRecords = false;
                     foreach (JsonElement change in recordChanges.EnumerateArray())
                     {
                         if (change.ValueKind != JsonValueKind.Null)
-                            changes.Add(new ConfigurationChange($"{path}/records/{index}", (ConfigurationChangeKind)change.GetInt32(), false));
+                        {
+                            var kind = (ConfigurationChangeKind)change.GetInt32();
+                            if (kind == ConfigurationChangeKind.Remove)
+                                removesRecords = true;
+                            else
+                                changes.Add(new ConfigurationChange($"{path}/records/{index}", kind, false));
+                        }
                         index++;
                     }
+                    if (removesRecords)
+                        changes.Add(new ConfigurationChange($"{path}/records", ConfigurationChangeKind.Remove, false));
                 }
 
                 if (declaration.Value.TryGetProperty("enabled", out JsonElement enabled))
@@ -1119,22 +1128,19 @@ namespace DnsServerCore.Configuration
             DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, ConfigurationChangeKind? Kind);
 
         internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
-            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords) =>
-            PrepareZoneRecordEdits(zoneName, declarationName, serverDomain, records, currentRecords).Select(edit => edit.Kind).ToArray();
+            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords) =>
+            PrepareZoneRecordEdits(zoneName, declarationName, serverDomain, records, currentRecords, ownsRecords).Select(edit => edit.Kind).ToArray();
 
-        internal static ZoneRecordEdit[] PrepareZoneRecordEdits(string zoneName, string declarationName, string serverDomain,
-            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords)
+        internal static IReadOnlyList<ZoneRecordEdit> PrepareZoneRecordEdits(string zoneName, string declarationName, string serverDomain,
+            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords)
         {
             string path = AppendPath("/zones", declarationName) + "/records";
-            if (records.ValueKind == JsonValueKind.Null)
-                throw new InvalidDataException($"{path}: Planning a record collection reset is not implemented.");
-
-            var changes = new ZoneRecordEdit[records.GetArrayLength()];
+            var changes = new List<ZoneRecordEdit>();
             var current = currentRecords.ToLookup(record => (record.Name.ToLowerInvariant(), record.Type));
             var matched = new HashSet<DnsResourceRecord>(ReferenceEqualityComparer.Instance);
             var declared = new HashSet<(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data)>();
             int index = 0;
-            foreach (JsonElement record in records.EnumerateArray())
+            foreach (JsonElement record in records.ValueKind == JsonValueKind.Null ? [] : records.EnumerateArray().ToArray())
             {
                 string recordPath = $"{path}/{index}";
                 foreach (JsonProperty field in record.EnumerateObject())
@@ -1187,7 +1193,7 @@ namespace DnsServerCore.Configuration
                         (comments is not null && comments != (metadata?.Comments ?? string.Empty)))
                         kind = ConfigurationChangeKind.Update;
                 }
-                changes[index] = new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, kind);
+                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, kind));
                 index++;
             }
 
@@ -1195,7 +1201,13 @@ namespace DnsServerCore.Configuration
             {
                 if (!matched.Contains(record) && !IsLeaseRecord(record) &&
                     !IsGeneratedRecord(zoneName, serverDomain, record.Name, record.Type, record.RDATA))
-                    throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
+                {
+                    if (!ownsRecords)
+                        throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
+
+                    changes.Add(new ZoneRecordEdit(record.Name.ToLowerInvariant(), record.Type, record.RDATA,
+                        record, null, null, null, ConfigurationChangeKind.Remove));
+                }
             }
 
             return changes;
