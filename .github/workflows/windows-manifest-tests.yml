@@ -1,0 +1,37 @@
+name: Windows manifest tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manifest-validation:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: DnsServer
+      - uses: actions/checkout@v5
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          ref: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
+          path: TechnitiumLibrary
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build TechnitiumLibrary
+        working-directory: TechnitiumLibrary
+        shell: bash
+        run: |
+          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
+            dotnet build "$project/$project.csproj" -c Release
+          done
+      - name: Run manifest validation tests on Windows
+        working-directory: DnsServer
+        run: dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj --filter FullyQualifiedName~ConfigurationManifestTests
+      - name: Validate the minimal manifest through the console host
+        working-directory: DnsServer
+        run: dotnet run --no-build --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json

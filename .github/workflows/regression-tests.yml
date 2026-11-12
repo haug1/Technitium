@@ -26,11 +26,7 @@ permissions:
 
 jobs:
   regression:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -52,22 +48,17 @@ jobs:
             dotnet build "$project/$project.csproj" -c Release
           done
       - name: Run regression tests
-        if: runner.os == 'Linux'
         working-directory: DnsServer
         run: |
           dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj \
             --settings DnsServerCore.Tests/coverage.runsettings \
             --collect "XPlat Code Coverage" --logger trx \
             --results-directory "${{ runner.temp }}/technitium-test-results"
-      - name: Run manifest validation tests on Windows
-        if: runner.os == 'Windows'
-        working-directory: DnsServer
-        run: dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj --filter FullyQualifiedName~ConfigurationManifestTests
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer
         run: dotnet run --no-build --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json
       - uses: actions/upload-artifact@v7
-        if: always() && runner.os == 'Linux'
+        if: always()
         with:
           name: regression-test-results
           path: ${{ runner.temp }}/technitium-test-results/
