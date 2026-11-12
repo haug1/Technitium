@@ -80,6 +80,42 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal sealed class ScopeSnapshot : IDisposable
+        {
+            private readonly Dictionary<string, Scope> _scopes = new(StringComparer.Ordinal);
+            private readonly List<Scope> _copies = [];
+
+            internal IReadOnlyDictionary<string, Scope> Scopes => _scopes;
+
+            internal ScopeSnapshot(JsonElement declarations, IReadOnlyDictionary<string, Scope> scopes)
+            {
+                try
+                {
+                    foreach (var (name, scope) in scopes)
+                    {
+                        Scope captured = scope;
+                        if (declarations.ValueKind == JsonValueKind.Null || declarations.TryGetProperty(name, out _))
+                        {
+                            captured = scope.CloneForManifest();
+                            _copies.Add(captured);
+                        }
+                        _scopes.Add(name, captured);
+                    }
+                }
+                catch
+                {
+                    Dispose();
+                    throw;
+                }
+            }
+
+            public void Dispose()
+            {
+                foreach (Scope scope in _copies)
+                    scope.Dispose();
+            }
+        }
+
         internal static void WriteSnapshot(Utf8JsonWriter writer, JsonElement declarations, IReadOnlyDictionary<string, Scope> scopes)
         {
             writer.WriteStartObject("manifestDhcpScopes");
@@ -107,6 +143,7 @@ namespace DnsServerCore.Configuration
                     writer.WriteStartObject();
                     writer.WriteString("hardwareAddress", BitConverter.ToString(lease.HardwareAddress));
                     writer.WriteString("address", lease.Address.ToString());
+                    writer.WriteBoolean("dynamic", lease.Type == LeaseType.Dynamic);
                     writer.WriteEndObject();
                 }
                 writer.WriteEndArray();
@@ -199,8 +236,23 @@ namespace DnsServerCore.Configuration
                 if (scope.TryGetProperty("exclusions", out JsonElement exclusions))
                 {
                     var desired = ReadExclusions(exclusions, path + "/exclusions", start, end);
-                    if (previous is not null && !desired.SequenceEqual(ReadExclusions(currentScope.GetProperty("exclusions"), path + "/exclusions", null, null)))
-                        changes.Add(new ConfigurationChange(path + "/exclusions", ConfigurationChangeKind.Update, false));
+                    if (previous is not null)
+                    {
+                        var currentExclusions = ReadExclusions(currentScope.GetProperty("exclusions"), path + "/exclusions", null, null);
+                        if (!desired.SequenceEqual(currentExclusions))
+                        {
+                            foreach (JsonElement lease in currentScope.GetProperty("activeLeases").EnumerateArray())
+                            {
+                                if (!lease.TryGetProperty("dynamic", out JsonElement dynamic) || !dynamic.GetBoolean())
+                                    continue;
+                                uint address = ReadAddress(lease, "address").ConvertIpToNumber();
+                                if (desired.Any(range => range.Start <= address && address <= range.End) &&
+                                    !currentExclusions.Any(range => range.Start <= address && address <= range.End))
+                                    throw new InvalidDataException($"{path}/exclusions: The exclusion would displace an active dynamic lease.");
+                            }
+                            changes.Add(new ConfigurationChange(path + "/exclusions", ConfigurationChangeKind.Update, false));
+                        }
+                    }
                 }
                 else if (rangeChanged && previous is not null)
                 {

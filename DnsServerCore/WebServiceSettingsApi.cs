@@ -631,9 +631,12 @@ namespace DnsServerCore
                     _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest), webCertificate?.HasCertificate);
                     CheckDnsCertificatePreviewPermission(manifest, sessionUser);
                     ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer, preview: true);
-                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, dnsCertificate: dnsCertificate, webCertificate: webCertificate);
+                    using ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = CaptureDhcpScopeSnapshot(manifest, sessionUser);
+                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, dnsCertificate: dnsCertificate,
+                        webCertificate: webCertificate, dhcpSnapshot: dhcpSnapshot);
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
-                    ConfigurationDhcp.ValidatePersistableScopes(manifest, _dnsWebService._dhcpServer.Scopes, _dnsWebService._log, _dnsWebService._dhcpServer);
+                    if (dhcpSnapshot is not null)
+                        ConfigurationDhcp.ValidatePersistableScopes(manifest, dhcpSnapshot.Scopes, _dnsWebService._log, _dnsWebService._dhcpServer);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
                     Utf8JsonWriter response = context.GetCurrentJsonWriter();
@@ -837,7 +840,18 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false)
+            private ConfigurationDhcp.ScopeSnapshot CaptureDhcpScopeSnapshot(ConfigurationManifest manifest, User sessionUser)
+            {
+                if (manifest is null || !manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) ||
+                    !dhcp.TryGetProperty("scopes", out JsonElement scopes))
+                    return null;
+
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.View))
+                    throw new DnsWebServiceException("Access was denied.");
+                return new ConfigurationDhcp.ScopeSnapshot(scopes, _dnsWebService._dhcpServer.Scopes);
+            }
+
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
@@ -874,12 +888,8 @@ namespace DnsServerCore
                         _dnsWebService._dnsServer.BlockedZoneManager.GetManifestNames, exportDomainLists);
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
-                    if (manifest is not null && manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) && dhcp.TryGetProperty("scopes", out JsonElement scopes))
-                    {
-                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.View))
-                            throw new DnsWebServiceException("Access was denied.");
-                        ConfigurationDhcp.WriteSnapshot(writer, scopes, _dnsWebService._dhcpServer.Scopes);
-                    }
+                    if (dhcpSnapshot is not null)
+                        ConfigurationDhcp.WriteSnapshot(writer, manifest.Settings.GetProperty("dhcp").GetProperty("scopes"), dhcpSnapshot.Scopes);
                     writer.WriteEndObject();
                 }
 

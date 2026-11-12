@@ -2644,6 +2644,35 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain("192.0.2.", error.Message);
         }
 
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void DhcpPreviewRejectsNewExclusionsOverActiveDynamicLeases(bool dynamicLease)
+        {
+            ConfigurationManifest manifest = Load("""
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"exclusions":[
+                  {"startingAddress":"192.0.2.20","endingAddress":"192.0.2.22"}]}}}}
+                """);
+            string dynamicFlag = dynamicLease ? "true" : "false";
+            using JsonDocument snapshot = JsonDocument.Parse($$"""
+                {"manifestDhcpScopes":{"Lab":{
+                  "startingAddress":"192.0.2.10","endingAddress":"192.0.2.50","subnetMask":"255.255.255.0","enabled":true,
+                  "activeLeases":[{"hardwareAddress":"02-00-00-00-00-0A","address":"192.0.2.20","dynamic":{{dynamicFlag}} }],
+                  "exclusions":[]
+                } } }
+                """);
+            if (dynamicLease)
+            {
+                InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationPlan.Create(manifest, snapshot.RootElement));
+                Assert.Contains("/dhcp/scopes/Lab/exclusions", error.Message);
+                Assert.DoesNotContain("192.0.2.", error.Message);
+            }
+            else
+            {
+                Assert.Equal("/dhcp/scopes/Lab/exclusions", Assert.Single(ConfigurationPlan.Create(manifest, snapshot.RootElement)).Path);
+            }
+        }
+
         [Fact]
         public async Task ZonePreviewTracksCreationDeletionAndEnabledStateWithoutMutatingZones()
         {

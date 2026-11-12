@@ -72,7 +72,7 @@ TSIG preview uses `dns.tsigKeys`. A new key requires an algorithm and a secret r
 
 Explicit `allowZones` and `blockZones` apply live on standalone servers. Each declared array replaces its entire list, and an empty array or null clears it. Names are canonicalized and deduplicated. An IP address selects its reverse DNS name. Allow rules still take precedence over block rules. The settings API and backup restore reject changes to a list while the manifest owns it.
 
-DHCP preview builds a detached scope candidate and checks that the existing scope file format can store it. This check preserves the original scope, its live leases, and DNS records.
+DHCP preview uses one captured lease state to compare changes and validate the detached candidate against the existing scope file format. A new exclusion cannot cover an active dynamic lease. The live scope and DNS records stay unchanged during preview.
 
 Use inspection export to review configured DHCP scopes and reservations. Active leases, interface bindings, and derived local DNS addresses stay out of the export. A null scope map previews removal of all scopes, subject to the active-lease check. Scopes with reservations that cannot be represented by unique Ethernet MAC addresses and in-range IP addresses are reported as missing inputs.
 
