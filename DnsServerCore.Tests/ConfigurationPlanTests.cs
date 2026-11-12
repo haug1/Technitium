@@ -713,6 +713,42 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupWebListenersCommitOnlyAfterSuccessfulBind()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            int originalPort = server.Client.BaseAddress!.Port;
+            string manifestFile = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            using var occupied = new TcpListener(IPAddress.Loopback, 0);
+            occupied.Start();
+            int occupiedPort = ((IPEndPoint)occupied.LocalEndpoint).Port;
+            await File.WriteAllTextAsync(manifestFile, WebListenerManifest(occupiedPort));
+            await Assert.ThrowsAnyAsync<IOException>(server.RestartAsync);
+
+            File.Delete(manifestFile);
+            await server.RestartAsync();
+            Assert.Equal(originalPort, (await server.GetSettingsAsync()).GetProperty("webServiceHttpPort").GetInt32());
+
+            int candidatePort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+            await File.WriteAllTextAsync(manifestFile, WebListenerManifest(candidatePort));
+            await server.RestartAsync(candidatePort);
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(candidatePort, settings.GetProperty("webServiceHttpPort").GetInt32());
+            Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), path => path.GetString() == "/web/httpPort");
+
+            File.Delete(manifestFile);
+            await server.RestartAsync();
+            JsonElement edit = await server.CallAsync($"settings/set?webServiceHttpPort={originalPort}", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/web/httpPort", edit.GetProperty("errorMessage").GetString());
+
+            static string WebListenerManifest(int port) => JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                web = new { localAddresses = new[] { "127.0.0.1" }, httpPort = port }
+            });
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -896,7 +932,7 @@ namespace DnsServerCore.Tests
         {
             await using var server = await LoopbackWebService.StartAsync();
             string manifest = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
-            await File.WriteAllTextAsync(manifest, """{"schemaVersion":1,"logging":{"retentionDays":180},"web":{"httpPort":1}}""");
+            await File.WriteAllTextAsync(manifest, """{"schemaVersion":1,"logging":{"retentionDays":180},"web":{"tlsEnabled":true}}""");
 
             InvalidDataException error = await Assert.ThrowsAsync<InvalidDataException>(server.RestartAsync);
             Assert.Contains("/web", error.Message);

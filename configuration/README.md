@@ -72,7 +72,7 @@ The reverse-proxy ACL uses first-match rule order. An empty array trusts no IP-b
 
 ### Startup
 
-Place `technitium.json` in the server's configuration directory to reconcile the supported DNS, web, logging, and blocklist settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. The server binds the declared DNS listeners before committing values and ownership.
+Place `technitium.json` in the server's configuration directory to reconcile the supported DNS, web, logging, and blocklist settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. On standalone servers, `web.localAddresses`, `web.httpPort`, and `web.tlsPort` can be applied at startup. The server binds the declared web and DNS listeners before committing values and ownership. Web listener fields appear in preview-only exports while live web listener reconciliation is pending.
 
 The startup file takes effect again at the next restart. Update that file when changing the desired startup settings. With no startup file, the server continues with persisted values and ownership. To release all managed settings, apply or start with a manifest containing only `schemaVersion`.
 

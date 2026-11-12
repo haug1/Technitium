@@ -142,7 +142,15 @@ namespace DnsServerCore
         bool _manifestOwnsRealIpHeader;
         bool _manifestOwnsFrameAncestors;
         bool _manifestOwnsReverseProxyAcl;
-        internal readonly record struct WebLiveSettings(string RealIp, string FrameAncestors, IReadOnlyCollection<NetworkAccessControl> ReverseProxyAcl = null);
+        byte _managedWebListeners;
+        private const byte ManagedWebAddresses = 8;
+        private const byte ManagedWebHttpPort = 16;
+        private const byte ManagedWebTlsPort = 32;
+        internal readonly record struct WebListeners(IReadOnlyList<IPAddress> Addresses, int? HttpPort, int? TlsPort)
+        {
+            internal bool HasValues => Addresses is not null || HttpPort.HasValue || TlsPort.HasValue;
+        }
+        internal readonly record struct WebLiveSettings(string RealIp, string FrameAncestors, IReadOnlyCollection<NetworkAccessControl> ReverseProxyAcl = null, WebListeners Listeners = default);
         string _webServiceRealIpHeader = "X-Real-IP";
         string _webServiceCspFrameAncestorsHeader = "'none'";
 
@@ -510,13 +518,16 @@ namespace DnsServerCore
             NetworkAccessControl[] proxyAddresses = version >= 2 ? AuthZoneInfo.ReadNetworkACLFrom(bR) ?? [] : CreateDefaultReverseProxyAcl();
             string certificatePath = s.ReadShortString();
             string certificatePassword = s.ReadShortString();
-            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses);
+            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses, new WebListeners(addresses, httpPort, tlsPort));
             if (!apply)
                 return headers;
 
-            _webServiceHttpPort = httpPort;
-            _webServiceTlsPort = tlsPort;
-            _webServiceLocalAddresses = addresses;
+            if (readOwnership || (_managedWebListeners & ManagedWebHttpPort) == 0)
+                _webServiceHttpPort = httpPort;
+            if (readOwnership || (_managedWebListeners & ManagedWebTlsPort) == 0)
+                _webServiceTlsPort = tlsPort;
+            if (readOwnership || (_managedWebListeners & ManagedWebAddresses) == 0)
+                _webServiceLocalAddresses = addresses;
             _webServiceEnableHttpUnixSocket = httpSocketEnabled;
             _webServiceHttpUnixSocket = httpSocket.Length == 0 ? null : httpSocket;
             _webServiceEnableTlsUnixSocket = tlsSocketEnabled;
@@ -560,6 +571,7 @@ namespace DnsServerCore
                 _manifestOwnsRealIpHeader = ownership >= 0 && (ownership & 1) != 0;
                 _manifestOwnsFrameAncestors = ownership >= 0 && (ownership & 2) != 0;
                 _manifestOwnsReverseProxyAcl = ownership >= 0 && (ownership & 4) != 0;
+                _managedWebListeners = ownership < 0 ? (byte)0 : (byte)(ownership & (ManagedWebAddresses | ManagedWebHttpPort | ManagedWebTlsPort));
             }
             if (readOwnership || !_manifestOwnsRealIpHeader)
                 _webServiceRealIpHeader = headers.RealIp;
@@ -613,8 +625,8 @@ namespace DnsServerCore
 
             s.WriteShortString(_webServiceRealIpHeader);
             s.WriteShortString(_webServiceCspFrameAncestorsHeader);
-            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors || _manifestOwnsReverseProxyAcl)
-                bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0) | (_manifestOwnsReverseProxyAcl ? 4 : 0)));
+            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors || _manifestOwnsReverseProxyAcl || _managedWebListeners != 0)
+                bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0) | (_manifestOwnsReverseProxyAcl ? 4 : 0) | _managedWebListeners));
         }
 
         #endregion
@@ -2796,8 +2808,41 @@ namespace DnsServerCore
             return value;
         }
 
+        private void CheckManifestWebListeners(WebListeners listeners)
+        {
+            if ((_managedWebListeners & ManagedWebAddresses) != 0 && listeners.Addresses is not null &&
+                !_webServiceLocalAddresses.HasSameItems(NormalizeWebLocalAddresses(listeners.Addresses)))
+                throw new DnsWebServiceException("/web/localAddresses: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebHttpPort) != 0 && listeners.HttpPort.HasValue && listeners.HttpPort != _webServiceHttpPort)
+                throw new DnsWebServiceException("/web/httpPort: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebTlsPort) != 0 && listeners.TlsPort.HasValue && listeners.TlsPort != _webServiceTlsPort)
+                throw new DnsWebServiceException("/web/tlsPort: Setting is managed by the configuration manifest.");
+        }
+
+        private bool StageWebListeners(WebListeners listeners)
+        {
+            bool changed = false;
+            if (listeners.Addresses is not null && !_webServiceLocalAddresses.HasSameItems(listeners.Addresses))
+            {
+                _webServiceLocalAddresses = listeners.Addresses;
+                changed = true;
+            }
+            if (listeners.HttpPort.HasValue && listeners.HttpPort != _webServiceHttpPort)
+            {
+                _webServiceHttpPort = listeners.HttpPort.Value;
+                changed = true;
+            }
+            if (listeners.TlsPort.HasValue && listeners.TlsPort != _webServiceTlsPort)
+            {
+                _webServiceTlsPort = listeners.TlsPort.Value;
+                changed = true;
+            }
+            return changed;
+        }
+
         private void CheckManifestWebLiveSettings(WebLiveSettings headers)
         {
+            CheckManifestWebListeners(headers.Listeners);
             if (_manifestOwnsRealIpHeader && headers.RealIp is not null &&
                 !string.Equals(headers.RealIp, _webServiceRealIpHeader, StringComparison.OrdinalIgnoreCase))
                 throw new DnsWebServiceException("/web/realIpHeader: Setting is managed by the configuration manifest.");
@@ -2808,7 +2853,7 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/reverseProxyAcl: Setting is managed by the configuration manifest.");
         }
 
-        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, Action<Action> persist)
+        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, WebListeners listeners, bool listenersChanged, Action<Action> persist)
         {
             lock (_saveLock)
             {
@@ -2818,10 +2863,13 @@ namespace DnsServerCore
                 bool oldAncestorsOwned = _manifestOwnsFrameAncestors;
                 var oldAcl = _webServiceReverseProxyAddresses;
                 bool oldAclOwned = _manifestOwnsReverseProxyAcl;
+                byte oldManagedListeners = _managedWebListeners;
+                byte managedListeners = (byte)((listeners.Addresses is not null ? ManagedWebAddresses : 0) |
+                    (listeners.HttpPort.HasValue ? ManagedWebHttpPort : 0) | (listeners.TlsPort.HasValue ? ManagedWebTlsPort : 0));
                 bool aclChanged = headers.ReverseProxyAcl is not null && !headers.ReverseProxyAcl.SequenceEqual(oldAcl ?? []);
                 string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
                 string ancestors = headers.FrameAncestors ?? oldAncestors;
-                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged &&
+                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged && !listenersChanged && managedListeners == oldManagedListeners &&
                     (headers.ReverseProxyAcl is not null) == oldAclOwned &&
                     (headers.RealIp is not null) == oldRealIpOwned && (headers.FrameAncestors is not null) == oldAncestorsOwned)
                 {
@@ -2834,6 +2882,7 @@ namespace DnsServerCore
                 _manifestOwnsRealIpHeader = headers.RealIp is not null;
                 _manifestOwnsFrameAncestors = headers.FrameAncestors is not null;
                 _manifestOwnsReverseProxyAcl = headers.ReverseProxyAcl is not null;
+                _managedWebListeners = managedListeners;
                 if (aclChanged)
                     _webServiceReverseProxyAddresses = headers.ReverseProxyAcl.Count == 0 ? null : headers.ReverseProxyAcl;
                 try
@@ -2849,23 +2898,25 @@ namespace DnsServerCore
                     _manifestOwnsFrameAncestors = oldAncestorsOwned;
                     _webServiceReverseProxyAddresses = oldAcl;
                     _manifestOwnsReverseProxyAcl = oldAclOwned;
+                    _managedWebListeners = oldManagedListeners;
                     throw;
                 }
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false)
         {
             string domain = manifest.GetServerDomain();
-            bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate && domain is not null &&
-                !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase);
-            Action writeCertificate = regenerateCertificate ? () => CheckAndLoadSelfSignedCertificate(true, true, domain) : null;
+            bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate &&
+                (webAddressesChanged || (domain is not null && !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase)));
+            Action writeCertificate = regenerateCertificate ? () => CheckAndLoadSelfSignedCertificate(true, true, domain ?? _dnsServer.ServerDomain) : null;
 
             SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
             DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
             try
             {
-                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate, ApplyManifestWebLiveSettings, alreadyActive);
+                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate,
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive);
             }
             catch
             {
@@ -3071,12 +3122,17 @@ namespace DnsServerCore
                     }
                 }
 
+                WebListeners listeners = ConfigurationPlan.GetWebListeners(startupManifest);
+                IReadOnlyList<IPAddress> previousWebAddresses = _webServiceLocalAddresses;
+                int previousWebHttpPort = _webServiceHttpPort;
+                int previousWebTlsPort = _webServiceTlsPort;
                 try
                 {
                     await _settingsApi.WithConfigurationLockAsync(async () =>
                     {
                         // Start the web service and bind the DNS candidate before committing the manifest.
-                        if (throwIfBindFails)
+                        bool listenersChanged = StageWebListeners(listeners);
+                        if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0)
                             await StartWebServiceAsync(false);
                         else
                             await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
@@ -3086,12 +3142,21 @@ namespace DnsServerCore
                         await _dnsServer.StartAsync(throwIfBindFails || (endpoints is not null), endpoints ?? _dnsServer.LocalEndPoints);
                         _dhcpServer.Start();
                         if (startupManifest is not null)
-                            await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true);
+                        {
+                            bool webAddressesChanged = !previousWebAddresses.HasSameItems(_webServiceLocalAddresses);
+                            await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true, listeners, listenersChanged, webAddressesChanged);
+                        }
                     });
                 }
                 catch
                 {
                     await StopAsync();
+                    if (listeners.HasValues)
+                    {
+                        _webServiceLocalAddresses = previousWebAddresses;
+                        _webServiceHttpPort = previousWebHttpPort;
+                        _webServiceTlsPort = previousWebTlsPort;
+                    }
                     throw;
                 }
 

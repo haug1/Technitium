@@ -470,6 +470,12 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue("/web/frameAncestors");
                 if (_dnsWebService._manifestOwnsReverseProxyAcl)
                     jsonWriter.WriteStringValue("/web/reverseProxyAcl");
+                if ((_dnsWebService._managedWebListeners & ManagedWebAddresses) != 0)
+                    jsonWriter.WriteStringValue("/web/localAddresses");
+                if ((_dnsWebService._managedWebListeners & ManagedWebHttpPort) != 0)
+                    jsonWriter.WriteStringValue("/web/httpPort");
+                if ((_dnsWebService._managedWebListeners & ManagedWebTlsPort) != 0)
+                    jsonWriter.WriteStringValue("/web/tlsPort");
                 foreach (string path in _dnsWebService._dnsServer.GetManagedDnsPaths())
                     jsonWriter.WriteStringValue(path);
                 if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
@@ -656,9 +662,15 @@ namespace DnsServerCore
                 if (reverseProxyAcl?.Length > byte.MaxValue)
                     throw new ArgumentOutOfRangeException("WebServiceReverseProxyAddresses", "Web Service Reverse Proxy Addresses list cannot have more than 255 entries.");
 
+                var webListeners = new WebListeners(
+                    request.TryQueryOrFormArray("webServiceLocalAddresses", IPAddress.Parse, out IPAddress[] webServiceLocalAddresses)
+                        ? NormalizeWebLocalAddresses(webServiceLocalAddresses) : null,
+                    request.TryGetQueryOrForm("webServiceHttpPort", int.Parse, out int webServiceHttpPort) ? webServiceHttpPort : null,
+                    request.TryGetQueryOrForm("webServiceTlsPort", int.Parse, out int webServiceTlsPort) ? webServiceTlsPort : null);
+
                 var webHeaders = new WebLiveSettings(
                     request.TryGetQueryOrForm("webServiceRealIpHeader", out string realIpHeader) ? NormalizeWebHeader(realIpHeader, realIp: true) : null,
-                    request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null, reverseProxyAcl);
+                    request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null, reverseProxyAcl, webListeners);
                 _dnsWebService.CheckManifestWebLiveSettings(webHeaders);
 
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
@@ -1039,26 +1051,13 @@ namespace DnsServerCore
 
                         #region web service
 
-                        if (request.TryQueryOrFormArray("webServiceLocalAddresses", IPAddress.Parse, out IPAddress[] webServiceLocalAddresses))
-                        {
-                            IReadOnlyList<IPAddress> normalizedAddresses = NormalizeWebLocalAddresses(webServiceLocalAddresses);
-                            if (!_dnsWebService._webServiceLocalAddresses.HasSameItems(normalizedAddresses))
-                            {
-                                webServiceLocalAddressesChanged = true;
-                                restartWebService = true;
-                            }
-
-                            _dnsWebService._webServiceLocalAddresses = normalizedAddresses;
-                        }
-
-                        if (request.TryGetQueryOrForm("webServiceHttpPort", int.Parse, out int webServiceHttpPort))
-                        {
-                            if (_dnsWebService._webServiceHttpPort != webServiceHttpPort)
-                            {
-                                _dnsWebService._webServiceHttpPort = webServiceHttpPort;
-                                restartWebService = true;
-                            }
-                        }
+                        var editableListeners = new WebListeners(
+                            (_dnsWebService._managedWebListeners & ManagedWebAddresses) == 0 ? webListeners.Addresses : null,
+                            (_dnsWebService._managedWebListeners & ManagedWebHttpPort) == 0 ? webListeners.HttpPort : null,
+                            (_dnsWebService._managedWebListeners & ManagedWebTlsPort) == 0 ? webListeners.TlsPort : null);
+                        webServiceLocalAddressesChanged = editableListeners.Addresses is not null &&
+                            !_dnsWebService._webServiceLocalAddresses.HasSameItems(editableListeners.Addresses);
+                        restartWebService |= _dnsWebService.StageWebListeners(editableListeners);
 
                         if (request.TryGetQueryOrForm("webServiceEnableHttpUnixSocket", bool.Parse, out bool webServiceEnableHttpUnixSocket))
                         {
@@ -1148,14 +1147,7 @@ namespace DnsServerCore
                         if (request.TryGetQueryOrForm("webServiceUseSelfSignedTlsCertificate", bool.Parse, out bool webServiceUseSelfSignedTlsCertificate))
                             _dnsWebService._webServiceUseSelfSignedTlsCertificate = webServiceUseSelfSignedTlsCertificate;
 
-                        if (request.TryGetQueryOrForm("webServiceTlsPort", int.Parse, out int webServiceTlsPort))
-                        {
-                            if (_dnsWebService._webServiceTlsPort != webServiceTlsPort)
-                            {
-                                _dnsWebService._webServiceTlsPort = webServiceTlsPort;
-                                restartWebService = true;
-                            }
-                        }
+
 
                         if (reverseProxyAcl is not null && !_dnsWebService._manifestOwnsReverseProxyAcl)
                             _dnsWebService._webServiceReverseProxyAddresses = reverseProxyAcl.Length == 0 ? null : reverseProxyAcl;
@@ -2030,9 +2022,9 @@ namespace DnsServerCore
 
                             bool checkLog = logSettings && _dnsWebService._log.HasManagedLoggingSettings;
                             bool ownsBlockListSettings = _dnsWebService._dnsServer.BlockListZoneManager.HasManagedSettings;
-                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings || _dnsWebService._manifestOwnsRealIpHeader);
+                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings || _dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._managedWebListeners != 0);
                             bool checkBlockList = blockLists && ownsBlockListSettings;
-                            bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors || _dnsWebService._manifestOwnsReverseProxyAcl);
+                            bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors || _dnsWebService._manifestOwnsReverseProxyAcl || _dnsWebService._managedWebListeners != 0);
                             if (checkLog || checkDns || checkBlockList || checkWeb)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))

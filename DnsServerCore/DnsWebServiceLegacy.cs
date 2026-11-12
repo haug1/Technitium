@@ -226,7 +226,7 @@ namespace DnsServerCore
                 if (version is >= 28 and <= 42)
                 {
                     LegacyWebConfiguration web = ReadLegacyWebConfiguration(reader, version);
-                    CheckManifestWebLiveSettings(new WebLiveSettings(web.RealIpHeader, null));
+                    CheckManifestWebLiveSettings(new WebLiveSettings(web.RealIpHeader, null, Listeners: new WebListeners(web.Addresses, web.HttpPort, web.TlsPort)));
                     string domain = stream.ReadShortString();
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
@@ -272,6 +272,8 @@ namespace DnsServerCore
                 if (version is >= 2 and <= 27)
                 {
                     CheckManifestWebLiveSettings(new WebLiveSettings("X-Real-IP", null));
+                    if (_managedWebListeners != 0)
+                        throw new InvalidDataException("/web: Cannot verify the web listeners in this combined backup format.");
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(stream.ReadShortString()));
 
@@ -304,9 +306,12 @@ namespace DnsServerCore
         private void ReadConfigFromV42(BinaryReader bR, int version)
         {
             LegacyWebConfiguration web = ReadLegacyWebConfiguration(bR, version);
-            _webServiceHttpPort = web.HttpPort;
-            _webServiceTlsPort = web.TlsPort;
-            _webServiceLocalAddresses = web.Addresses;
+            if ((_managedWebListeners & ManagedWebHttpPort) == 0)
+                _webServiceHttpPort = web.HttpPort;
+            if ((_managedWebListeners & ManagedWebTlsPort) == 0)
+                _webServiceTlsPort = web.TlsPort;
+            if ((_managedWebListeners & ManagedWebAddresses) == 0)
+                _webServiceLocalAddresses = web.Addresses;
             _webServiceEnableTls = web.EnableTls;
             _webServiceEnableHttp3 = web.EnableHttp3;
             _webServiceHttpToTlsRedirect = web.RedirectToTls;

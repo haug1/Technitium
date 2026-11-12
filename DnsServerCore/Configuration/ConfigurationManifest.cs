@@ -53,7 +53,7 @@ namespace DnsServerCore.Configuration
                 return null;
             }
 
-            ConfigurationPlan.CheckApplySupport(manifest);
+            ConfigurationPlan.CheckApplySupport(manifest, startup: true);
             return manifest;
         }
 

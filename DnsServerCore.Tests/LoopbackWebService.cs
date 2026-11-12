@@ -69,7 +69,21 @@ namespace DnsServerCore.Tests
 
         public async Task RestartAsync()
         {
+            await RestartAsync(null);
+        }
+
+        public async Task RestartAsync(int? httpPort)
+        {
             await _service!.DisposeAsync();
+            if (httpPort.HasValue)
+            {
+                Client.Dispose();
+                Client = new HttpClient(new SocketsHttpHandler { UseProxy = false })
+                {
+                    BaseAddress = new Uri($"http://127.0.0.1:{httpPort.Value}"),
+                    Timeout = TimeSpan.FromSeconds(10)
+                };
+            }
             await StartServiceAsync();
         }
 
