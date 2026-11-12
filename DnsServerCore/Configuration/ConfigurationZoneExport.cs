@@ -73,7 +73,7 @@ namespace DnsServerCore.Configuration
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
             var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
-                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint)>();
+                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, DnsApplicationRecordData Application)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -82,7 +82,7 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 var info = record.Tag as GenericRecordInfo;
-                if (record.Class != DnsClass.IN || record.Type is DnsResourceRecordType.APP or DnsResourceRecordType.FWD)
+                if (record.Class != DnsClass.IN || record.Type == DnsResourceRecordType.FWD)
                 {
                     missingInputs.Add(path + "/records");
                     return null;
@@ -96,21 +96,26 @@ namespace DnsServerCore.Configuration
                     data = new DnsSOARecordData(soa.PrimaryNameServer, soa.ResponsiblePerson, 0, soa.Refresh, soa.Retry, soa.Expire, soa.Minimum);
                 else if (data is DnsSVCBRecordData svc)
                     data = ConfigurationPlan.WithoutAutomaticHints(svc, autoIpv4, autoIpv6);
-                data.WriteTo(wire);
-                string hex = Convert.ToHexString(wire.GetBuffer().AsSpan(sizeof(ushort), (int)wire.Length - sizeof(ushort)));
+                var application = data as DnsApplicationRecordData;
+                string hex = null;
                 string owner = record.Name.ToLowerInvariant();
-                try
+                if (application is null)
                 {
-                    if (!ConfigurationManifest.ReadRawZoneRecordData(zone, owner, record.Type, hex, path + "/records").RDATA.Equals(data))
+                    data.WriteTo(wire);
+                    hex = Convert.ToHexString(wire.GetBuffer().AsSpan(sizeof(ushort), (int)wire.Length - sizeof(ushort)));
+                    try
+                    {
+                        if (!ConfigurationManifest.ReadRawZoneRecordData(zone, owner, record.Type, hex, path + "/records").RDATA.Equals(data))
+                        {
+                            missingInputs.Add(path + "/records");
+                            return null;
+                        }
+                    }
+                    catch (InvalidDataException)
                     {
                         missingInputs.Add(path + "/records");
                         return null;
                     }
-                }
-                catch (InvalidDataException)
-                {
-                    missingInputs.Add(path + "/records");
-                    return null;
                 }
 
                 string[] glue = null;
@@ -132,7 +137,8 @@ namespace DnsServerCore.Configuration
 
                 entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false,
                     info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue,
-                    record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null, autoIpv4, autoIpv6));
+                    record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null,
+                    autoIpv4, autoIpv6, application));
             }
 
             var exported = new JsonArray();
@@ -143,7 +149,8 @@ namespace DnsServerCore.Configuration
                 {
                     ["owner"] = entry.Owner == zone ? "@" : entry.Owner,
                     ["type"] = (int)entry.Type,
-                    ["data"] = new JsonObject { ["rawHex"] = entry.Hex },
+                    ["data"] = entry.Application is null ? new JsonObject { ["rawHex"] = entry.Hex } :
+                        new JsonObject { ["app"] = new JsonObject { ["name"] = entry.Application.AppName, ["classPath"] = entry.Application.ClassPath } },
                     ["ttl"] = entry.Ttl,
                     ["disabled"] = entry.Disabled,
                     ["comments"] = entry.Comments,
@@ -157,6 +164,8 @@ namespace DnsServerCore.Configuration
                     record["autoIpv4Hint"] = true;
                 if (entry.AutoIpv6Hint)
                     record["autoIpv6Hint"] = true;
+                if (entry.Application?.Data.Length > 0)
+                    missingInputs.Add($"{path}/records/{exported.Count}/data/app/configuration");
                 exported.Add(record);
             }
             return exported;

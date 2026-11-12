@@ -876,7 +876,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         DateTime revision = zone.LastModified;
                         var currentRecords = new List<DnsResourceRecord>();
                         ListAllZoneRecords(name, currentRecords);
-                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"))
+                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"))
                             .Any(edit => edit.Kind.HasValue);
                         if (editRecords)
                             recordRevisions.Add(name, revision);
@@ -964,7 +964,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         if (records.ValueKind != JsonValueKind.Undefined)
                         {
-                            var changedSets = StageManifestRecords(zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain);
+                            var changedSets = StageManifestRecords(manifest, zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain);
                             stagedRecords[name] = (zone, allRecords, changedSets);
                         }
 
@@ -1133,11 +1133,11 @@ namespace DnsServerCore.Dns.ZoneManagers
             File.Move(temporary, path, true);
         }
 
-        private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(PrimaryZone zone, JsonElement declaration, List<DnsResourceRecord> records,
+        private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(ConfigurationManifest manifest, PrimaryZone zone, JsonElement declaration, List<DnsResourceRecord> records,
             IReadOnlyDictionary<string, bool> membership, string serverDomain)
         {
             string path = ConfigurationPlan.AppendPath("/zones", zone.Name) + "/records";
-            var edits = ConfigurationPlan.PrepareZoneRecordEdits(zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"));
+            var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"));
             var owners = DnsResourceRecord.GroupRecords(records);
             var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
             // The staging zone uses the normal record setters and SOA history, with notifications disabled.
@@ -1198,7 +1198,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         DnsResourceRecord record = edit.Existing is null
                             ? new DnsResourceRecord(edit.Owner, edit.Type, DnsClass.IN, ttl, edit.Data)
-                            : CopyRecord(edit.Existing, ttl, edit.Data is DnsSOARecordData or DnsSVCBRecordData ? edit.Data : null);
+                            : CopyRecord(edit.Existing, ttl, edit.Data is DnsSOARecordData or DnsSVCBRecordData or DnsApplicationRecordData ? edit.Data : null);
                         GenericRecordInfo info = record.GetAuthGenericRecordInfo();
                         if (edit.Disabled.HasValue)
                             info.Disabled = edit.Disabled.Value;

@@ -10,6 +10,7 @@ using DnsServerCore.Cluster;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ResourceRecords;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using TechnitiumLibrary.Net;
@@ -1477,11 +1478,7 @@ namespace DnsServerCore.Configuration
             DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, IPAddress[] Glue,
             bool? UseSerialDateScheme, ConfigurationChangeKind? Kind, bool AutoIpv4Hint = false, bool AutoIpv6Hint = false);
 
-        internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
-            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords) =>
-            PrepareZoneRecordEdits(zoneName, declarationName, serverDomain, records, currentRecords, ownsRecords).Select(edit => edit.Kind).ToArray();
-
-        internal static IReadOnlyList<ZoneRecordEdit> PrepareZoneRecordEdits(string zoneName, string declarationName, string serverDomain,
+        internal static IReadOnlyList<ZoneRecordEdit> PrepareZoneRecordEdits(ConfigurationManifest manifest, string zoneName, string declarationName, string serverDomain,
             JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords)
         {
             string path = AppendPath("/zones", declarationName) + "/records";
@@ -1490,6 +1487,7 @@ namespace DnsServerCore.Configuration
             var matched = new HashSet<DnsResourceRecord>(ReferenceEqualityComparer.Instance);
             var declared = new HashSet<(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data)>();
             bool declaresSoa = false;
+            var appOwners = new HashSet<string>(StringComparer.Ordinal);
             int index = 0;
             foreach (JsonElement record in records.ValueKind == JsonValueKind.Null ? [] : records.EnumerateArray().ToArray())
             {
@@ -1515,12 +1513,17 @@ namespace DnsServerCore.Configuration
                         segments.Add(Convert.FromBase64String(segment.GetString()));
                     rdata = new DnsTXTRecordData(segments);
                 }
+                else if (data.TryGetProperty("app", out JsonElement app))
+                    rdata = ReadApplicationRecord(manifest, app, recordPath + "/data/app");
                 else
                     throw new InvalidDataException($"{recordPath}/data: Planning for this record data format is not implemented.");
 
                 bool isSoa = type == DnsResourceRecordType.SOA;
+                bool isApp = type == DnsResourceRecordType.APP;
                 if (isSoa && declaresSoa)
                     throw new InvalidDataException($"{recordPath}: Declare at most one apex SOA record.");
+                if (isApp && !appOwners.Add(owner))
+                    throw new InvalidDataException($"{recordPath}: Declare at most one APP record per owner.");
                 declaresSoa |= isSoa;
                 if (!isSoa && IsGeneratedRecord(zoneName, serverDomain, owner, type, rdata))
                     throw new InvalidDataException($"{recordPath}: This record is managed by the zone lifecycle.");
@@ -1532,7 +1535,7 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{recordPath}: Duplicate record.");
 
                 DnsResourceRecord existing = current[(owner, type)].FirstOrDefault(candidate => candidate.Class == DnsClass.IN &&
-                    (isSoa || SameRecordData(candidate)));
+                    (isSoa || isApp || SameRecordData(candidate)));
                 if (existing is not null && matched.Contains(existing))
                     throw new InvalidDataException($"{recordPath}: Duplicate record.");
                 var existingHints = existing?.Tag as SVCBRecordInfo;
@@ -1571,6 +1574,7 @@ namespace DnsServerCore.Configuration
                     var metadata = existing.Tag as GenericRecordInfo;
                     bool usesDateScheme = metadata is SOARecordInfo { UseSoaSerialDateScheme: true };
                     if ((isSoa && SoaNeedsUpdate((DnsSOARecordData)existing.RDATA, (DnsSOARecordData)rdata, useSerialDateScheme ?? usesDateScheme)) ||
+                        (isApp && !rdata.Equals(existing.RDATA)) ||
                         (useSerialDateScheme.HasValue && useSerialDateScheme.Value != usesDateScheme) ||
                         (effectiveAutoIpv4 != (existingHints?.AutoIpv4Hint ?? false)) ||
                         (effectiveAutoIpv6 != (existingHints?.AutoIpv6Hint ?? false)) ||
@@ -1619,6 +1623,31 @@ namespace DnsServerCore.Configuration
                 current.Refresh != desired.Refresh || current.Retry != desired.Retry || current.Expire != desired.Expire ||
                 current.Minimum != desired.Minimum ||
                 !usesDateScheme && desired.Serial > current.Serial;
+        }
+
+        private static DnsApplicationRecordData ReadApplicationRecord(ConfigurationManifest manifest, JsonElement app, string path)
+        {
+            string name = app.GetProperty("name").GetString();
+            string classPath = app.GetProperty("classPath").GetString();
+            int nameBytes = Encoding.UTF8.GetByteCount(name);
+            int classBytes = Encoding.UTF8.GetByteCount(classPath);
+            if (nameBytes > byte.MaxValue || classBytes > byte.MaxValue)
+                throw new InvalidDataException($"{path}: App name and class path must each fit in 255 UTF-8 bytes.");
+            string data = app.TryGetProperty("configuration", out JsonElement config)
+                ? ConfigurationApplications.ReadConfiguration(manifest, config, path + "/configuration")
+                : string.Empty;
+            int dataBytes = Encoding.UTF8.GetByteCount(data);
+            int lengthBytes = dataBytes < 128 ? 1 : dataBytes < 16384 ? 2 : 3;
+            if ((long)3 + nameBytes + classBytes + dataBytes + lengthBytes > ushort.MaxValue)
+                throw new InvalidDataException($"{path}/configuration: App record data is too large.");
+            try
+            {
+                return new DnsApplicationRecordData(name, classPath, data);
+            }
+            catch (JsonException)
+            {
+                throw new InvalidDataException($"{path}/configuration: The app record data is invalid JSON.");
+            }
         }
 
         internal static DnsSVCBRecordData WithoutAutomaticHints(DnsSVCBRecordData data, bool autoIpv4, bool autoIpv6)

@@ -135,10 +135,7 @@ namespace DnsServerCore.Configuration
                     string after = before;
                     if (value.TryGetProperty("configuration", out JsonElement config))
                     {
-                        after = config.ValueKind == JsonValueKind.Null ? null :
-                            config.TryGetProperty("text", out JsonElement text) ? text.GetString() :
-                            config.TryGetProperty("secret", out JsonElement secret) ? manifest.ResolveReference(secret, path + "/configuration") :
-                            manifest.ResolveReference(config, path + "/configuration");
+                    after = config.ValueKind == JsonValueKind.Null ? null : ReadConfiguration(manifest, config, path + "/configuration");
                         if (after?.Length == 0)
                             after = null;
                     }
@@ -147,6 +144,10 @@ namespace DnsServerCore.Configuration
 
             static Entry Removal(DnsApplication app) => new(app, app.ReadManifestConfig(), null, Remove: true);
         }
+
+        internal static string ReadConfiguration(ConfigurationManifest manifest, JsonElement config, string path) =>
+            config.TryGetProperty("text", out JsonElement text) ? text.GetString() :
+            manifest.ResolveReference(config.TryGetProperty("secret", out JsonElement secret) ? secret : config, path);
 
         internal static void ValidateLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
         {

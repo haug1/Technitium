@@ -4404,6 +4404,67 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ApplicationRecordsReproduceWithReferencedData()
+        {
+            const string variable = "TECHNITIUM_TEST_APP_RECORD_DATA";
+            const string original = "{\"fixture\":\"private-original\"}";
+            const string updated = "{\"fixture\":\"private-updated\"}";
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"app-record.test":{"type":"Primary","records":[
+                  {"owner":"app.app-record.test","type":"APP","data":{"app":{"name":"Fixture","classPath":"Fixture.Handler",
+                    "configuration":{"secret":{"environment":"TECHNITIUM_TEST_APP_RECORD_DATA"}}}}}
+                ]}}}
+                """;
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            try
+            {
+                await using var server = await LoopbackWebService.StartAsync();
+                Environment.SetEnvironmentVariable(variable, original);
+                JsonElement plan = await PreviewAsync(server, manifest);
+                Assert.DoesNotContain("private-original", plan.GetRawText());
+                Environment.SetEnvironmentVariable(variable, updated);
+                JsonElement stale = await ApplyAsync(server, manifest, plan.GetProperty("revision").GetString()!);
+                Assert.Equal("error", stale.GetProperty("status").GetString());
+                Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+                Assert.DoesNotContain("private-updated", stale.GetRawText());
+
+                plan = await PreviewAsync(server, manifest);
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, plan.GetProperty("revision").GetString()!));
+                await server.RestartAsync();
+                Assert.Equal(updated, await ReadAppDataAsync(server));
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain("private-updated", export.GetRawText());
+                var response = export.GetProperty("response");
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
+                    path => path.ValueEquals("/zones/app-record.test/records/1/data/app/configuration"));
+                var zones = JsonNode.Parse(response.GetProperty("manifest").GetProperty("zones").GetRawText())!;
+                var app = zones["app-record.test"]!["records"]![1]!["data"]!["app"]!.AsObject();
+                Assert.Equal("Fixture.Handler", app["classPath"]!.GetValue<string>());
+                app["configuration"] = new JsonObject { ["secret"] = new JsonObject { ["environment"] = variable } };
+                string migrated = new JsonObject { ["schemaVersion"] = 1, ["zones"] = zones }.ToJsonString();
+                await using var destination = await LoopbackWebService.StartAsync();
+                plan = await PreviewAsync(destination, migrated);
+                LoopbackWebService.AssertOk(await ApplyAsync(destination, migrated, plan.GetProperty("revision").GetString()!));
+                Assert.Equal(updated, await ReadAppDataAsync(destination));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+
+            static async Task<string?> ReadAppDataAsync(LoopbackWebService server)
+            {
+                JsonElement result = await server.CallAsync("zones/records/get?zone=app-record.test&domain=app.app-record.test", server.AdminToken);
+                LoopbackWebService.AssertOk(result);
+                JsonElement record = Assert.Single(result.GetProperty("response").GetProperty("records").EnumerateArray());
+                return record.GetProperty("rData").GetProperty("data").GetString();
+            }
+        }
+
+        [Fact]
         public async Task ServiceRecordHintsFollowTheDeclaredAddressRecords()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -1311,7 +1311,7 @@ namespace DnsServerCore
                     WriteDomainListSnapshot(writer, manifest, sessionUser, "blockZones", PermissionSection.Blocked,
                         _dnsWebService._dnsServer.BlockedZoneManager.GetManifestNames, exportDomainLists);
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
-                        WriteManifestZoneSnapshot(writer, zones, sessionUser, preparedTsig?.Keys ?? _dnsWebService._dnsServer.TsigKeys);
+                        WriteManifestZoneSnapshot(writer, manifest, zones, sessionUser, preparedTsig?.Keys ?? _dnsWebService._dnsServer.TsigKeys);
                     if (dhcpSnapshot is not null)
                         ConfigurationDhcp.WriteSnapshot(writer, manifest.Settings.GetProperty("dhcp").GetProperty("scopes"), dhcpSnapshot.Scopes);
                     writer.WriteEndObject();
@@ -1350,7 +1350,7 @@ namespace DnsServerCore
                 writer.WriteEndArray();
             }
 
-            private void WriteManifestZoneSnapshot(Utf8JsonWriter writer, JsonElement zones, User sessionUser, IReadOnlyDictionary<string, TsigKey> keys)
+            private void WriteManifestZoneSnapshot(Utf8JsonWriter writer, ConfigurationManifest manifest, JsonElement zones, User sessionUser, IReadOnlyDictionary<string, TsigKey> keys)
             {
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
                     throw new DnsWebServiceException("Access was denied.");
@@ -1387,15 +1387,23 @@ namespace DnsServerCore
                             writer.WriteString("recordRevision", zone.LastModified);
                             _dnsWebService._dnsServer.AuthZoneManager.ListAllZoneRecords(name, currentRecords);
                         }
+                        var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, declaration.Name,
+                            _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
+                            _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"));
                         writer.WriteStartArray("recordChanges");
-                        foreach (ConfigurationChangeKind? change in ConfigurationPlan.CompareZoneRecords(
-                            name, declaration.Name, _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
-                            _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records")))
+                        foreach (var edit in edits)
                         {
-                            if (change.HasValue)
-                                writer.WriteNumberValue((int)change.Value);
+                            if (edit.Kind.HasValue)
+                                writer.WriteNumberValue((int)edit.Kind.Value);
                             else
                                 writer.WriteNullValue();
+                        }
+                        writer.WriteEndArray();
+                        writer.WriteStartArray("applicationRecordInputs");
+                        foreach (var edit in edits)
+                        {
+                            if (edit.Kind != ConfigurationChangeKind.Remove && edit.Data is DnsApplicationRecordData app)
+                                writer.WriteStringValue(Convert.ToHexString(HMACSHA256.HashData(_configurationRevisionKey, Encoding.UTF8.GetBytes(app.Data))));
                         }
                         writer.WriteEndArray();
                     }
