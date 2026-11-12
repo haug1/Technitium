@@ -13,6 +13,8 @@ namespace DnsServerCore.Configuration
     {
         private const string ScopesPath = "/dhcp/scopes";
 
+        private sealed record Reservation(IPAddress Address, string HostName, string Comments);
+
         private sealed record ScopeState(IPAddress Start, IPAddress End, IPAddress Mask, bool Enabled);
 
         internal static void Validate(JsonElement manifest)
@@ -74,19 +76,7 @@ namespace DnsServerCore.Configuration
                     foreach (JsonProperty reservation in reservations.EnumerateObject())
                     {
                         string entryPath = ConfigurationPlan.AppendPath(path + "/reservations", reservation.Name);
-                        byte[] hardwareAddress;
-                        try
-                        {
-                            hardwareAddress = Lease.ParseHardwareAddress(reservation.Name);
-                        }
-                        catch (Exception ex) when (ex is FormatException or OverflowException)
-                        {
-                            throw new InvalidDataException($"{entryPath}: Invalid Ethernet hardware address.");
-                        }
-
-                        if (hardwareAddress.Length != 6)
-                            throw new InvalidDataException($"{entryPath}: An Ethernet hardware address must have six bytes.");
-                        if (!identifiers.Add(Convert.ToHexString(hardwareAddress)))
+                        if (!identifiers.Add(ReadHardwareAddress(reservation.Name, entryPath)))
                             throw new InvalidDataException($"{entryPath}: Duplicate reservation hardware address.");
 
                         IPAddress address = reservation.Value.ValueKind == JsonValueKind.Object
@@ -119,29 +109,41 @@ namespace DnsServerCore.Configuration
                     continue;
                 }
 
-                var addresses = new SortedSet<uint>();
-                bool hasActiveLeases = false;
-                foreach (Lease lease in scope.Leases.Values)
+                Lease[] activeLeases = scope.Leases.Values.Where(lease => lease.LeaseExpires > now)
+                    .OrderBy(lease => lease.Address.ConvertIpToNumber()).ThenBy(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal)
+                    .ToArray();
+                writer.WriteStartArray("activeLeases");
+                foreach (Lease lease in activeLeases)
                 {
-                    if (lease.LeaseExpires > now)
-                    {
-                        hasActiveLeases = true;
-                        addresses.Add(lease.Address.ConvertIpToNumber());
-                    }
+                    writer.WriteStartObject();
+                    writer.WriteString("hardwareAddress", BitConverter.ToString(lease.HardwareAddress));
+                    writer.WriteString("address", lease.Address.ToString());
+                    writer.WriteEndObject();
                 }
-                writer.WriteBoolean("hasActiveLeases", hasActiveLeases);
-                foreach (Lease reservation in scope.ReservedLeases)
-                    addresses.Add(reservation.Address.ConvertIpToNumber());
+                writer.WriteEndArray();
+
+                writer.WriteStartObject("reservations");
+                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal))
+                {
+                    writer.WriteStartObject(BitConverter.ToString(reservation.HardwareAddress));
+                    writer.WriteString("address", reservation.Address.ToString());
+                    writer.WriteString("hostName", reservation.HostName);
+                    writer.WriteString("comments", reservation.Comments);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndObject();
+
+                var exclusionAddresses = new SortedSet<uint>();
                 if (scope.Exclusions is not null)
                 {
                     foreach (Exclusion exclusion in scope.Exclusions)
                     {
-                        addresses.Add(exclusion.StartingAddress.ConvertIpToNumber());
-                        addresses.Add(exclusion.EndingAddress.ConvertIpToNumber());
+                        exclusionAddresses.Add(exclusion.StartingAddress.ConvertIpToNumber());
+                        exclusionAddresses.Add(exclusion.EndingAddress.ConvertIpToNumber());
                     }
                 }
-                writer.WriteStartArray("protectedAddresses");
-                foreach (uint address in addresses)
+                writer.WriteStartArray("exclusionAddresses");
+                foreach (uint address in exclusionAddresses)
                     writer.WriteNumberValue(address);
                 writer.WriteEndArray();
                 writer.WriteEndObject();
@@ -172,7 +174,7 @@ namespace DnsServerCore.Configuration
                 {
                     if (candidates.Remove(entry.Name))
                     {
-                        if (snapshot.GetProperty(entry.Name).GetProperty("hasActiveLeases").GetBoolean())
+                        if (snapshot.GetProperty(entry.Name).GetProperty("activeLeases").GetArrayLength() != 0)
                             throw new InvalidDataException($"{path}: A scope with active leases cannot be removed.");
                         changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Remove, false));
                     }
@@ -182,7 +184,7 @@ namespace DnsServerCore.Configuration
                 JsonElement scope = entry.Value;
                 foreach (JsonProperty field in scope.EnumerateObject())
                 {
-                    if (field.Name is not ("startingAddress" or "endingAddress" or "subnetMask" or "enabled"))
+                    if (field.Name is not ("startingAddress" or "endingAddress" or "subnetMask" or "enabled" or "reservations"))
                         throw new InvalidDataException($"{ConfigurationPlan.AppendPath(path, field.Name)}: Planning for this scope setting is not implemented.");
                 }
 
@@ -203,19 +205,23 @@ namespace DnsServerCore.Configuration
                     ? enabledValue.ValueKind == JsonValueKind.Null || enabledValue.GetBoolean()
                     : previous?.Enabled ?? true;
                 var candidate = new ScopeState(start, end, mask, enabled);
-                if (previous is null || !start.Equals(previous.Start) || !end.Equals(previous.End) || !mask.Equals(previous.Mask))
+                bool rangeChanged = previous is null || !start.Equals(previous.Start) || !end.Equals(previous.End) || !mask.Equals(previous.Mask);
+                if (rangeChanged)
                 {
                     ValidateNetwork(path, start, end, mask);
                     changedRanges.Add(entry.Name);
+                }
 
-                    if (previous is not null)
-                    {
-                        foreach (JsonElement address in snapshot.GetProperty(entry.Name).GetProperty("protectedAddresses").EnumerateArray())
-                        {
-                            if (!Scope.IsAddressInRange(IPAddressExtensions.ConvertNumberToIp(address.GetUInt32()), start, end))
-                                throw new InvalidDataException($"{path}: The new range excludes an existing lease, reservation, or exclusion.");
-                        }
-                    }
+                snapshot.TryGetProperty(entry.Name, out JsonElement currentScope);
+                if (rangeChanged || scope.TryGetProperty("reservations", out _))
+                    CompareReservations(scope, currentScope, path, start, end, rangeChanged, changes);
+
+                if (rangeChanged && previous is not null)
+                {
+                    foreach (JsonElement lease in currentScope.GetProperty("activeLeases").EnumerateArray())
+                        CheckRange(path, ReadAddress(lease, "address"), start, end);
+                    foreach (JsonElement address in currentScope.GetProperty("exclusionAddresses").EnumerateArray())
+                        CheckRange(path, IPAddressExtensions.ConvertNumberToIp(address.GetUInt32()), start, end);
                 }
 
                 candidates[entry.Name] = candidate;
@@ -245,6 +251,119 @@ namespace DnsServerCore.Configuration
                     first <= other.Value.End.ConvertIpToNumber() && other.Value.Start.ConvertIpToNumber() <= last))
                     throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ScopesPath, name)}: The range overlaps another DHCP scope.");
             }
+        }
+
+        private static void CompareReservations(JsonElement scope, JsonElement current, string scopePath,
+            IPAddress start, IPAddress end, bool rangeChanged, List<ConfigurationChange> changes)
+        {
+            string path = scopePath + "/reservations";
+            bool exists = current.ValueKind == JsonValueKind.Object;
+            var reservations = new Dictionary<string, Reservation>(StringComparer.Ordinal);
+            var activeLeases = new List<(string HardwareAddress, IPAddress Address)>();
+            if (exists)
+            {
+                foreach (JsonProperty entry in current.GetProperty("reservations").EnumerateObject())
+                {
+                    JsonElement value = entry.Value;
+                    reservations.Add(entry.Name, new Reservation(ReadAddress(value, "address"),
+                        value.GetProperty("hostName").GetString(), value.GetProperty("comments").GetString()));
+                }
+                foreach (JsonElement lease in current.GetProperty("activeLeases").EnumerateArray())
+                    activeLeases.Add((lease.GetProperty("hardwareAddress").GetString(), ReadAddress(lease, "address")));
+            }
+
+            var changedAddresses = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (scope.TryGetProperty("reservations", out JsonElement desired))
+            {
+                if (desired.ValueKind == JsonValueKind.Null)
+                {
+                    foreach ((string key, Reservation reservation) in reservations)
+                    {
+                        string entryPath = ConfigurationPlan.AppendPath(path, key);
+                        CheckRemoval(key, reservation, entryPath);
+                        changes.Add(new ConfigurationChange(entryPath, ConfigurationChangeKind.Remove, false));
+                    }
+                    reservations.Clear();
+                }
+                else
+                {
+                    foreach (JsonProperty entry in desired.EnumerateObject())
+                    {
+                        string entryPath = ConfigurationPlan.AppendPath(path, entry.Name);
+                        string key = ReadHardwareAddress(entry.Name, entryPath);
+                        reservations.TryGetValue(key, out Reservation previous);
+                        if (entry.Value.ValueKind == JsonValueKind.Null)
+                        {
+                            if (reservations.Remove(key))
+                            {
+                                CheckRemoval(key, previous, entryPath);
+                                changes.Add(new ConfigurationChange(entryPath, ConfigurationChangeKind.Remove, false));
+                            }
+                            continue;
+                        }
+
+                        JsonElement value = entry.Value;
+                        IPAddress address = value.TryGetProperty("address", out _) ? ReadAddress(value, "address") : previous?.Address;
+                        if (address is null)
+                            throw new InvalidDataException($"{entryPath}/address: A reservation requires an IPv4 address.");
+                        string host = value.TryGetProperty("hostName", out JsonElement hostName) ? hostName.GetString() : previous?.HostName;
+                        string comments = value.TryGetProperty("comments", out JsonElement comment) ? comment.GetString() : previous?.Comments;
+                        var candidate = new Reservation(address, host, comments);
+                        if (candidate == previous)
+                            continue;
+
+                        if (previous is null || !previous.Address.Equals(address))
+                        {
+                            if (previous is not null)
+                                CheckRemoval(key, previous, entryPath);
+                            CheckRange(entryPath + "/address", address, start, end);
+                            if (activeLeases.Any(lease => lease.Address.Equals(address) && lease.HardwareAddress != key))
+                                throw new InvalidDataException($"{entryPath}/address: The address belongs to an active lease for another client.");
+                            if (activeLeases.Any(lease => lease.HardwareAddress == key && !lease.Address.Equals(address)))
+                                throw new InvalidDataException($"{entryPath}/address: This client has an active lease at a different address.");
+                            changedAddresses.Add(key, entryPath);
+                        }
+                        reservations[key] = candidate;
+                        if (exists)
+                            changes.Add(new ConfigurationChange(entryPath, previous is null ? ConfigurationChangeKind.Add : ConfigurationChangeKind.Update, false));
+                    }
+                }
+            }
+
+            if (rangeChanged)
+            {
+                foreach ((string key, Reservation reservation) in reservations)
+                    CheckRange(ConfigurationPlan.AppendPath(path, key) + "/address", reservation.Address, start, end);
+            }
+
+            foreach ((string key, string entryPath) in changedAddresses)
+            {
+                if (reservations.Any(other => other.Key != key && other.Value.Address.Equals(reservations[key].Address)))
+                    throw new InvalidDataException($"{entryPath}/address: The address is reserved for another client.");
+            }
+
+            void CheckRemoval(string key, Reservation previous, string entryPath)
+            {
+                if (activeLeases.Any(lease => lease.HardwareAddress == key && lease.Address.Equals(previous.Address)))
+                    throw new InvalidDataException($"{entryPath}: This reservation has an active lease.");
+            }
+        }
+
+        private static string ReadHardwareAddress(string key, string path)
+        {
+            byte[] hardwareAddress;
+            try
+            {
+                hardwareAddress = Lease.ParseHardwareAddress(key);
+            }
+            catch (Exception ex) when (ex is FormatException or OverflowException)
+            {
+                throw new InvalidDataException($"{path}: Invalid Ethernet hardware address.");
+            }
+
+            if (hardwareAddress.Length != 6)
+                throw new InvalidDataException($"{path}: An Ethernet hardware address must have six bytes.");
+            return BitConverter.ToString(hardwareAddress);
         }
 
         private static IPAddress ReadAddress(JsonElement value, string field)

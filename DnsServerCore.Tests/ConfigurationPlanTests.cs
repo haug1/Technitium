@@ -1041,6 +1041,91 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpReservationPreviewComparesNormalizedEntriesAndEffectiveRange()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.50&subnetMask=255.255.255.0", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-0A&ipAddress=192.0.2.45&hostName=existing", server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.30","reservations":{
+                    "02:00:00:00:00:0a":{"address":"192.0.2.25","comments":"fixture-private"},
+                    "02:00:00:00:00:0b":{"address":"192.0.2.30"}
+                }}}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.Equal("/dhcp/scopes/Lab/endingAddress", change.GetProperty("path").GetString()),
+                change =>
+                {
+                    Assert.Equal("/dhcp/scopes/Lab/reservations/02:00:00:00:00:0a", change.GetProperty("path").GetString());
+                    Assert.Equal("Update", change.GetProperty("kind").GetString());
+                },
+                change =>
+                {
+                    Assert.Equal("/dhcp/scopes/Lab/reservations/02:00:00:00:00:0b", change.GetProperty("path").GetString());
+                    Assert.Equal("Add", change.GetProperty("kind").GetString());
+                });
+            Assert.DoesNotContain("192.0.2.", preview.GetRawText());
+            Assert.DoesNotContain("fixture-private", preview.GetRawText());
+
+            JsonElement current = await server.CallAsync("dhcp/scopes/get?name=Lab", server.AdminToken);
+            LoopbackWebService.AssertOk(current);
+            JsonElement reservation = Assert.Single(current.GetProperty("response").GetProperty("reservedLeases").EnumerateArray());
+            Assert.Equal("192.0.2.45", reservation.GetProperty("address").GetString());
+            Assert.Equal("existing", reservation.GetProperty("hostName").GetString());
+
+            const string unchanged = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"reservations":{"02:00:00:00:00:0a":{"hostName":"existing"}}}}}}
+                """;
+            Assert.Empty((await PreviewAsync(server, unchanged)).GetProperty("changes").EnumerateArray());
+
+            const string reset = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"reservations":null}}}}""";
+            JsonElement removal = Assert.Single((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("/dhcp/scopes/Lab/reservations/02-00-00-00-00-0A", removal.GetProperty("path").GetString());
+            Assert.Equal("Remove", removal.GetProperty("kind").GetString());
+
+            const string duplicate = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"reservations":{"02:00:00:00:00:0b":{"address":"192.0.2.45"}}}}}}
+                """;
+            using var content = new StringContent(duplicate, Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/reservations/02:00:00:00:00:0b/address", rejected.GetProperty("errorMessage").GetString());
+        }
+
+        [Theory]
+        [InlineData("02:00:00:00:00:0a", """{"address":"192.0.2.25"}""", "active lease")]
+        [InlineData("02:00:00:00:00:0b", """{"address":"192.0.2.20"}""", "another client")]
+        [InlineData("02:00:00:00:00:0a", "null", "active lease")]
+        [InlineData("02:00:00:00:00:0c", """{"address":"192.0.2.30"}""", "at a different address")]
+        public void DhcpReservationPreviewRejectsChangesThatWouldDisplaceAnActiveLease(string key, string entry, string reason)
+        {
+            ConfigurationManifest manifest = Load($$"""
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"reservations":{"{{key}}":{{entry}} } } } } }
+                """);
+            using JsonDocument snapshot = JsonDocument.Parse("""
+                {"manifestDhcpScopes":{"Lab":{
+                    "startingAddress":"192.0.2.10","endingAddress":"192.0.2.50","subnetMask":"255.255.255.0","enabled":true,
+                    "reservations":{"02-00-00-00-00-0A":{"address":"192.0.2.20","hostName":null,"comments":null}},
+                    "activeLeases":[
+                        {"hardwareAddress":"02-00-00-00-00-0A","address":"192.0.2.20"},
+                        {"hardwareAddress":"02-00-00-00-00-0C","address":"192.0.2.22"}
+                    ],
+                    "exclusionAddresses":[]
+                }}}
+                """);
+
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationPlan.Create(manifest, snapshot.RootElement));
+
+            Assert.Contains("/dhcp/scopes/Lab/reservations/" + key, error.Message);
+            Assert.Contains(reason, error.Message);
+            Assert.DoesNotContain("192.0.2.", error.Message);
+        }
+
+        [Fact]
         public async Task ZonePreviewTracksCreationDeletionAndEnabledStateWithoutMutatingZones()
         {
             await using var server = await LoopbackWebService.StartAsync();
