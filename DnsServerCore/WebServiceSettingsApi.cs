@@ -27,6 +27,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Mail;
 using System.Net.Sockets;
@@ -462,6 +463,10 @@ namespace DnsServerCore
                 jsonWriter.WriteBoolean("useLocalTime", _dnsWebService._log.UseLocalTime);
                 jsonWriter.WriteString("logFolder", _dnsWebService._log.LogFolder);
                 jsonWriter.WriteNumber("maxLogFileDays", _dnsWebService._log.MaxLogFileDays);
+                jsonWriter.WriteStartArray("managedSettings");
+                foreach (string path in _dnsWebService._log.GetManagedManifestPaths())
+                    jsonWriter.WriteStringValue(path);
+                jsonWriter.WriteEndArray();
 
                 jsonWriter.WriteBoolean("enableInMemoryStats", _dnsWebService._dnsServer.StatsManager.EnableInMemoryStats);
                 jsonWriter.WriteNumber("maxStatFileDays", _dnsWebService._dnsServer.StatsManager.MaxStatFileDays);
@@ -538,7 +543,7 @@ namespace DnsServerCore
                     if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                         throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
 
-                    ConfigurationPlan.ApplyLogging(manifest, current.RootElement, _dnsWebService._log);
+                    ConfigurationPlan.ApplyLogging(manifest, _dnsWebService._log);
                 }
                 catch (InvalidDataException ex)
                 {
@@ -577,6 +582,20 @@ namespace DnsServerCore
                 return JsonDocument.Parse(snapshot);
             }
 
+            private static (LoggingType? Destination, bool? NoStackTrace, int? RetentionDays, bool? UseLocalTime) ReadLoggingFields(HttpRequest request)
+            {
+                LoggingType? destination = null;
+                if (request.TryGetQueryOrFormEnum("loggingType", out LoggingType loggingType))
+                    destination = loggingType;
+                else if (request.TryGetQueryOrForm("enableLogging", bool.Parse, out bool enableLogging))
+                    destination = enableLogging ? LoggingType.File : LoggingType.None;
+
+                return (destination,
+                    request.TryGetQueryOrForm("noStackTrace", bool.Parse, out bool noStackTrace) ? noStackTrace : null,
+                    request.TryGetQueryOrForm("maxLogFileDays", int.Parse, out int retentionDays) ? retentionDays : null,
+                    request.TryGetQueryOrForm("useLocalTime", bool.Parse, out bool useLocalTime) ? useLocalTime : null);
+            }
+
             public async Task SetDnsSettingsAsync(HttpContext context)
             {
                 User sessionUser = _dnsWebService.GetSessionUser(context);
@@ -597,13 +616,14 @@ namespace DnsServerCore
                 Dictionary<string, string> clusterParameters = new Dictionary<string, string>(128);
 
                 HttpRequest request = context.Request;
-                JsonDocument jsonDocument = null;
-
-                if (request.HasJsonContentType())
-                {
-                    jsonDocument = await JsonDocument.ParseAsync(request.Body);
+                using JsonDocument jsonDocument = request.HasJsonContentType()
+                    ? await JsonDocument.ParseAsync(request.Body)
+                    : null;
+                if (jsonDocument is not null)
                     context.Items["jsonContent"] = jsonDocument;
-                }
+
+                (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
+                _dnsWebService._log.CheckManifestOwnership(destination, noStackTrace, retentionDays, useLocalTime);
 
                 try
                 {
@@ -1788,10 +1808,8 @@ namespace DnsServerCore
 
                         #region logging
 
-                        if (request.TryGetQueryOrFormEnum("loggingType", out LoggingType loggingType))
-                            _dnsWebService._log.LoggingType = loggingType;
-                        else if (request.TryGetQueryOrForm("enableLogging", bool.Parse, out bool enableLogging))
-                            _dnsWebService._log.LoggingType = enableLogging ? LoggingType.File : LoggingType.None;
+                        if (destination.HasValue)
+                            _dnsWebService._log.LoggingType = destination.Value;
 
                         if (request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs))
                             _dnsWebService._dnsServer.ResolverLogManager = ignoreResolverLogs ? null : _dnsWebService._log;
@@ -1799,17 +1817,17 @@ namespace DnsServerCore
                         if (request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries))
                             _dnsWebService._dnsServer.QueryLogManager = logQueries ? _dnsWebService._log : null;
 
-                        if (request.TryGetQueryOrForm("noStackTrace", bool.Parse, out bool noStackTrace))
-                            _dnsWebService._log.NoStackTrace = noStackTrace;
+                        if (noStackTrace.HasValue)
+                            _dnsWebService._log.NoStackTrace = noStackTrace.Value;
 
-                        if (request.TryGetQueryOrForm("useLocalTime", bool.Parse, out bool useLocalTime))
-                            _dnsWebService._log.UseLocalTime = useLocalTime;
+                        if (useLocalTime.HasValue)
+                            _dnsWebService._log.UseLocalTime = useLocalTime.Value;
 
                         if (request.TryGetQueryOrForm("logFolder", out string logFolder))
                             _dnsWebService._log.LogFolder = logFolder;
 
-                        if (request.TryGetQueryOrForm("maxLogFileDays", int.Parse, out int maxLogFileDays))
-                            _dnsWebService._log.MaxLogFileDays = maxLogFileDays;
+                        if (retentionDays.HasValue)
+                            _dnsWebService._log.MaxLogFileDays = retentionDays.Value;
 
                         if (request.TryGetQueryOrForm("enableInMemoryStats", bool.Parse, out bool enableInMemoryStats))
                             _dnsWebService._dnsServer.StatsManager.EnableInMemoryStats = enableInMemoryStats;
@@ -1821,8 +1839,6 @@ namespace DnsServerCore
                     }
                     finally
                     {
-                        jsonDocument?.Dispose();
-
                         //enforce cluster mandatory TLS requirement
                         if (_dnsWebService._clusterManager.ClusterInitialized)
                         {
@@ -2006,6 +2022,7 @@ namespace DnsServerCore
                 int oldWebServiceHttpPort = _dnsWebService._webServiceHttpPort;
                 int oldWebServiceTlsPort = _dnsWebService._webServiceTlsPort;
 
+                bool restoreStarted = false;
                 try
                 {
                     //write to temp file
@@ -2018,6 +2035,22 @@ namespace DnsServerCore
 
                             fS.Position = 0;
 
+                            if (logSettings && _dnsWebService._log.HasManagedLoggingSettings)
+                            {
+                                using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
+                                {
+                                    ZipArchiveEntry entry = archive.GetEntry("log.config");
+                                    if (entry is not null)
+                                    {
+                                        using Stream logConfiguration = entry.Open();
+                                        _dnsWebService._log.CheckRestoreManifestOwnership(logConfiguration);
+                                    }
+                                }
+
+                                fS.Position = 0;
+                            }
+
+                            restoreStarted = true;
                             await _dnsWebService.RestoreConfigAsync(fS, authConfig, clusterConfig, webServiceSettings, dnsSettings, logSettings, zones, allowedZones, blockedZones, blockLists, apps, scopes, stats, logs, deleteExistingFiles, context.GetCurrentSession());
 
                             _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Settings backup zip file was restored.");
@@ -2045,7 +2078,7 @@ namespace DnsServerCore
                 }
                 finally
                 {
-                    if (dnsSettings || webServiceSettings)
+                    if (restoreStarted && (dnsSettings || webServiceSettings))
                         _dnsWebService.RestartService(dnsSettings, webServiceSettings, oldWebServiceLocalAddresses, oldWebServiceHttpPort, oldWebServiceTlsPort);
                 }
             }

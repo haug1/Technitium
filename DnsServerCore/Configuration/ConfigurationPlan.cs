@@ -84,6 +84,8 @@ namespace DnsServerCore.Configuration
                     GetCurrentSetting(currentSettings, path, setting).WriteTo(writer);
                 }
                 writer.WriteEndObject();
+                if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
+                    ownership.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
@@ -92,7 +94,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static void ApplyLogging(ConfigurationManifest manifest, JsonElement currentSettings, LogManager log)
+        internal static void ApplyLogging(ConfigurationManifest manifest, LogManager log)
         {
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
             {
@@ -108,10 +110,7 @@ namespace DnsServerCore.Configuration
                 }
             }
 
-            if (Create(manifest, currentSettings).Count == 0)
-                return;
-
-            JsonElement logging = manifest.Settings.GetProperty("logging");
+            manifest.Settings.TryGetProperty("logging", out JsonElement logging);
             JsonElement? destination = GetLoggingValue(logging, "destination");
             JsonElement? noStackTrace = GetLoggingValue(logging, "noStackTrace");
             JsonElement? retention = GetLoggingValue(logging, "retentionDays");
@@ -126,7 +125,7 @@ namespace DnsServerCore.Configuration
 
         private static JsonElement? GetLoggingValue(JsonElement logging, string name)
         {
-            if (!logging.TryGetProperty(name, out JsonElement value))
+            if ((logging.ValueKind == JsonValueKind.Undefined) || !logging.TryGetProperty(name, out JsonElement value))
                 return null;
             return value.ValueKind == JsonValueKind.Null ? _settings["/logging/" + name].Default : value;
         }

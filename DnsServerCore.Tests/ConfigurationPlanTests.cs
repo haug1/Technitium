@@ -2,6 +2,7 @@ using DnsServerCore.Configuration;
 using System;
 using System.IO;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -99,6 +100,57 @@ namespace DnsServerCore.Tests
         {
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             return await server.CallAsync("settings/config/apply", server.AdminToken, content, revision);
+        }
+
+        [Fact]
+        public async Task OwnershipSurvivesRestartAndRejectsMixedEditsUntilReleased()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """{"schemaVersion":1,"logging":{"retentionDays":365}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            Assert.NotEqual(revision, (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal("/logging/retentionDays", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+            int originalTtl = settings.GetProperty("defaultRecordTtl").GetInt32();
+            JsonElement rejected = await server.CallAsync("settings/set?defaultRecordTtl=123&maxLogFileDays=180", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/logging/retentionDays", rejected.GetProperty("errorMessage").GetString());
+            Assert.Equal(originalTtl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=123&maxLogFileDays=365", server.AdminToken));
+
+            const string unmanaged = """{"schemaVersion":1}""";
+            string releaseRevision = (await PreviewAsync(server, unmanaged)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, unmanaged, releaseRevision));
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?maxLogFileDays=180", server.AdminToken));
+            Assert.Empty((await server.GetSettingsAsync()).GetProperty("managedSettings").EnumerateArray());
+        }
+
+        [Fact]
+        public async Task BackupRestoreCannotReplaceAManagedLoggingValue()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?logSettings=true&dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] bytes = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"logging":{"retentionDays":180}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=123", server.AdminToken));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(bytes), "file", "backup.zip");
+            JsonElement rejected = await server.CallAsync("settings/restore?logSettings=true&dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/logging/retentionDays", rejected.GetProperty("errorMessage").GetString());
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(180, current.GetProperty("maxLogFileDays").GetInt32());
+            Assert.Equal(123, current.GetProperty("defaultRecordTtl").GetInt32());
         }
 
         [Fact]

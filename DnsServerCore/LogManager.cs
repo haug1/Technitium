@@ -21,6 +21,7 @@ using Microsoft.AspNetCore.Http;
 using System;
 using System.Globalization;
 using System.IO;
+using System.Collections.Generic;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
@@ -59,6 +60,19 @@ namespace DnsServerCore
         bool _noStackTrace;
         int _maxLogFileDays;
         bool _useLocalTime;
+        ManagedLoggingSettings _managedSettings;
+
+        [Flags]
+        private enum ManagedLoggingSettings : byte
+        {
+            Destination = 1,
+            NoStackTrace = 2,
+            RetentionDays = 4,
+            UseLocalTime = 8
+        }
+
+        private readonly record struct LoggingConfiguration(LoggingType Destination, string Folder,
+            bool NoStackTrace, int RetentionDays, bool UseLocalTime, ManagedLoggingSettings ManagedSettings);
 
         const string LOG_ENTRY_DATE_TIME_FORMAT = "yyyy-MM-dd HH:mm:ss";
         const string LOG_FILE_DATE_TIME_FORMAT = "yyyy-MM-dd";
@@ -291,7 +305,7 @@ namespace DnsServerCore
             {
                 try
                 {
-                    ReadConfigFrom(s);
+                    ReadConfigFrom(s, preserveOwnership: true);
                 }
                 catch (Exception ex)
                 {
@@ -318,6 +332,23 @@ namespace DnsServerCore
                 bool previousNoStackTrace = _noStackTrace;
                 int previousRetentionDays = _maxLogFileDays;
                 bool previousUseLocalTime = _useLocalTime;
+                ManagedLoggingSettings previousManagedSettings = _managedSettings;
+                ManagedLoggingSettings managedSettings = 0;
+                if (destination.HasValue)
+                    managedSettings |= ManagedLoggingSettings.Destination;
+                if (noStackTrace.HasValue)
+                    managedSettings |= ManagedLoggingSettings.NoStackTrace;
+                if (retentionDays.HasValue)
+                    managedSettings |= ManagedLoggingSettings.RetentionDays;
+                if (useLocalTime.HasValue)
+                    managedSettings |= ManagedLoggingSettings.UseLocalTime;
+
+                if ((managedSettings == previousManagedSettings) &&
+                    ((destination ?? previousDestination) == previousDestination) &&
+                    ((noStackTrace ?? previousNoStackTrace) == previousNoStackTrace) &&
+                    ((retentionDays ?? previousRetentionDays) == previousRetentionDays) &&
+                    ((useLocalTime ?? previousUseLocalTime) == previousUseLocalTime))
+                    return;
 
                 try
                 {
@@ -325,11 +356,13 @@ namespace DnsServerCore
                     UseLocalTime = useLocalTime ?? previousUseLocalTime;
                     MaxLogFileDays = retentionDays ?? previousRetentionDays;
                     LoggingType = destination ?? previousDestination;
+                    _managedSettings = managedSettings;
                     SaveConfigFileInternal();
                     _pendingSave = false;
                 }
                 catch
                 {
+                    _managedSettings = previousManagedSettings;
                     NoStackTrace = previousNoStackTrace;
                     UseLocalTime = previousUseLocalTime;
                     MaxLogFileDays = previousRetentionDays;
@@ -337,6 +370,41 @@ namespace DnsServerCore
                     throw;
                 }
             }
+        }
+
+        internal bool HasManagedLoggingSettings => _managedSettings != 0;
+
+        internal IEnumerable<string> GetManagedManifestPaths()
+        {
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.Destination))
+                yield return "/logging/destination";
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.NoStackTrace))
+                yield return "/logging/noStackTrace";
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.RetentionDays))
+                yield return "/logging/retentionDays";
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.UseLocalTime))
+                yield return "/logging/useLocalTime";
+        }
+
+        internal void CheckManifestOwnership(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime)
+        {
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.Destination) && destination.HasValue && (destination.Value != _loggingType))
+                throw new DnsWebServiceException("/logging/destination: Setting is managed by the configuration manifest.");
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.NoStackTrace) && noStackTrace.HasValue && (noStackTrace.Value != _noStackTrace))
+                throw new DnsWebServiceException("/logging/noStackTrace: Setting is managed by the configuration manifest.");
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.RetentionDays) && retentionDays.HasValue && (retentionDays.Value != _maxLogFileDays))
+                throw new DnsWebServiceException("/logging/retentionDays: Setting is managed by the configuration manifest.");
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.UseLocalTime) && useLocalTime.HasValue && (useLocalTime.Value != _useLocalTime))
+                throw new DnsWebServiceException("/logging/useLocalTime: Setting is managed by the configuration manifest.");
+        }
+
+        internal void CheckRestoreManifestOwnership(Stream stream)
+        {
+            if (_managedSettings == 0)
+                return;
+
+            LoggingConfiguration configuration = ReadLoggingConfiguration(stream);
+            CheckManifestOwnership(configuration.Destination, configuration.NoStackTrace, configuration.RetentionDays, configuration.UseLocalTime);
         }
 
         private void SaveConfigFileInternal()
@@ -366,7 +434,19 @@ namespace DnsServerCore
             }
         }
 
-        private void ReadConfigFrom(Stream s)
+        private void ReadConfigFrom(Stream s, bool preserveOwnership = false)
+        {
+            LoggingConfiguration configuration = ReadLoggingConfiguration(s);
+            _loggingType = configuration.Destination;
+            _logFolder = configuration.Folder;
+            _noStackTrace = configuration.NoStackTrace;
+            _maxLogFileDays = configuration.RetentionDays;
+            _useLocalTime = configuration.UseLocalTime;
+            if (!preserveOwnership)
+                _managedSettings = configuration.ManagedSettings;
+        }
+
+        private static LoggingConfiguration ReadLoggingConfiguration(Stream s)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "LS") //format
                 throw new InvalidDataException("DnsServer log config file format is invalid.");
@@ -378,17 +458,15 @@ namespace DnsServerCore
             {
                 case 1:
                 case 2:
-                    _loggingType = (LoggingType)bR.ReadByte();
-                    _logFolder = s.ReadShortString();
-
-                    if (version >= 2)
-                        _noStackTrace = bR.ReadBoolean();
-                    else
-                        _noStackTrace = false;
-
-                    _maxLogFileDays = bR.ReadInt32();
-                    _useLocalTime = bR.ReadBoolean();
-                    break;
+                    LoggingType destination = (LoggingType)bR.ReadByte();
+                    string folder = s.ReadShortString();
+                    bool noStackTrace = (version >= 2) && bR.ReadBoolean();
+                    int retentionDays = bR.ReadInt32();
+                    bool useLocalTime = bR.ReadBoolean();
+                    // Existing version 2 readers stop after useLocalTime.
+                    int ownership = version == 2 ? s.ReadByte() : -1;
+                    return new LoggingConfiguration(destination, folder, noStackTrace, retentionDays, useLocalTime,
+                        ownership is >= 0 and <= 15 ? (ManagedLoggingSettings)ownership : 0);
 
                 default:
                     throw new InvalidDataException("DnsServer log config version not supported.");
@@ -407,6 +485,8 @@ namespace DnsServerCore
             bW.Write(_noStackTrace);
             bW.Write(_maxLogFileDays);
             bW.Write(_useLocalTime);
+            if (_managedSettings != 0)
+                bW.Write((byte)_managedSettings);
         }
 
         #endregion
