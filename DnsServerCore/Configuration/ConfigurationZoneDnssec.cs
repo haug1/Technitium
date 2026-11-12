@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DnsServerCore.Dns;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.Zones;
 using TechnitiumLibrary.Net.Dns;
@@ -38,7 +39,8 @@ namespace DnsServerCore.Configuration
                 (Imported is null || Imported.DnsKey.Equals(key.DnsKey));
         }
 
-        internal sealed record Signing(uint Ttl, bool UseNsec3, ushort Iterations, int SaltLength, Key[] Keys);
+        internal sealed record Signing(uint Ttl, bool UseNsec3, ushort Iterations, int SaltLength, Key[] Keys,
+            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false);
 
         internal static Signing Prepare(ConfigurationManifest manifest, JsonElement declaration, AuthZoneType type, AuthZoneInfo current, string path)
         {
@@ -52,16 +54,24 @@ namespace DnsServerCore.Configuration
             bool enabled = Read(dnssec, "enabled")?.GetBoolean() ?? (dnssec.TryGetProperty("enabled", out _) ? false : signed);
             if (!enabled)
             {
-                if (signed || dnssec.EnumerateObject().Any(field => field.Name != "enabled"))
-                    throw new InvalidDataException($"{path}: This signing change is not supported yet.");
-                return null;
+                if (dnssec.EnumerateObject().Any(field => field.Name != "enabled"))
+                    throw new InvalidDataException($"{path}: Enable DNSSEC before declaring signing settings.");
+                return signed ? new Signing(0, false, 0, 0, [], Disable: true) : null;
             }
 
-            uint ttl = decimal.ToUInt32(Read(dnssec, "dnsKeyTtl")?.GetDecimal() ?? 3600);
+            bool currentNsec3 = current?.ApexZone.DnssecStatus == AuthZoneDnssecStatus.SignedWithNSEC3;
+            var parameters = currentNsec3
+                ? (DnsNSEC3PARAMRecordData)current.ApexZone.GetRecords(DnsResourceRecordType.NSEC3PARAM)[0].RDATA : null;
+            uint ttl = dnssec.TryGetProperty("dnsKeyTtl", out _)
+                ? decimal.ToUInt32(Read(dnssec, "dnsKeyTtl")?.GetDecimal() ?? 3600)
+                : signed ? current.DnsKeyTtl : 3600;
             JsonElement proof = Read(dnssec, "proof") ?? default;
-            bool useNsec3 = Read(proof, "type")?.ValueEquals("NSEC3") == true;
-            int iterations = decimal.ToInt32(Read(proof, "iterations")?.GetDecimal() ?? 0);
-            int saltLength = decimal.ToInt32(Read(proof, "saltLength")?.GetDecimal() ?? 0);
+            bool useNsec3 = proof.ValueKind == JsonValueKind.Object && proof.TryGetProperty("type", out _)
+                ? Read(proof, "type")?.ValueEquals("NSEC3") == true : currentNsec3;
+            int iterations = proof.ValueKind == JsonValueKind.Object && proof.TryGetProperty("iterations", out _)
+                ? decimal.ToInt32(Read(proof, "iterations")?.GetDecimal() ?? 0) : useNsec3 ? parameters?.Iterations ?? 0 : 0;
+            int saltLength = proof.ValueKind == JsonValueKind.Object && proof.TryGetProperty("saltLength", out _)
+                ? decimal.ToInt32(Read(proof, "saltLength")?.GetDecimal() ?? 0) : useNsec3 ? parameters?.Salt.Length ?? 0 : 0;
             if (iterations > 50 || (!useNsec3 && iterations != 0))
                 throw new InvalidDataException($"{path}/proof/iterations: NSEC3 iterations must be between 0 and 50.");
             if (saltLength > 32 || (!useNsec3 && saltLength != 0))
@@ -77,15 +87,27 @@ namespace DnsServerCore.Configuration
 
             if (signed)
             {
-                bool currentNsec3 = current.ApexZone.DnssecStatus == AuthZoneDnssecStatus.SignedWithNSEC3;
-                var parameters = current.ApexZone.GetRecords(DnsResourceRecordType.NSEC3PARAM).FirstOrDefault()?.RDATA as DnsNSEC3PARAMRecordData;
                 var remaining = (current.DnssecPrivateKeys ?? []).Where(key => !key.IsRetiring).ToList();
-                if ((dnssec.TryGetProperty("dnsKeyTtl", out _) && ttl != current.DnsKeyTtl) ||
-                    (proof.ValueKind != JsonValueKind.Undefined && (useNsec3 != currentNsec3 ||
-                    iterations != (parameters?.Iterations ?? 0) || saltLength != (parameters?.Salt.Length ?? 0))) ||
-                    !parsed.OrderBy(key => key.Imported is null).All(key => RemoveMatch(remaining, key)))
-                    throw new InvalidDataException($"{path}: Updating a signed zone's signing policy is not supported yet.");
-                return null;
+                if (!parsed.OrderBy(key => key.Imported is null).All(key => RemoveMatch(remaining, key)))
+                    throw new InvalidDataException($"{path}/keys: Replacing the signing keys of an existing signed zone is not supported yet.");
+
+                bool changeTtl = ttl != current.DnsKeyTtl;
+                bool changeProof = useNsec3 != currentNsec3 || (useNsec3 &&
+                    (iterations != (parameters?.Iterations ?? 0) || saltLength != (parameters?.Salt.Length ?? 0)));
+                if (!changeProof && !changeTtl)
+                    return null;
+                if (changeTtl)
+                {
+                    try
+                    {
+                        ((PrimaryZone)current.ApexZone).CheckDnsKeyTtlUpdate();
+                    }
+                    catch (DnsServerException ex)
+                    {
+                        throw new InvalidDataException($"{path}/dnsKeyTtl: {ex.Message}");
+                    }
+                }
+                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl);
             }
 
             if (parsed.Length == 0)

@@ -1071,6 +1071,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     else
                     {
                         ApexZone zone;
+                        signingChanges.TryGetValue(name, out var signing);
                         var allRecords = new List<DnsResourceRecord>();
                         if (current is null)
                         {
@@ -1096,7 +1097,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                         }
                         else
                         {
-                            if (current.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned })
+                            if (records.ValueKind != JsonValueKind.Undefined && signing?.Disable != true &&
+                                current.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned })
                                 throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}/records: Applying records requires an unsigned primary zone.");
                             AuthZoneInfo previous = GetAuthZoneInfo(name, loadHistory: true);
                             zone = type switch
@@ -1109,24 +1111,30 @@ namespace DnsServerCore.Dns.ZoneManagers
                             ListAllZoneRecords(name, allRecords);
                         }
 
+                        HashSet<(string Owner, DnsResourceRecordType Type)> changedSets = null;
+                        if (signing?.Disable == true)
+                            changedSets = StageManifestSigning((PrimaryZone)zone, allRecords, signing);
+
                         if (zone is CatalogZone catalog)
                         {
-                            var changedSets = StageManifestCatalogRecords(catalog, allRecords, policies, current is null, catalogEdits.GetValueOrDefault(name));
-                            stagedRecords[name] = (catalog, allRecords, changedSets);
+                            changedSets = StageManifestCatalogRecords(catalog, allRecords, policies, current is null, catalogEdits.GetValueOrDefault(name));
                         }
                         else if (records.ValueKind != JsonValueKind.Undefined)
                         {
-                            var changedSets = StageManifestRecords(manifest, zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain);
-                            stagedRecords[name] = (zone, allRecords, changedSets);
+                            var recordSets = StageManifestRecords(manifest, zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain);
+                            recordSets.UnionWith(changedSets ?? []);
+                            changedSets = recordSets;
                         }
 
-                        if (signingChanges.TryGetValue(name, out var signing))
+                        if (signing is { Disable: false })
                         {
                             var signedSets = StageManifestSigning((PrimaryZone)zone, allRecords, signing);
-                            if (stagedRecords.TryGetValue(name, out var stage) && stage.ChangedSets is not null)
-                                signedSets.UnionWith(stage.ChangedSets);
-                            stagedRecords[name] = (zone, allRecords, signedSets);
+                            signedSets.UnionWith(changedSets ?? []);
+                            changedSets = signedSets;
                         }
+
+                        if (changedSets is not null)
+                            stagedRecords[name] = (zone, allRecords, changedSets);
 
                         string temporary = Path.ChangeExtension(path, ".tmp");
                         using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write))
@@ -1255,7 +1263,12 @@ namespace DnsServerCore.Dns.ZoneManagers
                                         {
                                             node.RemoveManifestRecordSet(type);
                                             if (node is SubDomainZone subdomain)
-                                                subdomain.AutoUpdateState();
+                                            {
+                                                if (node.IsEmpty && signingChanges.ContainsKey(name))
+                                                    RemoveSubDomainZone(owner);
+                                                else
+                                                    subdomain.AutoUpdateState();
+                                            }
                                         }
                                     }
                                 }
@@ -1527,23 +1540,37 @@ namespace DnsServerCore.Dns.ZoneManagers
                     node.LoadRecords(rrset.Key, rrset.Value.Select(record => CopyRecord(record, record.OriginalTtlValue)).ToArray());
             }
 
-            var keys = new Dictionary<ushort, DnssecPrivateKey>();
-            foreach (var declaration in signing.Keys.OrderBy(key => key.Imported is null))
+            var changedSets = GetSigningRecordSets(records);
+            if (signing.Keys.Length == 0)
             {
-                var key = declaration.Create();
-                while (!keys.TryAdd(key.KeyTag, key))
-                    key = declaration.Create();
+                byte[] salt = signing.ChangeProof && signing.UseNsec3 ? RandomNumberGenerator.GetBytes(signing.SaltLength) : [];
+                zone.UpdateStagedSigning(tree, signing.Disable, signing.ChangeProof, signing.UseNsec3,
+                    signing.Iterations, salt, signing.ChangeTtl, signing.Ttl);
             }
-            byte[] salt = RandomNumberGenerator.GetBytes(signing.SaltLength);
-            zone.SignZone(keys.Values, signing.Ttl, signing.UseNsec3, signing.Iterations, salt, tree);
+            else
+            {
+                var keys = new Dictionary<ushort, DnssecPrivateKey>();
+                foreach (var declaration in signing.Keys.OrderBy(key => key.Imported is null))
+                {
+                    var key = declaration.Create();
+                    while (!keys.TryAdd(key.KeyTag, key))
+                        key = declaration.Create();
+                }
+                byte[] salt = RandomNumberGenerator.GetBytes(signing.SaltLength);
+                zone.SignZone(keys.Values, signing.Ttl, signing.UseNsec3, signing.Iterations, salt, tree);
+            }
 
             records.Clear();
             foreach (AuthZone node in tree.GetApexZoneWithSubDomainZones(zone.Name))
                 node.ListAllRecords(records);
 
-            return records.Where(record => record.Type is DnsResourceRecordType.SOA or DnsResourceRecordType.DNSKEY or
-                DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM)
-                .Select(record => (record.Name.ToLowerInvariant(), record.Type)).ToHashSet();
+            changedSets.UnionWith(GetSigningRecordSets(records));
+            return changedSets;
+
+            static HashSet<(string Owner, DnsResourceRecordType Type)> GetSigningRecordSets(IEnumerable<DnsResourceRecord> source) =>
+                source.Where(record => record.Type is DnsResourceRecordType.SOA or DnsResourceRecordType.DNSKEY or
+                    DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM)
+                    .Select(record => (record.Name.ToLowerInvariant(), record.Type)).ToHashSet();
         }
 
         private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(ConfigurationManifest manifest, ApexZone zone, JsonElement declaration, List<DnsResourceRecord> records,

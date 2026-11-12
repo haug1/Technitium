@@ -3190,6 +3190,83 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestChangesDenialProofAndDisablesSigningWithoutLosingOperatorRecords()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "proof.test";
+            const string host = "www.proof.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/records/add?zone={name}&domain={host}&type=A&ipAddress=192.0.2.50&ttl=60", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256&nxProof=NSEC", server.AdminToken));
+
+            const string nsec3 = """{"schemaVersion":1,"zones":{"proof.test":{"dnssec":{"proof":{"type":"NSEC3","iterations":2,"saltLength":4}}}}}""";
+            const string tuneNsec3 = """{"schemaVersion":1,"zones":{"proof.test":{"dnssec":{"proof":{"iterations":3}}}}}""";
+            const string nsec = """{"schemaVersion":1,"zones":{"proof.test":{"dnssec":{"proof":{"type":"NSEC"}}}}}""";
+            const string disable = """
+                {"schemaVersion":1,"zones":{"proof.test":{"dnssec":{"enabled":false},"records":[
+                  {"owner":"www.proof.test","type":"A","ttl":60,"data":{"zoneFile":"192.0.2.50"}},
+                  {"owner":"new.proof.test","type":"A","ttl":60,"data":{"zoneFile":"192.0.2.51"}}
+                ]}}}
+                """;
+
+            var originalKeys = await ReadKeysAsync();
+            Assert.Equal(2, originalKeys.Length);
+            JsonElement plan = await PreviewAsync(server, nsec3);
+            Assert.Contains(plan.GetProperty("changes").EnumerateArray(), change =>
+                change.GetProperty("path").ValueEquals("/zones/proof.test/dnssec"));
+            Assert.Empty((await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Answer);
+            string revision = plan.GetProperty("revision").GetString()!;
+
+            string blockedPath = Path.Combine(server.ConfigurationDirectory, "zones", name + ".tmp");
+            Directory.CreateDirectory(blockedPath);
+            try
+            {
+                Assert.Equal("error", (await ApplyAsync(server, nsec3, revision)).GetProperty("status").GetString());
+                Assert.Empty((await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Answer);
+                Assert.Equal(originalKeys, await ReadKeysAsync());
+            }
+            finally
+            {
+                Directory.Delete(blockedPath);
+            }
+
+            await ApplyPolicyAsync(nsec3);
+            Assert.Equal(2, ReadParameters(await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Iterations);
+            await ApplyPolicyAsync(tuneNsec3);
+            await server.RestartAsync();
+            var parameters = ReadParameters(await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM));
+            Assert.Equal(3, parameters.Iterations);
+            Assert.Equal(4, parameters.Salt.Length);
+            Assert.Equal(originalKeys, await ReadKeysAsync());
+
+            await ApplyPolicyAsync(nsec);
+            Assert.Empty((await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Answer);
+            Assert.Equal(originalKeys, await ReadKeysAsync());
+            await ApplyPolicyAsync(disable);
+            await server.RestartAsync();
+            Assert.Empty(await ReadKeysAsync());
+            Assert.Equal("192.0.2.50", Assert.IsType<DnsARecordData>(
+                Assert.Single((await server.QueryAsync(host, DnsResourceRecordType.A)).Answer).RDATA).Address.ToString());
+            Assert.Equal("192.0.2.51", Assert.IsType<DnsARecordData>(
+                Assert.Single((await server.QueryAsync("new.proof.test", DnsResourceRecordType.A)).Answer).RDATA).Address.ToString());
+
+            async Task ApplyPolicyAsync(string manifest)
+            {
+                string currentRevision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, currentRevision));
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            }
+
+            async Task<string[]> ReadKeysAsync() => (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer
+                .Where(record => record.Type == DnsResourceRecordType.DNSKEY).Select(record => record.RDATA.ToString()).Order().ToArray();
+
+            static DnsNSEC3PARAMRecordData ReadParameters(DnsDatagram response) =>
+                Assert.IsType<DnsNSEC3PARAMRecordData>(Assert.Single(response.Answer).RDATA);
+        }
+
+        [Fact]
         public async Task SignedZoneExportRecreatesTheSameKeysFromReferences()
         {
             await using var source = await LoopbackWebService.StartAsync();

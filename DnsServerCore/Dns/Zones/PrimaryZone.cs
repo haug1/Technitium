@@ -690,17 +690,68 @@ namespace DnsServerCore.Dns.Zones
 
         internal void ActivateManifestSigning(PrimaryZone staged)
         {
-            _dnssecPrivateKeys = staged._dnssecPrivateKeys;
-            UpdateDnssecStatus();
+            bool wasSigned = !ReferenceEquals(this, staged) && _dnssecStatus != AuthZoneDnssecStatus.Unsigned;
+            base.UpdateDnssecStatus();
+            bool signed = _dnssecStatus != AuthZoneDnssecStatus.Unsigned;
+            if (signed && !wasSigned)
+            {
+                _dnssecPrivateKeys = staged._dnssecPrivateKeys;
+                _dnssecTimer = new Timer(DnssecTimerCallback, null, DNSSEC_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
+            }
+            else if (!signed && wasSigned)
+            {
+                StopDnssecTimer();
+                _dnssecPrivateKeys = null;
+            }
         }
 
-        public void UnsignZone()
+        internal void UpdateStagedSigning(AuthZoneTree tree, bool disable, bool changeProof, bool useNsec3,
+            ushort iterations, byte[] salt, bool changeTtl, uint ttl)
+        {
+            base.UpdateDnssecStatus();
+            if (disable)
+            {
+                UnsignZone(tree);
+                return;
+            }
+
+            if (changeProof)
+            {
+                IReadOnlyList<AuthZone> zones = tree.GetApexZoneWithSubDomainZones(_name);
+                if (_dnssecStatus == AuthZoneDnssecStatus.SignedWithNSEC3)
+                    DisableNSec3(zones, tree);
+                else
+                    DisableNSec(zones);
+
+                var remaining = new List<AuthZone>(zones.Count);
+                foreach (AuthZone zone in zones)
+                {
+                    if (!zone.IsEmpty)
+                        remaining.Add(zone);
+                }
+
+                if (useNsec3)
+                    EnableNSec3(remaining, iterations, salt, tree);
+                else
+                    EnableNSec(remaining);
+                base.UpdateDnssecStatus();
+            }
+
+            if (changeTtl)
+                UpdateDnsKeyTtl(ttl, notify: false);
+        }
+
+        public void UnsignZone() => UnsignZone(stagedTree: null);
+
+        private void UnsignZone(AuthZoneTree stagedTree)
         {
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("Cannot unsign zone: the is zone not signed.");
 
             List<DnsResourceRecord> deletedRecords = new List<DnsResourceRecord>();
-            IReadOnlyList<AuthZone> zones = _dnsServer.AuthZoneManager.GetApexZoneWithSubDomainZones(_name);
+            IReadOnlyList<AuthZone> zones = stagedTree is null
+                ? _dnsServer.AuthZoneManager.GetApexZoneWithSubDomainZones(_name)
+                : stagedTree.GetApexZoneWithSubDomainZones(_name);
 
             foreach (AuthZone zone in zones)
             {
@@ -709,12 +760,25 @@ namespace DnsServerCore.Dns.Zones
                 if (zone is SubDomainZone subDomainZone)
                 {
                     if (zone.IsEmpty)
-                        _dnsServer.AuthZoneManager.RemoveSubDomainZone(zone.Name); //remove empty sub zone
+                        RemoveEmptySigningNode(zone.Name, stagedTree);
                     else
                         subDomainZone.AutoUpdateState();
                 }
             }
 
+            if (stagedTree is null)
+                StopDnssecTimer();
+
+            _dnssecPrivateKeys = null;
+            _dnssecStatus = AuthZoneDnssecStatus.Unsigned;
+
+            CommitAndIncrementSerial(deletedRecords);
+            if (stagedTree is null)
+                TriggerNotify();
+        }
+
+        private void StopDnssecTimer()
+        {
             Timer dnssecTimer = _dnssecTimer;
             if (dnssecTimer is not null)
             {
@@ -724,12 +788,14 @@ namespace DnsServerCore.Dns.Zones
                     _dnssecTimer = null;
                 }
             }
+        }
 
-            _dnssecPrivateKeys = null;
-            _dnssecStatus = AuthZoneDnssecStatus.Unsigned;
-
-            CommitAndIncrementSerial(deletedRecords);
-            TriggerNotify();
+        private void RemoveEmptySigningNode(string name, AuthZoneTree stagedTree)
+        {
+            if (stagedTree is null)
+                _dnsServer.AuthZoneManager.RemoveSubDomainZone(name);
+            else
+                stagedTree.TryRemove(name, out SubDomainZone _);
         }
 
         public void ConvertToNSec()
@@ -1061,7 +1127,7 @@ namespace DnsServerCore.Dns.Zones
             CommitAndIncrementSerial(deletedRecords, addedRecords);
         }
 
-        private void DisableNSec3(IReadOnlyList<AuthZone> zones)
+        private void DisableNSec3(IReadOnlyList<AuthZone> zones, AuthZoneTree stagedTree = null)
         {
             List<DnsResourceRecord> deletedRecords = new List<DnsResourceRecord>();
 
@@ -1072,7 +1138,7 @@ namespace DnsServerCore.Dns.Zones
                 if (zone is SubDomainZone subDomainZone)
                 {
                     if (zone.IsEmpty)
-                        _dnsServer.AuthZoneManager.RemoveSubDomainZone(zone.Name); //remove empty sub zone
+                        RemoveEmptySigningNode(zone.Name, stagedTree);
                     else
                         subDomainZone.AutoUpdateState();
                 }
@@ -2484,7 +2550,7 @@ namespace DnsServerCore.Dns.Zones
             return 24 * 60 * 60;
         }
 
-        public void UpdateDnsKeyTtl(uint dnsKeyTtl)
+        internal void CheckDnsKeyTtlUpdate()
         {
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("The zone must be signed.");
@@ -2504,6 +2570,13 @@ namespace DnsServerCore.Dns.Zones
                     }
                 }
             }
+        }
+
+        public void UpdateDnsKeyTtl(uint dnsKeyTtl) => UpdateDnsKeyTtl(dnsKeyTtl, notify: true);
+
+        private void UpdateDnsKeyTtl(uint dnsKeyTtl, bool notify)
+        {
+            CheckDnsKeyTtlUpdate();
 
             if (!_entries.TryGetValue(DnsResourceRecordType.DNSKEY, out IReadOnlyList<DnsResourceRecord> dnsKeyRecords))
                 throw new InvalidOperationException();
@@ -2535,7 +2608,8 @@ namespace DnsServerCore.Dns.Zones
             }
 
             CommitAndIncrementSerial(deletedRecords, addedRecords);
-            TriggerNotify();
+            if (notify)
+                TriggerNotify();
         }
 
         #endregion

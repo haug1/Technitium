@@ -1393,6 +1393,7 @@ namespace DnsServerCore
                             ConfigurationZonePolicies.WriteSnapshot(writer, declaration.Value, zone);
                     }
 
+                    ConfigurationZoneDnssec.Signing signing = null;
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                     {
                         string catalog = _dnsWebService._dnsServer.AuthZoneManager.PrepareManifestCatalogMembership(zones, declaration.Value, zone, type, zonePath);
@@ -1424,7 +1425,7 @@ namespace DnsServerCore
                         }
                         if (type == AuthZoneType.Catalog)
                             ConfigurationZonePolicies.Prepare(declaration.Value, name, zonePath, zone);
-                        var signing = ConfigurationZoneDnssec.Prepare(manifest, declaration.Value, type, zone, zonePath);
+                        signing = ConfigurationZoneDnssec.Prepare(manifest, declaration.Value, type, zone, zonePath);
                         if (signing is not null)
                         {
                             writer.WriteBoolean("dnssecChange", true);
@@ -1461,7 +1462,8 @@ namespace DnsServerCore
                             _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
                             _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"),
                             type == AuthZoneType.Forwarder);
-                        if (zone?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned } && edits.Any(edit => edit.Kind.HasValue))
+                        if (signing?.Disable != true && zone?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned } &&
+                            edits.Any(edit => edit.Kind.HasValue))
                             throw new InvalidDataException($"{zonePath}/records: Applying records requires an unsigned primary zone.");
                         writer.WriteStartArray("recordChanges");
                         foreach (var edit in edits)

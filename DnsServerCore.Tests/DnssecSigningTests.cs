@@ -52,6 +52,13 @@ namespace DnsServerCore.Tests
             DnsResourceRecordType proofType = useNsec3 ? DnsResourceRecordType.NSEC3 : DnsResourceRecordType.NSEC;
             Assert.Contains(stagedNodes, node => node.GetRecords(proofType).Any());
 
+            keys[0].SetState(DnssecPrivateKeyState.Ready);
+            staged.UpdateStagedSigning(tree, disable: false, changeProof: false, useNsec3, iterations: 0, salt: [], changeTtl: true, ttl: 1800);
+            Assert.All(staged.GetRecords(DnsResourceRecordType.DNSKEY), record => Assert.Equal(1800u, record.OriginalTtlValue));
+            Assert.Contains(staged.GetRecords(DnsResourceRecordType.RRSIG),
+                record => record.RDATA is DnsRRSIGRecordData signature && signature.TypeCovered == DnsResourceRecordType.DNSKEY &&
+                    signature.OriginalTtl == 1800u);
+
             var liveRecords = new List<DnsResourceRecord>();
             fixture.Server.AuthZoneManager.ListAllZoneRecords(name, liveRecords);
             Assert.Contains(liveRecords, record => record.Name == host && record.Type == DnsResourceRecordType.A);
