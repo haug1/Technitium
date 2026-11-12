@@ -940,9 +940,7 @@ namespace DnsServerCore.Configuration
         {
             if (path == ConfigurationClusterOptions.Path)
             {
-                foreach (JsonProperty option in value.EnumerateObject())
-                    if (!ConfigurationClusterOptions.Supports(option.Name))
-                        throw new InvalidDataException($"{path}/{option.Name}: This cluster setting is not implemented.");
+                ConfigurationClusterOptions.CheckApplySupport(value);
                 return;
             }
 

@@ -39,6 +39,13 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await primary.CallAsync("settings/config/apply", primary.AdminToken, applyBody,
                 plan.GetProperty("revision").GetString()));
 
+            const string secondaryTopology = """
+                {"schemaVersion":1,"cluster":{"domain":"CLUSTER.test.","bootstrap":{"role":"Secondary"}}}
+                """;
+            JsonElement uninitialized = await PlanAsync(secondary, secondary.AdminToken, secondaryTopology);
+            Assert.Equal("error", uninitialized.GetProperty("status").GetString());
+            Assert.Contains("Initialize or join", uninitialized.GetProperty("errorMessage").GetString());
+
             using var form = new FormUrlEncodedContent([
                 new("secondaryNodeIpAddresses", "127.0.0.1"),
                 new("primaryNodeUrl", primaryNode.GetProperty("url").GetString()!),
@@ -60,6 +67,31 @@ namespace DnsServerCore.Tests
             JsonElement settings = result.GetProperty("response");
             Assert.Equal(180, settings.GetProperty("defaultRecordTtl").GetInt32());
             Assert.Equal(secondary.Client.BaseAddress!.Port, settings.GetProperty("webServiceHttpPort").GetInt32());
+
+            JsonElement topologyPreview = await PlanAsync(secondary, syncedAdmin, secondaryTopology);
+            LoopbackWebService.AssertOk(topologyPreview);
+            JsonElement topologyPlan = topologyPreview.GetProperty("response");
+            Assert.Empty(topologyPlan.GetProperty("changes").EnumerateArray());
+            using var topologyBody = new StringContent(secondaryTopology, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, topologyBody,
+                topologyPlan.GetProperty("revision").GetString()));
+
+            const string wrongTopology = """
+                {"schemaVersion":1,"cluster":{"domain":"other.test","bootstrap":{"role":"Primary"},"configRefreshSeconds":300}}
+                """;
+            JsonElement wrongDomain = await PlanAsync(primary, primary.AdminToken, wrongTopology);
+            Assert.Equal("error", wrongDomain.GetProperty("status").GetString());
+            Assert.Contains("/cluster/domain", wrongDomain.GetProperty("errorMessage").GetString());
+
+            using var wrongBody = new StringContent(wrongTopology, Encoding.UTF8, "application/json");
+            JsonElement wrongApply = await primary.CallAsync("settings/config/apply", primary.AdminToken, wrongBody,
+                plan.GetProperty("revision").GetString());
+            Assert.Equal("error", wrongApply.GetProperty("status").GetString());
+            Assert.Contains("/cluster/domain", wrongApply.GetProperty("errorMessage").GetString());
+
+            JsonElement wrongRole = await PlanAsync(primary, primary.AdminToken, secondaryTopology);
+            Assert.Equal("error", wrongRole.GetProperty("status").GetString());
+            Assert.Contains("/cluster/bootstrap/role", wrongRole.GetProperty("errorMessage").GetString());
 
             JsonElement secondaryPreview = await PlanAsync(secondary, syncedAdmin, manifest);
             Assert.Equal("error", secondaryPreview.GetProperty("status").GetString());

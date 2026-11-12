@@ -13,7 +13,7 @@ namespace DnsServerCore.Configuration
         internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership)
         {
             internal bool ValuesChanged => Current != Desired;
             internal bool OwnershipChanged => !CurrentOwnership.SequenceEqual(DesiredOwnership);
@@ -22,8 +22,27 @@ namespace DnsServerCore.Configuration
         internal static bool IsDeclared(ConfigurationManifest manifest) => manifest is not null &&
             manifest.Settings.TryGetProperty("cluster", out _);
 
-        internal static bool Supports(string name) => name is
+        private static bool IsInterval(string name) => name is
             "heartbeatRefreshSeconds" or "heartbeatRetrySeconds" or "configRefreshSeconds" or "configRetrySeconds";
+
+        internal static void CheckApplySupport(JsonElement section)
+        {
+            foreach (JsonProperty field in section.EnumerateObject())
+            {
+                if (field.Name == "bootstrap")
+                {
+                    foreach (JsonProperty input in field.Value.EnumerateObject())
+                    {
+                        if (input.Name != "role")
+                            throw new InvalidDataException($"{Path}/bootstrap/{input.Name}: Cluster join from a manifest is not implemented.");
+                    }
+                }
+                else if (field.Name != "domain" && !IsInterval(field.Name))
+                {
+                    throw new InvalidDataException($"{Path}/{field.Name}: This cluster setting is not implemented.");
+                }
+            }
+        }
 
         internal static Candidate? Prepare(ConfigurationManifest manifest, ClusterManager cluster)
         {
@@ -31,13 +50,35 @@ namespace DnsServerCore.Configuration
                 return null;
 
             bool declared = manifest.Settings.TryGetProperty("cluster", out JsonElement section);
-            string[] ownership = declared ? section.EnumerateObject().Select(field => field.Name).Order(StringComparer.Ordinal).ToArray() : [];
-            foreach (string field in ownership)
+            if (declared)
+                CheckApplySupport(section);
+
+            bool hasDomain = declared && section.TryGetProperty("domain", out _);
+            bool hasBootstrap = declared && section.TryGetProperty("bootstrap", out _);
+            if (!cluster.ClusterInitialized)
             {
-                if (!Supports(field))
-                    throw new InvalidDataException($"{Path}/{field}: This cluster setting is not implemented.");
+                if (hasBootstrap || hasDomain)
+                    throw new InvalidDataException($"{Path}: Initialize or join the declared cluster before applying its topology.");
+                throw new InvalidDataException($"{Path}: Only an initialized Primary node can apply cluster options.");
             }
-            if (!cluster.ClusterInitialized || cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+
+            ClusterNode self = cluster.GetSelfNode();
+            if (hasDomain)
+            {
+                string name = section.GetProperty("domain").GetString();
+                if (name is null || !string.Equals(ConfigurationManifest.CanonicalDnsName(name, $"{Path}/domain", allowRoot: false),
+                    cluster.ClusterDomain, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"{Path}/domain: The declared domain does not match the current cluster.");
+            }
+
+            if (hasBootstrap && section.GetProperty("bootstrap").TryGetProperty("role", out JsonElement role) &&
+                !string.Equals(role.GetString(), self.Type.ToString(), StringComparison.Ordinal))
+                throw new InvalidDataException($"{Path}/bootstrap/role: The declared role does not match the current node.");
+
+            string[] ownership = declared ? section.EnumerateObject().Select(field => field.Name)
+                .Where(IsInterval).Order(StringComparer.Ordinal).ToArray() : [];
+            IReadOnlyList<string> currentOwnership = cluster.ManagedOptionNames;
+            if ((ownership.Length != 0 || currentOwnership.Count != 0) && self.Type != ClusterNodeType.Primary)
                 throw new InvalidDataException($"{Path}: Only an initialized Primary node can apply cluster options.");
 
             Settings current = cluster.GetManifestOptions();
@@ -54,7 +95,7 @@ namespace DnsServerCore.Configuration
             {
                 throw new InvalidDataException($"{Path}/configRefreshSeconds: The configuration refresh interval must be greater than the heartbeat refresh interval.", ex);
             }
-            return new Candidate(current, desired, cluster.GetSelfNode().Id, cluster.ManagedOptionNames, ownership);
+            return new Candidate(current, desired, self.Id, self.Type, currentOwnership, ownership);
 
             ushort Read(string field, ushort value, ushort defaultValue) => declared && section.TryGetProperty(field, out JsonElement setting)
                 ? setting.ValueKind == JsonValueKind.Null ? defaultValue : setting.GetUInt16() : value;
@@ -72,6 +113,7 @@ namespace DnsServerCore.Configuration
         {
             writer.WriteStartObject("manifestClusterOptions");
             writer.WriteNumber("node", candidate.NodeId);
+            writer.WriteString("role", candidate.NodeType.ToString());
             writer.WritePropertyName("current");
             Export(candidate.Current).WriteTo(writer);
             writer.WritePropertyName("desired");
