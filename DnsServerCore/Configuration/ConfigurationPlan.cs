@@ -102,6 +102,8 @@ namespace DnsServerCore.Configuration
 
                 if (section.Name == "zones" && currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     CompareZones(section.Value, zones, changes);
+                else if (section.Name == "dhcp" && currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
+                    ConfigurationDhcp.Compare(section.Value, scopes, changes);
                 else
                     Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log);
             }
@@ -129,6 +131,8 @@ namespace DnsServerCore.Configuration
                     ownership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     zones.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
+                    scopes.WriteTo(writer);
                 writer.WriteEndArray();
             }
 

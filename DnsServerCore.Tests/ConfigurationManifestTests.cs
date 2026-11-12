@@ -141,6 +141,35 @@ namespace DnsServerCore.Tests
             ConfigurationManifest.Load(path);
         }
 
+        [Theory]
+        [InlineData("""{"startingAddress":"192.0.2.50","endingAddress":"192.0.2.40"}""", "/endingAddress")]
+        [InlineData("""{"startingAddress":"192.0.2.0","endingAddress":"192.0.2.80","subnetMask":"255.255.255.0"}""", "/startingAddress")]
+        [InlineData("""{"exclusions":[{"startingAddress":"192.0.2.30","endingAddress":"192.0.2.20"}]}""", "/exclusions/0/endingAddress")]
+        [InlineData("""{"startingAddress":"192.0.2.10","endingAddress":"192.0.2.30","reservations":{"02:00:00:00:00:01":{"address":"192.0.2.40"}}}""", "/reservations/02:00:00:00:00:01/address")]
+        [InlineData("""{"reservations":{"02:00:00:00:00:01":null,"02-00-00-00-00-01":{"address":"192.0.2.20"}}}""", "/reservations/02-00-00-00-00-01")]
+        [InlineData("""{"reservations":{"garbage":null}}""", "/reservations/garbage")]
+        public void DhcpManifestRejectsInvalidScopeDeclarations(string declaration, string suffix)
+        {
+            string path = WriteManifest($$"""{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{{declaration}} } } }""");
+
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+
+            Assert.Contains("/dhcp/scopes/Lab" + suffix, error.Message);
+        }
+
+        [Fact]
+        public void DhcpManifestAcceptsPartialScopeUpdates()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"dhcp":{"scopes":{
+                    "Lab":{"enabled":false,"reservations":{"02:00:00:00:00:01":{"comments":"fixture"}}},
+                    "lab":null
+                }}}
+                """);
+
+            ConfigurationManifest.Load(path);
+        }
+
         private string WriteManifest(string json)
         {
             string path = Path.Combine(_directory.FullName, ConfigurationManifest.DefaultFileName);

@@ -987,6 +987,60 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpPreviewReconcilesScopeDeclarationsAgainstLiveRanges()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.30&subnetMask=255.255.255.0", server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{
+                    "Lab":{"endingAddress":"192.0.2.40"},
+                    "lab":{"enabled":false,"startingAddress":"192.0.2.50","endingAddress":"192.0.2.60","subnetMask":"255.255.255.0"}
+                }}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.Equal("/dhcp/scopes/Lab/endingAddress", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dhcp/scopes/lab", change.GetProperty("path").GetString()));
+            Assert.DoesNotContain("192.0.2.", preview.GetRawText());
+
+            JsonElement scopes = await server.CallAsync("dhcp/scopes/list", server.AdminToken);
+            LoopbackWebService.AssertOk(scopes);
+            JsonElement scopeList = scopes.GetProperty("response").GetProperty("scopes");
+            JsonElement current = Assert.Single(scopeList.EnumerateArray(), scope => scope.GetProperty("name").ValueEquals("Lab"));
+            Assert.Equal("192.0.2.30", current.GetProperty("endingAddress").GetString());
+            Assert.DoesNotContain(scopeList.EnumerateArray(), scope => scope.GetProperty("name").ValueEquals("lab"));
+
+            const string conflict = """
+                {"schemaVersion":1,"dhcp":{"scopes":{
+                    "other":{"enabled":false,"startingAddress":"192.0.2.5","endingAddress":"192.0.2.45","subnetMask":"255.255.255.0"}
+                }}}
+                """;
+            using var content = new StringContent(conflict, Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/other", rejected.GetProperty("errorMessage").GetString());
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-01&ipAddress=192.0.2.25", server.AdminToken));
+            const string shrink = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.20"}}}}""";
+            using var shrinkContent = new StringContent(shrink, Encoding.UTF8, "application/json");
+            JsonElement protectedRange = await server.CallAsync("settings/config/plan", server.AdminToken, shrinkContent);
+            Assert.Equal("error", protectedRange.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Lab", protectedRange.GetProperty("errorMessage").GetString());
+            Assert.DoesNotContain("192.0.2.25", protectedRange.GetRawText());
+
+            const string remove = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":null}}}""";
+            JsonElement removal = await PreviewAsync(server, remove);
+            Assert.Equal("Remove", Assert.Single(removal.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+            LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/delete?name=Lab", server.AdminToken));
+            JsonElement after = await PreviewAsync(server, remove);
+            Assert.Empty(after.GetProperty("changes").EnumerateArray());
+            Assert.NotEqual(removal.GetProperty("revision").GetString(), after.GetProperty("revision").GetString());
+        }
+
+        [Fact]
         public async Task ZonePreviewTracksCreationDeletionAndEnabledStateWithoutMutatingZones()
         {
             await using var server = await LoopbackWebService.StartAsync();

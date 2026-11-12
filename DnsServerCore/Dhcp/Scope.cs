@@ -437,7 +437,7 @@ namespace DnsServerCore.Dhcp
             }
         }
 
-        private static bool IsAddressInRange(IPAddress address, IPAddress startingAddress, IPAddress endingAddress)
+        internal static bool IsAddressInRange(IPAddress address, IPAddress startingAddress, IPAddress endingAddress)
         {
             uint addressNumber = address.ConvertIpToNumber();
             uint startingAddressNumber = startingAddress.ConvertIpToNumber();
@@ -1429,7 +1429,7 @@ namespace DnsServerCore.Dhcp
 
         #region public
 
-        public void ChangeNetwork(IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask)
+        internal static (uint Network, uint Broadcast) ValidateNetwork(IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask)
         {
             if (startingAddress.AddressFamily != AddressFamily.InterNetwork)
                 throw new ArgumentException("The address must be an IPv4 address: " + startingAddress.ToString(), nameof(startingAddress));
@@ -1444,30 +1444,34 @@ namespace DnsServerCore.Dhcp
             uint endingAddressNumber = endingAddress.ConvertIpToNumber();
 
             if (startingAddressNumber >= endingAddressNumber)
-                throw new ArgumentException("Ending address must be greater than starting address.");
+                throw new ArgumentException("Ending address must be greater than starting address.", nameof(endingAddress));
 
-            _startingAddress = startingAddress;
-            _endingAddress = endingAddress;
-            _subnetMask = subnetMask;
-
-            //compute other parameters
-            uint subnetMaskNumber = _subnetMask.ConvertIpToNumber();
+            uint subnetMaskNumber = subnetMask.ConvertIpToNumber();
             uint networkAddressNumber = startingAddressNumber & subnetMaskNumber;
             uint broadcastAddressNumber = networkAddressNumber | ~subnetMaskNumber;
 
             if (networkAddressNumber == startingAddressNumber)
-                throw new ArgumentException("Starting address cannot be same as the network address.");
+                throw new ArgumentException("Starting address cannot be same as the network address.", nameof(startingAddress));
 
             if (broadcastAddressNumber == endingAddressNumber)
-                throw new ArgumentException("Ending address cannot be same as the broadcast address.");
+                throw new ArgumentException("Ending address cannot be same as the broadcast address.", nameof(endingAddress));
 
+            return (networkAddressNumber, broadcastAddressNumber);
+        }
+
+        public void ChangeNetwork(IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask)
+        {
+            (uint networkAddressNumber, uint broadcastAddressNumber) = ValidateNetwork(startingAddress, endingAddress, subnetMask);
+            _startingAddress = startingAddress;
+            _endingAddress = endingAddress;
+            _subnetMask = subnetMask;
             _networkAddress = IPAddressExtensions.ConvertNumberToIp(networkAddressNumber);
             _broadcastAddress = IPAddressExtensions.ConvertNumberToIp(broadcastAddressNumber);
 
             _lastAddressOfferedLock.Wait();
             try
             {
-                _lastAddressOffered = IPAddressExtensions.ConvertNumberToIp(startingAddressNumber - 1u);
+                _lastAddressOffered = IPAddressExtensions.ConvertNumberToIp(startingAddress.ConvertIpToNumber() - 1u);
             }
             finally
             {

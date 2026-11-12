@@ -723,6 +723,12 @@ namespace DnsServerCore
                     WriteDnsSettings(writer);
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
+                    if (manifest is not null && manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) && dhcp.TryGetProperty("scopes", out JsonElement scopes))
+                    {
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.View))
+                            throw new DnsWebServiceException("Access was denied.");
+                        ConfigurationDhcp.WriteSnapshot(writer, scopes, _dnsWebService._dhcpServer.Scopes);
+                    }
                     writer.WriteEndObject();
                 }
 
