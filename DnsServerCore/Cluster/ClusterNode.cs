@@ -64,6 +64,7 @@ namespace DnsServerCore.Cluster
 
         volatile bool _supportsDeclarativeClusterOptions;
         volatile bool _supportsDeclarativeBlockLists;
+        volatile bool _supportsDeclarativeDomainLists;
         string _version;
         DateTime _upSince;
         DateTime _lastSeen;
@@ -230,6 +231,7 @@ namespace DnsServerCore.Cluster
                 ClusterInfo clusterInfo = await GetClusterStateAsync();
                 _supportsDeclarativeClusterOptions = clusterInfo.SupportsDeclarativeClusterOptions;
                 _supportsDeclarativeBlockLists = clusterInfo.SupportsDeclarativeBlockLists;
+                _supportsDeclarativeDomainLists = clusterInfo.SupportsDeclarativeDomainLists;
 
                 if (_type == ClusterNodeType.Primary)
                     _clusterManager.UpdateClusterFromPrimaryNode(clusterInfo); //update cluster nodes from primary node response
@@ -251,11 +253,13 @@ namespace DnsServerCore.Cluster
             {
                 _supportsDeclarativeClusterOptions = false;
                 _supportsDeclarativeBlockLists = false;
+                _supportsDeclarativeDomainLists = false;
             }
             catch (Exception ex)
             {
                 _supportsDeclarativeClusterOptions = false;
                 _supportsDeclarativeBlockLists = false;
+                _supportsDeclarativeDomainLists = false;
                 success = false;
                 _clusterManager.DnsWebService.LogManager.Write("Heartbeat failed for " + _type.ToString() + " node '" + ToString() + "'.", ex);
             }
@@ -755,6 +759,12 @@ namespace DnsServerCore.Cluster
 
         public ClusterNodeState State
         { get { return _state; } }
+
+        internal bool SupportsDeclarativeDomainLists
+        {
+            get => _supportsDeclarativeDomainLists;
+            set => _supportsDeclarativeDomainLists = value;
+        }
 
         internal bool SupportsDeclarativeBlockLists
         {

@@ -956,19 +956,19 @@ namespace DnsServerCore
             }
         }
 
-        private void CheckManagedDomainLists(ZipArchive backupZip, bool allowedZones, bool blockedZones)
+        private void CheckManagedDomainLists(ZipArchive backupZip, bool allowedZones, bool blockedZones, bool isConfigTransfer = false)
         {
             if (allowedZones && _dnsServer.AllowedZoneManager.ManifestOwnsList &&
                 backupZip.GetEntry("allowed.config") is ZipArchiveEntry allowedEntry)
             {
                 using Stream stream = allowedEntry.Open();
-                _dnsServer.AllowedZoneManager.CheckRestoreManifestList(stream);
+                _dnsServer.AllowedZoneManager.CheckRestoreManifestList(stream, isConfigTransfer);
             }
             if (blockedZones && _dnsServer.BlockedZoneManager.ManifestOwnsList &&
                 backupZip.GetEntry("blocked.config") is ZipArchiveEntry blockedEntry)
             {
                 using Stream stream = blockedEntry.Open();
-                _dnsServer.BlockedZoneManager.CheckRestoreManifestList(stream);
+                _dnsServer.BlockedZoneManager.CheckRestoreManifestList(stream, isConfigTransfer);
             }
         }
 
@@ -987,7 +987,7 @@ namespace DnsServerCore
                 {
                     if (apps)
                         _dnsServer.DnsApplicationManager.CheckManifestRestore(backupZip, deleteExistingFiles, isConfigTransfer: true);
-                    CheckManagedDomainLists(backupZip, allowedZones, blockedZones);
+                    CheckManagedDomainLists(backupZip, allowedZones, blockedZones, isConfigTransfer: true);
                 }
 
                 if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsCertificate || _dnsServer.HasManagedTsigKeys) &&
@@ -1293,7 +1293,7 @@ namespace DnsServerCore
                             //dynamically load and apply allowed zones config
                             await using (Stream stream = entry.Open())
                             {
-                                _dnsServer.AllowedZoneManager.LoadAllowedZone(stream);
+                                _dnsServer.AllowedZoneManager.LoadAllowedZone(stream, isConfigTransfer);
                             }
                         }
                     }
@@ -1306,7 +1306,7 @@ namespace DnsServerCore
                             //dynamically load and apply blocked zones config
                             await using (Stream stream = entry.Open())
                             {
-                                _dnsServer.BlockedZoneManager.LoadBlockedZone(stream);
+                                _dnsServer.BlockedZoneManager.LoadBlockedZone(stream, isConfigTransfer);
                             }
                         }
                     }
@@ -3249,6 +3249,7 @@ namespace DnsServerCore
             bool clustered = _clusterManager.ClusterInitialized;
             bool secondary = clustered && _clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
             var blockLists = _dnsServer.BlockListZoneManager;
+            var domainListChange = ConfigurationPlan.CheckClusterDomainListSupport(manifest, _clusterManager);
             var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
                 blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval);
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3281,6 +3282,11 @@ namespace DnsServerCore
                     if (!_clusterManager.CheckDeclarativeBlockListPeers().SequenceEqual(blockListPeers))
                         throw new InvalidDataException("/blocklists: Cluster membership changed during apply. Create a new preview.");
                 };
+                Action checkDomainListPeers = domainListChange is { } domainLists ? () =>
+                {
+                    if (!_clusterManager.CheckDeclarativeDomainListPeers(domainLists.Path).SequenceEqual(domainLists.Peers))
+                        throw new InvalidDataException($"{domainLists.Path}: Cluster membership changed during apply. Create a new preview.");
+                } : null;
                 var clusterFiles = new List<string>(2);
                 if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
                     clusterFiles.Add("cluster.config");
@@ -3294,12 +3300,12 @@ namespace DnsServerCore
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
                         persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
                         {
                             writeCluster = write;
                             zones.Commit(persist);
-                        }), preserveClusterBlockLists: secondary)));
+                        }), isClusterSecondary: secondary)));
             }
             catch
             {
@@ -3313,8 +3319,8 @@ namespace DnsServerCore
                 throw;
             }
 
-            if (clustered && !secondary && previousBlockLists != (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
-                blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval))
+            if (clustered && !secondary && (domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
+                blockLists.BlockListUpdateIntervalHours, blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval)))
                 _clusterManager.TriggerNotifyAllSecondaryNodesIfPrimarySelfNode();
 
             if (webCertificate is { Changed: true })

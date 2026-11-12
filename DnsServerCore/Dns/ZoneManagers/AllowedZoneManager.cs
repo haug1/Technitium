@@ -44,7 +44,9 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
-        internal bool ManifestOwnsList { get; private set; }
+        private ConfigurationDomainLists.Ownership _ownership;
+        internal bool ManifestOwnsList => _ownership != ConfigurationDomainLists.Ownership.None;
+        internal bool ManifestOwnershipFromPrimary => _ownership == ConfigurationDomainLists.Ownership.Primary;
         readonly Timer _saveTimer;
         const int SAVE_TIMER_INITIAL_INTERVAL = 5000;
 
@@ -128,7 +130,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             {
                 using (FileStream fS = new FileStream(allowedZoneFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS, readOwnership: true);
+                    ReadConfigFrom(fS);
                 }
 
                 _dnsServer.LogManager.Write("DNS Server allowed zone file was loaded: " + allowedZoneFile);
@@ -143,25 +145,41 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        public void LoadAllowedZone(Stream s)
+        public void LoadAllowedZone(Stream s) => LoadAllowedZone(s, isConfigTransfer: false);
+
+        internal void LoadAllowedZone(Stream s, bool isConfigTransfer)
         {
             lock (_saveLock)
             {
-                ReadConfigFrom(s);
-
-                SaveZoneFileInternal();
+                var (names, owner) = ConfigurationDomainLists.ReadStore(s, "AZ");
+                CheckRestoreManifestList(names, isConfigTransfer);
+                var ownership = _ownership;
+                if (isConfigTransfer && ownership != ConfigurationDomainLists.Ownership.Local)
+                    ownership = owner == ConfigurationDomainLists.Ownership.None ? owner : ConfigurationDomainLists.Ownership.Primary;
+                AuthZoneManager candidate = BuildList(names);
+                try
+                {
+                    SaveZoneFileInternal(GetManifestNames(candidate), ownership);
+                }
+                catch
+                {
+                    candidate.Dispose();
+                    throw;
+                }
+                _zoneManager = candidate;
+                _ownership = ownership;
                 _pendingSave = false;
             }
         }
 
-        private void SaveZoneFileInternal(IReadOnlyList<string> names = null, bool? managed = null)
+        private void SaveZoneFileInternal(IReadOnlyList<string> names = null, ConfigurationDomainLists.Ownership? ownership = null)
         {
             string tmpAllowedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "allowed.tmp");
             string allowedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "allowed.config");
 
             using (FileStream fS = new FileStream(tmpAllowedZoneFile, FileMode.Create, FileAccess.Write))
             {
-                ConfigurationDomainLists.WriteStore(fS, "AZ", names ?? GetManifestNames(), managed ?? ManifestOwnsList);
+                ConfigurationDomainLists.WriteStore(fS, "AZ", names ?? GetManifestNames(), ownership ?? _ownership);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -182,24 +200,28 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool readOwnership = false)
+        private void ReadConfigFrom(Stream s)
         {
-            var (names, managed) = ConfigurationDomainLists.ReadStore(s, "AZ");
-            if (!readOwnership && ManifestOwnsList && !GetManifestNames().SequenceEqual(names.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)))
-                ConfigurationDomainLists.RejectManagedChange("/allowZones");
-
+            var (names, ownership) = ConfigurationDomainLists.ReadStore(s, "AZ");
             _zoneManager = BuildList(names);
-            if (readOwnership)
-                ManifestOwnsList = managed;
+            _ownership = ownership;
         }
 
-        internal string[] GetManifestNames() =>
-            _zoneManager.GetAllZones().Select(zone => zone.Name).Order(StringComparer.Ordinal).ToArray();
+        internal string[] GetManifestNames() => GetManifestNames(_zoneManager);
 
-        internal void CheckRestoreManifestList(Stream stream)
+        private static string[] GetManifestNames(AuthZoneManager manager) =>
+            manager.GetAllZones().Select(zone => zone.Name).Order(StringComparer.Ordinal).ToArray();
+
+        internal void CheckRestoreManifestList(Stream stream, bool isConfigTransfer = false)
         {
             var (names, _) = ConfigurationDomainLists.ReadStore(stream, "AZ");
-            if (ManifestOwnsList && !GetManifestNames().SequenceEqual(names.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)))
+            CheckRestoreManifestList(names, isConfigTransfer);
+        }
+
+        private void CheckRestoreManifestList(string[] names, bool isConfigTransfer)
+        {
+            if (ManifestOwnsList && (!isConfigTransfer || _ownership == ConfigurationDomainLists.Ownership.Local) &&
+                !GetManifestNames().SequenceEqual(names.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)))
                 ConfigurationDomainLists.RejectManagedChange("/allowZones");
         }
 
@@ -215,9 +237,9 @@ namespace DnsServerCore.Dns.ZoneManagers
             lock (_saveLock)
             {
                 string[] current = GetManifestNames();
-                bool managed = names is not null;
-                bool changed = managed && !current.SequenceEqual(names);
-                if (!changed && managed == ManifestOwnsList)
+                var ownership = names is null ? ConfigurationDomainLists.Ownership.None : ConfigurationDomainLists.Ownership.Local;
+                bool changed = names is not null && !current.SequenceEqual(names);
+                if (!changed && ownership == _ownership)
                 {
                     persist(null);
                     return;
@@ -226,7 +248,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 AuthZoneManager candidate = changed ? BuildList(names) : null;
                 try
                 {
-                    persist(() => SaveZoneFileInternal(names ?? current, managed));
+                    persist(() => SaveZoneFileInternal(names ?? current, ownership));
                 }
                 catch
                 {
@@ -235,7 +257,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
                 if (candidate is not null)
                     _zoneManager = candidate;
-                ManifestOwnsList = managed;
+                _ownership = ownership;
                 _pendingSave = false;
             }
         }

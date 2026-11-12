@@ -811,10 +811,14 @@ namespace DnsServerCore
 
             private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig, ConfigurationLdap.Settings Ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> Users, ConfigurationStaticSessions.Candidate StaticSessions, ConfigurationSso.Settings Sso, ConfigurationApplications.Entry[] Apps) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
-                if ((_dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList &&
+                bool isClusterSecondary = _dnsWebService._clusterManager.ClusterInitialized &&
+                    _dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
+                var allowedZones = _dnsWebService._dnsServer.AllowedZoneManager;
+                var blockedZones = _dnsWebService._dnsServer.BlockedZoneManager;
+                if ((allowedZones.ManifestOwnsList && !(isClusterSecondary && allowedZones.ManifestOwnershipFromPrimary) &&
                      !manifest.Settings.TryGetProperty("allowZones", out _) &&
                      !_dnsWebService._authManager.IsPermitted(PermissionSection.Allowed, sessionUser, PermissionFlag.Modify)) ||
-                    (_dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList &&
+                    (blockedZones.ManifestOwnsList && !(isClusterSecondary && blockedZones.ManifestOwnershipFromPrimary) &&
                      !manifest.Settings.TryGetProperty("blockZones", out _) &&
                      !_dnsWebService._authManager.IsPermitted(PermissionSection.Blocked, sessionUser, PermissionFlag.Modify)))
                     throw new DnsWebServiceException("Access was denied.");
@@ -1100,6 +1104,11 @@ namespace DnsServerCore
                     WriteDnsSettings(writer, includeSecrets: false);
                     if (manifest is not null)
                     {
+                        if (ConfigurationPlan.CheckClusterDomainListSupport(manifest, _dnsWebService._clusterManager) is { } domainLists)
+                        {
+                            writer.WritePropertyName("domainListPeers");
+                            JsonSerializer.Serialize(writer, domainLists.Peers);
+                        }
                         int[] blockListPeers = ConfigurationPlan.CheckClusterBlockListSupport(manifest, _dnsWebService._clusterManager);
                         if (blockListPeers.Length != 0)
                         {

@@ -134,6 +134,8 @@ def verify(current, previous, folder, propagation, graceful):
         revision = ok(primary.call("settings/config/plan", manifest=INTERVAL_MANIFEST))["revision"]
         blocklist_manifest = {"schemaVersion": 1, "blocklists": {"updateIntervalHours": 0}}
         blocklist_revision = ok(primary.call("settings/config/plan", manifest=blocklist_manifest))["revision"]
+        domain_lists = {"schemaVersion": 1, "allowZones": ["allow.fixture.test"], "blockZones": ["block.fixture.test"]}
+        domain_revision = ok(primary.call("settings/config/plan", manifest=domain_lists))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -154,6 +156,10 @@ def verify(current, previous, folder, propagation, graceful):
         blocked = primary.call("settings/config/apply", manifest=blocklist_manifest, revision=blocklist_revision)
         assert blocked["status"] == "error" and "declarative blocklist settings" in blocked["errorMessage"], blocked
         assert ok(primary.call("settings/get"))["blockListUpdateIntervalHours"] == 24
+        rejected = primary.call("settings/config/apply", manifest=domain_lists, revision=domain_revision)
+        assert rejected["status"] == "error" and "declarative domain lists" in rejected["errorMessage"], rejected
+        assert "/allowZones" not in ok(primary.call("settings/get"))["managedSettings"]
+        assert "/blockZones" not in ok(primary.call("settings/get"))["managedSettings"]
         for node in (primary, secondary):
             state = ok(node.call("admin/cluster/state"))
             assert state["configRefreshIntervalSeconds"] == 900, state
@@ -399,6 +405,8 @@ def verify_propagation(primary, secondary, graceful):
 
     wait_for(secondary_released_blocklists, "the Secondary to release ownership and retain the last interval")
 
+    verify_domain_lists(primary, secondary, release, local_web, new_primary_tls_port)
+
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
     primary.stop()
@@ -436,6 +444,59 @@ def verify_propagation(primary, secondary, graceful):
     assert rejected["status"] == "error" and "/cluster/configRefreshSeconds" in rejected["errorMessage"], rejected
     mode = "Graceful handoff" if graceful else "Forced failover"
     print(f"{mode} check passed. The promoted Primary retained interval and address ownership after restart.")
+
+
+def verify_domain_lists(primary, secondary, cluster_manifest, local_web, primary_tls_port):
+    paths = {"/allowZones", "/blockZones"}
+    desired = {**cluster_manifest, "allowZones": ["allow.fixture.test"], "blockZones": ["block.fixture.test"]}
+
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "blockZones": []})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply_primary(manifest):
+        plan = ok(primary.call("settings/config/plan", manifest=manifest))
+        ok(primary.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
+        return plan
+
+    def matches(allowed, blocked, managed):
+        state = ok(secondary.call("settings/get"))
+        if paths.intersection(state["managedSettings"]) != managed:
+            return False
+        exported = ok(secondary.call("settings/config/export"))["manifest"]
+        return exported["allowZones"] == allowed and exported["blockZones"] == blocked
+
+    plan = apply_primary(desired)
+    assert paths == {change["path"].rsplit("/", 1)[0] for change in plan["changes"]}, plan
+    wait_for(lambda: matches(desired["allowZones"], desired["blockZones"], paths),
+             "the Secondary to inherit both managed domain lists")
+    certificate = ssl.get_server_certificate(("127.0.0.1", primary_tls_port), timeout=5)
+    rejected = primary.call("admin/cluster/primary/join", form={
+        "secondaryNodeId": 2147483647, "secondaryNodeUrl": "https://legacy.cluster.test:53443/",
+        "secondaryNodeIpAddresses": "127.0.0.1",
+        "secondaryNodeCertificate": base64.urlsafe_b64encode(ssl.PEM_cert_to_DER_cert(certificate)).decode().rstrip("="),
+        "supportsDeclarativeClusterOptions": "true", "supportsDeclarativeBlockLists": "true",
+    })
+    assert rejected["status"] == "error" and "declarative domain lists" in rejected["errorMessage"], rejected
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(desired["allowZones"], desired["blockZones"], paths)
+
+    revision = ok(secondary.call("settings/config/plan", manifest=local_web))["revision"]
+    ok(secondary.call("settings/config/apply", manifest=local_web, revision=revision))
+    assert matches(desired["allowZones"], desired["blockZones"], paths)
+    for zone, endpoint in (("/allowZones", "allowed/delete?domain=allow.fixture.test"),
+                           ("/blockZones", "blocked/add?domain=another.fixture.test")):
+        denied = secondary.call(endpoint)
+        assert denied["status"] == "error" and zone in denied["errorMessage"], denied
+
+    desired["blockZones"] = []
+    apply_primary(desired)
+    wait_for(lambda: matches(desired["allowZones"], [], paths),
+             "the Secondary to remove a formerly blocked domain through cluster sync")
+    assert not apply_primary(desired)["changes"]
+    apply_primary(cluster_manifest)
+    wait_for(lambda: matches(desired["allowZones"], [], set()),
+             "the Secondary to release both domain lists while retaining their entries")
 
 
 def assert_promoted_policy(state):

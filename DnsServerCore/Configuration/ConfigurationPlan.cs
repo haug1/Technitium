@@ -296,6 +296,8 @@ namespace DnsServerCore.Configuration
                     clusterOptions.WriteTo(writer);
                 if (currentSettings.TryGetProperty("blockListPeers", out JsonElement blockListPeers))
                     blockListPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("domainListPeers", out JsonElement domainListPeers))
+                    domainListPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -349,7 +351,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeResources, string[] resourceFiles, Action<Action> commitZones, bool preserveClusterBlockLists)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeResources, string[] resourceFiles, Action<Action> commitZones, bool isClusterSecondary)
         {
             CheckApplySupport(manifest);
 
@@ -363,8 +365,8 @@ namespace DnsServerCore.Configuration
 
             return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, tsig, alreadyActive, listenerTuningStaged, dnsBindingsStaged, manifest, writeDnsConfig =>
                 ApplyBlockLists(writeBlockListConfig =>
-                    dns.AllowedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "allowZones"), writeAllowed =>
-                    dns.BlockedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "blockZones"), writeBlocked =>
+                    ApplyAllowedZones(writeAllowed =>
+                    ApplyBlockedZones(writeBlocked =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => commitZones(() => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
@@ -375,10 +377,26 @@ namespace DnsServerCore.Configuration
 
             void ApplyBlockLists(Action<Action> persist)
             {
-                if (preserveClusterBlockLists)
+                if (isClusterSecondary)
                     persist(null);
                 else
                     dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), persist);
+            }
+
+            void ApplyAllowedZones(Action<Action> persist)
+            {
+                if (isClusterSecondary && dns.AllowedZoneManager.ManifestOwnershipFromPrimary)
+                    persist(null);
+                else
+                    dns.AllowedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "allowZones"), persist);
+            }
+
+            void ApplyBlockedZones(Action<Action> persist)
+            {
+                if (isClusterSecondary && dns.BlockedZoneManager.ManifestOwnershipFromPrimary)
+                    persist(null);
+                else
+                    dns.BlockedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "blockZones"), persist);
             }
         }
 
@@ -870,8 +888,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/auth/ldap: Applying LDAP settings to a cluster is not implemented.");
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
                 throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
-            if (manifest.Settings.TryGetProperty("allowZones", out _) || manifest.Settings.TryGetProperty("blockZones", out _))
-                throw new InvalidDataException("Applying explicit allow and block lists to a cluster is not implemented.");
+            CheckClusterDomainListSupport(manifest, cluster);
             if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             CheckClusterWebListenerSupport(manifest, cluster);
@@ -898,6 +915,34 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/clientSubnet: Applying EDNS Client Subnet settings to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
+        }
+
+        internal static (string Path, int[] Peers)? CheckClusterDomainListSupport(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            string[] allowed = ConfigurationDomainLists.Read(manifest, "allowZones");
+            string[] blocked = ConfigurationDomainLists.Read(manifest, "blockZones");
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+            {
+                if (allowed is not null || blocked is not null)
+                    throw new InvalidDataException($"{(allowed is not null ? "/allowZones" : "/blockZones")}: Only the Primary can apply cluster domain lists.");
+                return null;
+            }
+
+            var dns = cluster.DnsWebService.DnsServer;
+            var allowedManager = dns.AllowedZoneManager;
+            var blockedManager = dns.BlockedZoneManager;
+            bool allowedChanges = allowedManager.ManifestOwnsList != (allowed is not null) ||
+                allowed is not null && (allowedManager.ManifestOwnershipFromPrimary || !allowed.SequenceEqual(allowedManager.GetManifestNames()));
+            bool blockedChanges = blockedManager.ManifestOwnsList != (blocked is not null) ||
+                blocked is not null && (blockedManager.ManifestOwnershipFromPrimary || !blocked.SequenceEqual(blockedManager.GetManifestNames()));
+            if (!allowedChanges && !blockedChanges)
+                return null;
+
+            string path = allowedChanges ? "/allowZones" : "/blockZones";
+            return (path, cluster.CheckDeclarativeDomainListPeers(path));
         }
 
         internal static int[] CheckClusterBlockListSupport(ConfigurationManifest manifest, ClusterManager cluster)

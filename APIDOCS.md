@@ -5307,6 +5307,8 @@ Cluster nodes can preview and apply local web listener settings. Candidate `web.
 
 On a cluster, only the Primary can declare blocklist sources and update schedules. Changes to declared blocklist settings or ownership require all members to advertise `supportsDeclarativeBlockLists`.
 
+Only the cluster Primary can declare `allowZones` and `blockZones`. Changes to the lists or their ownership require peers to advertise `supportsDeclarativeDomainLists`. Secondaries inherit the lists and ownership during configuration sync. Omitting an owned list releases ownership and requires Modify permission for the corresponding Allowed Zones or Blocked Zones section.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7438,6 +7440,7 @@ WHERE:
 - `secondaryNodeUrl`: The HTTPS URL of the Secondary node's API web service.
 - `secondaryNodeIpAddresses`: A comma separated list of Secondary node IP addresses.
 - `secondaryNodeCertificate`: The Secondary node's TLS certificate used by the API web service.
+- `supportsDeclarativeDomainLists` (optional): Set to true when the Secondary can inherit manifest ownership of allow and block domains. Required when the Primary already manages either list.
 
 RESPONSE:
 ```

@@ -51,7 +51,14 @@ namespace DnsServerCore.Configuration
                 changes.Add(new ConfigurationChange(ConfigurationPlan.AppendPath(path, name.Length == 0 ? "." : name), ConfigurationChangeKind.Add, false));
         }
 
-        internal static (string[] Names, bool Managed) ReadStore(Stream stream, string format)
+        internal enum Ownership : byte
+        {
+            None,
+            Local,
+            Primary
+        }
+
+        internal static (string[] Names, Ownership Owner) ReadStore(Stream stream, string format)
         {
             if (Encoding.ASCII.GetString(stream.ReadExactly(2)) != format || stream.ReadByte() != 1)
                 throw new InvalidDataException("Invalid DNS domain list file format.");
@@ -63,10 +70,16 @@ namespace DnsServerCore.Configuration
             var names = new List<string>();
             for (int i = 0; i < count; i++)
                 names.Add(stream.ReadShortString());
-            return (names.ToArray(), stream.ReadByte() == 1);
+            int ownership = stream.ReadByte();
+            return (names.ToArray(), ownership switch
+            {
+                (int)Ownership.Local => Ownership.Local,
+                (int)Ownership.Primary => Ownership.Primary,
+                _ => Ownership.None
+            });
         }
 
-        internal static void WriteStore(Stream stream, string format, IReadOnlyList<string> names, bool managed)
+        internal static void WriteStore(Stream stream, string format, IReadOnlyList<string> names, Ownership ownership)
         {
             using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
             writer.Write(Encoding.ASCII.GetBytes(format));
@@ -74,8 +87,8 @@ namespace DnsServerCore.Configuration
             writer.Write(names.Count);
             foreach (string name in names)
                 stream.WriteShortString(name);
-            if (managed)
-                writer.Write((byte)1);
+            if (ownership != Ownership.None)
+                writer.Write((byte)ownership);
         }
 
         internal static void RejectManagedChange(string path)
