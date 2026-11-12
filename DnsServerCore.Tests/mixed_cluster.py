@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -41,7 +42,7 @@ class Node:
         self.binary = binary
         self.folder = folder
         self.folder.mkdir()
-        self.http_port, tls_port, self.dns_port = ports
+        self.http_port, self.tls_port, self.dns_port = ports
         self.password = password
         self.token = None
         self.process = None
@@ -51,7 +52,7 @@ class Node:
             "dns": {"serverDomain": name, "localEndpoints": [f"127.0.0.1:{self.dns_port}"],
                     "recursion": {"mode": "Deny"}, "checkForUpdates": False},
             "web": {"localAddresses": ["127.0.0.1"], "httpPort": self.http_port,
-                    "tlsPort": tls_port, "tlsEnabled": True, "useSelfSignedCertificate": True},
+                    "tlsPort": self.tls_port, "tlsEnabled": True, "useSelfSignedCertificate": True},
         }), encoding="utf-8")
 
     def call(self, path, *, manifest=None, form=None, revision=None):
@@ -181,9 +182,15 @@ def verify_propagation(primary, secondary, graceful):
     wait_for(catalog_ready, "the Secondary to transfer the cluster zone")
 
     tls_change = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "web": {"tlsEnabled": False}})
-    assert tls_change["status"] == "error" and "HTTPS listeners" in tls_change["errorMessage"], tls_change
+    assert tls_change["status"] == "error" and "/web/tlsEnabled" in tls_change["errorMessage"], tls_change
+    lost_address = secondary.call("settings/config/plan", manifest={
+        "schemaVersion": 1, "web": {"localAddresses": ["127.0.0.2"]},
+    })
+    assert lost_address["status"] == "error" and "/web/localAddresses" in lost_address["errorMessage"], lost_address
+    previous_certificate = ssl.get_server_certificate(("127.0.0.1", secondary.tls_port), timeout=5)
     new_web_port = allocate_ports()[0]
-    web = {"schemaVersion": 1, "web": {"httpPort": new_web_port}}
+    web = {"schemaVersion": 1, "web": {"httpPort": new_web_port,
+           "localAddresses": ["127.0.0.1", "127.0.0.2"], "tlsEnabled": True}}
     web_plan = ok(secondary.call("settings/config/plan", manifest=web))
     assert any(change["path"] == "/web/httpPort" and change["restartWebService"] for change in web_plan["changes"]), web_plan
     operation = ok(secondary.call("settings/config/apply", manifest=web, revision=web_plan["revision"]))["operationId"]
@@ -199,7 +206,11 @@ def verify_propagation(primary, secondary, graceful):
         return status["state"] == "applied"
 
     wait_for(web_rebound, "the Secondary HTTP listener to rebind")
-    assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == new_web_port != web_port
+    settings = ok(secondary.call("settings/get"))
+    assert settings["webServiceHttpPort"] == new_web_port != web_port
+    assert set(settings["webServiceLocalAddresses"]) == {"127.0.0.1", "127.0.0.2"}, settings
+    assert ssl.get_server_certificate(("127.0.0.1", secondary.tls_port), timeout=5) == previous_certificate
+    assert ssl.get_server_certificate(("127.0.0.2", secondary.tls_port), timeout=5) == previous_certificate
 
     intervals = {"schemaVersion": 1, "cluster": {"configRefreshSeconds": 120, "configRetrySeconds": 30}}
 

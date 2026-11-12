@@ -120,6 +120,9 @@ namespace DnsServerCore.Configuration
                 ? manifest.ResolveReference(reference, $"{Path}/bootstrap/{field}") : null;
         }
 
+        internal static IPAddress[] GetDeclaredAddresses(ConfigurationManifest manifest) =>
+            IsDeclared(manifest) ? ReadAddresses(manifest.Settings.GetProperty("cluster")) : null;
+
         private static IPAddress[] ReadAddresses(JsonElement section)
         {
             if (!section.TryGetProperty("node", out JsonElement node) ||

@@ -680,7 +680,7 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     if (_dnsWebService._clusterManager.ClusterInitialized)
-                        ConfigurationPlan.CheckClusterWebListenerSupport(manifest);
+                        ConfigurationPlan.CheckClusterWebListenerSupport(manifest, _dnsWebService._clusterManager);
 
                     bool declaresWebRoot = manifest.Settings.TryGetProperty("web", out JsonElement web) && web.TryGetProperty("rootPath", out _);
                     bool declaresWebCertificate = ConfigurationWebCertificate.IsDeclared(manifest);
@@ -762,7 +762,7 @@ namespace DnsServerCore
                         }
                         return;
                     }
-                    ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
+                    ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager);
                     if (HasDhcpScopeDeclaration(manifest))
                     {
                         await _dnsWebService._dhcpServer.EnterManifestGateAsync(context.RequestAborted);
@@ -896,7 +896,7 @@ namespace DnsServerCore
                 {
                     await WithConfigurationLockAsync(async () =>
                     {
-                        ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
+                        ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager);
                         bool dhcpGate = HasDhcpScopeDeclaration(manifest);
                         if (dhcpGate)
                             await _dnsWebService._dhcpServer.EnterManifestGateAsync();

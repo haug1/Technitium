@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
+using DnsServerCore.Cluster;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ResourceRecords;
 using System.Security.Cryptography;
@@ -841,9 +842,9 @@ namespace DnsServerCore.Configuration
             return value.ValueKind == JsonValueKind.Null || value.GetBoolean();
         }
 
-        internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)
+        internal static void CheckClusterApplySupport(ConfigurationManifest manifest, ClusterManager cluster)
         {
-            if (!clusterInitialized)
+            if (!cluster.ClusterInitialized)
                 return;
             if (ConfigurationPermissions.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/auth/permissions: Applying permissions to a cluster is not implemented.");
@@ -865,7 +866,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             if (ConfigurationWebCertificate.IsDeclared(manifest))
                 throw new InvalidDataException("/web/certificate: Applying web certificate settings to a cluster is not implemented.");
-            CheckClusterWebListenerSupport(manifest);
+            CheckClusterWebListenerSupport(manifest, cluster);
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             if (GetAuthoritativeDefaults(manifest).HasValues)
@@ -894,12 +895,26 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }
 
-        internal static void CheckClusterWebListenerSupport(ConfigurationManifest manifest)
+        internal static void CheckClusterWebListenerSupport(ConfigurationManifest manifest, ClusterManager cluster)
         {
             DnsWebService.WebListeners listeners = GetWebListeners(manifest);
-            if (listeners.Addresses is not null || listeners.TlsPort.HasValue || listeners.TlsEnabled.HasValue ||
-                listeners.Http3Enabled.HasValue || listeners.TlsSocket.HasValues)
-                throw new InvalidDataException("/web: The cluster's HTTPS listeners cannot be changed through a manifest.");
+            if (listeners.TlsEnabled == false)
+                throw new InvalidDataException("/web/tlsEnabled: Cluster HTTPS listeners must remain enabled.");
+            if (listeners.TlsPort is int port && port != cluster.DnsWebService.WebServiceTlsPort)
+                throw new InvalidDataException("/web/tlsPort: Changing the cluster HTTPS port through a manifest is not implemented.");
+            if (listeners.Addresses is null)
+                return;
+
+            IEnumerable<IPAddress> addresses = cluster.GetSelfNode().IPAddresses;
+            if (ConfigurationClusterOptions.GetDeclaredAddresses(manifest) is { } advertised)
+                addresses = addresses.Concat(advertised);
+            foreach (IPAddress address in addresses.Distinct())
+            {
+                IPAddress endpoint = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+                if (!listeners.Addresses.Contains(endpoint) && !listeners.Addresses.Contains(IPAddress.IPv6Any) &&
+                    !(endpoint.AddressFamily == AddressFamily.InterNetwork && listeners.Addresses.Contains(IPAddress.Any)))
+                    throw new InvalidDataException("/web/localAddresses: The HTTPS bindings must cover all current and declared cluster addresses.");
+            }
         }
 
         internal static string ReadWebRoot(ConfigurationManifest manifest, LogManager log = null)

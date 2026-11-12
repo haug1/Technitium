@@ -3245,7 +3245,7 @@ namespace DnsServerCore
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
-                (webAddressesChanged || (domain is not null && !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase)));
+                ((webAddressesChanged && !_clusterManager.ClusterInitialized) || (domain is not null && !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase)));
             Action writeCertificate = regenerateCertificate ? () => CheckAndLoadSelfSignedCertificate(true, true, domain ?? _dnsServer.ServerDomain) : null;
             if (generatedWebCertificate is not null)
             {
@@ -3502,7 +3502,7 @@ namespace DnsServerCore
                     throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before bootstrapping the node.");
                 if (startupManifest is not null && bootstrap is null)
                 {
-                    ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
+                    ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager);
                     ConfigurationClusterOptions.Prepare(startupManifest, _clusterManager);
                 }
                 ConfigurationSso.Settings sso = ConfigurationSso.Prepare(startupManifest, _authManager);
