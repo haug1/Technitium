@@ -140,23 +140,18 @@ namespace DnsServerCore.Tests
             });
 
             string sourceUrl = source.Client.BaseAddress!.AbsoluteUri;
-            var exported = JsonNode.Parse((await RunAsync(source, "export", sourceUrl)).Output)!;
-            JsonNode dns = exported["dns"]!;
+            var migration = JsonNode.Parse((await RunAsync(source, "export", sourceUrl)).Output)!;
+            JsonNode dns = migration["dns"]!;
             Assert.Equal("legacy.example.test", dns["serverDomain"]!.GetValue<string>());
             Assert.Equal(1234, dns["authoritative"]!["defaultRecordTtl"]!.GetValue<int>());
             Assert.Equal("Deny", dns["recursion"]!["mode"]!.GetValue<string>());
             Assert.False(dns["cache"]!["prefetch"]!["enabled"]!.GetValue<bool>());
 
-            // Use the destination listener bindings while migrating the legacy policy.
-            var policy = new JsonObject
-            {
-                ["serverDomain"] = dns["serverDomain"]!.DeepClone(),
-                ["authoritative"] = dns["authoritative"]!.DeepClone(),
-                ["recursion"] = dns["recursion"]!.DeepClone(),
-                ["cache"] = dns["cache"]!.DeepClone()
-            };
-            var migration = new JsonObject { ["schemaVersion"] = 1, ["dns"] = policy };
-            await using var destination = await LoopbackWebService.StartAsync();
+            await using var destination = await LoopbackWebService.StartAsync(adminPassword: source.AdminPassword);
+            var destinationSettings = await destination.GetSettingsAsync();
+            dns["localEndpoints"] = JsonNode.Parse(destinationSettings.GetProperty("dnsServerLocalEndPoints").GetRawText());
+            migration["web"]!["httpPort"] = destinationSettings.GetProperty("webServiceHttpPort").GetInt32();
+            migration["web"]!["tlsPort"] = destinationSettings.GetProperty("webServiceTlsPort").GetInt32();
             string path = Path.Combine(destination.ConfigurationDirectory, "legacy-migration.json");
             await File.WriteAllTextAsync(path, migration.ToJsonString());
             await RunAsync(destination, "validate", path);
@@ -165,9 +160,16 @@ namespace DnsServerCore.Tests
 
             string destinationUrl = destination.Client.BaseAddress!.AbsoluteUri;
             var migrated = JsonNode.Parse((await RunAsync(destination, "export", destinationUrl)).Output)!;
-            foreach (var field in policy)
-                Assert.True(JsonNode.DeepEquals(field.Value, migrated["dns"]![field.Key]), $"Migrated DNS field {field.Key} differs.");
-            Assert.Contains("No setting changes.", (await RunAsync(destination, "plan", path, destinationUrl)).Output);
+            foreach (var (section, settingsExport) in migration.AsObject())
+                Assert.True(JsonNode.DeepEquals(settingsExport, migrated[section]), $"Migrated section {section} differs.");
+
+            string before = (await destination.GetSettingsAsync()).GetProperty("uptimestamp").GetString()!;
+            var unchanged = await RunAsync(destination, "plan", path, destinationUrl);
+            Assert.Contains("No setting changes.", unchanged.Output);
+            var repeated = await RunAsync(destination, "apply", path, destinationUrl, ReadOutputValue(unchanged.Output, "Revision "));
+            Assert.Contains("Configuration applied.", repeated.Output);
+            Assert.DoesNotContain("Operation", repeated.Output);
+            Assert.Equal(before, (await destination.GetSettingsAsync()).GetProperty("uptimestamp").GetString());
         }
 
         [Fact]

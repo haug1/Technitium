@@ -229,6 +229,7 @@ namespace DnsServerCore.Tests
             Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
 
             string appFolder = Path.GetDirectoryName(appFile)!;
+            await AssertAppMigrationAsync(server, appFolder, appFile);
             string removalJournal = Path.Combine(server.ConfigurationDirectory, ".manifest-pending", "app-removals", "FilterAaaa");
             Directory.CreateDirectory(removalJournal);
             Directory.Move(appFolder, Path.Combine(removalJournal, "previous"));
@@ -351,6 +352,39 @@ namespace DnsServerCore.Tests
                     Assert.Empty(response.GetProperty("changes").EnumerateArray());
                 return response.GetProperty("revision").GetString()!;
             }
+        }
+
+        private static async Task AssertAppMigrationAsync(LoopbackWebService source, string appFolder, string appFile)
+        {
+            JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement manifest = export.GetProperty("response").GetProperty("manifest");
+            var migration = new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["apps"] = JsonNode.Parse(manifest.GetProperty("apps").GetRawText()),
+                ["zones"] = JsonNode.Parse(manifest.GetProperty("zones").GetRawText())
+            };
+            JsonNode app = migration["apps"]!["packages"]!["FilterAaaa"]!;
+            app["source"] = new JsonObject { ["file"] = "filter-aaaa.zip" };
+            app["configuration"] = new JsonObject { ["file"] = "filter-aaaa.json" };
+
+            await using var destination = await LoopbackWebService.StartAsync();
+            await destination.RestartAsync(null, () =>
+            {
+                File.Copy(Path.Combine(appFolder, "FilterAaaa.zip"), Path.Combine(destination.ConfigurationDirectory, "filter-aaaa.zip"));
+                File.Copy(appFile, Path.Combine(destination.ConfigurationDirectory, "filter-aaaa.json"));
+                File.WriteAllText(Path.Combine(destination.ConfigurationDirectory, "technitium.json"), migration.ToJsonString());
+            });
+
+            var ipv4 = Assert.Single((await destination.QueryAsync("www.example.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.10"), Assert.IsType<DnsARecordData>(ipv4.RDATA).Address);
+            DnsDatagram filtered = await destination.QueryAsync("www.example.test", DnsResourceRecordType.AAAA);
+            Assert.Equal(DnsResponseCode.NoError, filtered.RCODE);
+            Assert.Empty(filtered.Answer);
+            JsonElement settings = await destination.CallAsync("apps/config/get?name=FilterAaaa", destination.AdminToken);
+            LoopbackWebService.AssertOk(settings);
+            Assert.Equal(await File.ReadAllTextAsync(appFile), settings.GetProperty("response").GetProperty("config").GetString());
         }
 
         private static string BuildManifest(string version, string text) => new JsonObject

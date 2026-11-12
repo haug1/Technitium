@@ -2805,6 +2805,9 @@ namespace DnsServerCore.Tests
                 "dhcp/scopes/addReservedLease?name=Default&hardwareAddress=02-00-00-00-00-0C&ipAddress=192.168.1.22", server.AdminToken));
             Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
 
+            JsonElement activeLease = await ReadActiveLeaseAsync();
+            Assert.Equal("Dynamic", activeLease.GetProperty("type").GetString());
+            Assert.Equal("192.168.1.21", activeLease.GetProperty("address").GetString());
             JsonNode updated = JsonNode.Parse(manifest)!;
             updated["dhcp"]!["scopes"]!["Default"]!["ignoreClientIdentifierOption"] = false;
             updated["dhcp"]!["scopes"]!["Default"]!["reservations"]!["02-00-00-00-00-0D"] =
@@ -2812,12 +2815,24 @@ namespace DnsServerCore.Tests
             string updatedManifest = updated.ToJsonString();
             revision = (await PreviewAsync(server, updatedManifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, updatedManifest, revision));
+            Assert.True(JsonElement.DeepEquals(activeLease, await ReadActiveLeaseAsync()));
             using (FileStream stored = File.OpenRead(scopeFile))
             using (var persisted = new Scope(stored, null, null, resolveLocalDns: false))
             {
                 Lease lease = persisted.Leases[new ClientIdentifierOption(0, [0xDD])];
                 Assert.Equal(LeaseType.Reserved, lease.Type);
                 Assert.Equal(IPAddress.Parse("192.168.1.23"), lease.Address);
+            }
+            await server.RestartAsync();
+            Assert.True(JsonElement.DeepEquals(activeLease, await ReadActiveLeaseAsync()));
+
+            async Task<JsonElement> ReadActiveLeaseAsync()
+            {
+                JsonElement response = await server.CallAsync("dhcp/leases/list", server.AdminToken);
+                LoopbackWebService.AssertOk(response);
+                return Assert.Single(response.GetProperty("response").GetProperty("leases").EnumerateArray(),
+                    lease => lease.GetProperty("scope").ValueEquals("Default") &&
+                        lease.GetProperty("hardwareAddress").ValueEquals("02-00-00-00-00-0B"));
             }
 
             async Task RejectAsync(string endpoint, string suffix)
