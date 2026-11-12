@@ -1,5 +1,6 @@
 using DnsServerCore.Configuration;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -11,6 +12,23 @@ namespace DnsServerCore.Tests
     public sealed class ConfigurationManifestTests : IDisposable
     {
         private readonly DirectoryInfo _directory = Directory.CreateTempSubdirectory("technitium-manifest-test-");
+
+        public static IEnumerable<object[]> ShippedExamples()
+        {
+            string directory = Path.Combine(AppContext.BaseDirectory, "ManifestExamples");
+            foreach (string file in Directory.GetFiles(directory, "*.json"))
+                yield return [Path.GetFileName(file)];
+        }
+
+        [Theory]
+        [MemberData(nameof(ShippedExamples))]
+        public void ShippedExamplePassesThePublishedSchemaAndManifestValidation(string fileName)
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, "ManifestExamples", fileName);
+
+            ConfigurationManifest manifest = ConfigurationManifest.Load(path);
+            ConfigurationPlan.CheckApplySupport(manifest);
+        }
 
         [Fact]
         public void ExplicitResetIsDistinctFromAnOmittedSetting()

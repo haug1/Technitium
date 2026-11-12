@@ -17,6 +17,8 @@
     <None Include="../Apps/FilterAaaaApp/bin/$(Configuration)/FilterAaaaApp.deps.json"
           Link="FilterAaaaApp.deps.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures/dns-v6.config" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../configuration/examples/*.json"
+          Link="ManifestExamples/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Reference Include="TechnitiumLibrary.ByteTree">
       <HintPath>../../TechnitiumLibrary/bin/TechnitiumLibrary.ByteTree.dll</HintPath>
     </Reference>
