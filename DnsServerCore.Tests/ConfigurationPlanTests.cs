@@ -3035,6 +3035,43 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneMembershipAndEnabledOwnershipSurviveRestartUntilReleased()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=managed.test&type=Primary", server.AdminToken));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"MANAGED.TEST.":{"enabled":true},"absent.test":null}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Empty(preview.GetProperty("changes").EnumerateArray());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            await AssertConflictAsync("zones/delete?zone=managed.test", "/zones/managed.test");
+            await AssertConflictAsync("zones/disable?zone=managed.test", "/zones/managed.test/enabled");
+            await AssertConflictAsync("zones/options/set?zone=managed.test&disabled=true&queryAccess=Deny", "/zones/managed.test/enabled");
+            await AssertConflictAsync("zones/create?zone=absent.test&type=Primary", "/zones/absent.test");
+            await AssertConflictAsync("zones/clone?zone=absent.test&sourceZone=managed.test", "/zones/absent.test");
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/enable?zone=managed.test", server.AdminToken));
+            const string unchanged = """{"schemaVersion":1,"zones":{"managed.test":{"query":{"mode":"Allow"}}}}""";
+            Assert.Empty((await PreviewAsync(server, unchanged)).GetProperty("changes").EnumerateArray());
+
+            const string release = """{"schemaVersion":1}""";
+            string revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            await server.RestartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/delete?zone=managed.test", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=absent.test&type=Primary", server.AdminToken));
+
+            async Task AssertConflictAsync(string endpoint, string path)
+            {
+                JsonElement response = await server.CallAsync(endpoint, server.AdminToken);
+                Assert.Equal("error", response.GetProperty("status").GetString());
+                Assert.Contains(path, response.GetProperty("errorMessage").GetString());
+            }
+        }
+
+        [Fact]
         public async Task ZoneApplyPersistsEnabledStateAndRollsBackFailedWrites()
         {
             await using var server = await LoopbackWebService.StartAsync();

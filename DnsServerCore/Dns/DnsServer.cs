@@ -823,7 +823,7 @@ namespace DnsServerCore.Dns
 
             ReconfigureResolverTaskPool(100);
 
-            _authZoneManager = new AuthZoneManager(this);
+            _authZoneManager = new AuthZoneManager(this, loadManifestOwnership: true);
             _specialZoneManager = new SpecialZoneManager(this);
             _allowedZoneManager = new AllowedZoneManager(this);
             _blockedZoneManager = new BlockedZoneManager(this);

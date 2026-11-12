@@ -767,11 +767,13 @@ namespace DnsServerCore
                         !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Delete))
                         throw new DnsWebServiceException("Access was denied.");
                 }
+                var declaredZones = new HashSet<string>(StringComparer.Ordinal);
                 if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                 {
                     foreach (JsonProperty declaration in zones.EnumerateObject())
                     {
                         string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
+                        declaredZones.Add(name);
                         bool exists = current.RootElement.GetProperty("manifestZones").GetProperty(name).TryGetProperty("type", out _);
                         bool deletion = declaration.Value.ValueKind == JsonValueKind.Null;
                         if (deletion && !exists)
@@ -782,6 +784,14 @@ namespace DnsServerCore
                             (exists && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, flag)))
                             throw new DnsWebServiceException("Access was denied.");
                     }
+                }
+                foreach (string name in _dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.Keys)
+                {
+                    if (!declaredZones.Contains(name) &&
+                        (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify) ||
+                         (_dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(name) is not null &&
+                          !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Modify))))
+                        throw new DnsWebServiceException("Access was denied.");
                 }
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
@@ -921,6 +931,8 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WritePropertyName("manifestZoneOwnership");
+                    JsonSerializer.Serialize(writer, _dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones);
                     writer.WriteStartArray("manifestDhcpOwnership");
                     foreach (string path in _dnsWebService._dhcpServer.ManagedPaths)
                         writer.WriteStringValue(path);

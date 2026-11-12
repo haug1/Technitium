@@ -71,6 +71,10 @@ namespace DnsServerCore.Dns.ZoneManagers
         readonly List<AuthZoneInfo> _catalogZoneIndex = new List<AuthZoneInfo>(2);
         readonly ReaderWriterLockSlim _zoneIndexLock = new ReaderWriterLockSlim();
 
+        internal const string ManifestOwnershipFile = "zone-ownership.config";
+        private SortedDictionary<string, bool> _manifestOwnedZones = new(StringComparer.Ordinal);
+        internal IReadOnlyDictionary<string, bool> ManifestOwnedZones => _manifestOwnedZones;
+
         readonly Lock _saveLock = new Lock();
         readonly Dictionary<string, object> _pendingSaveZones = new Dictionary<string, object>();
         readonly Timer _saveTimer;
@@ -82,9 +86,21 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         #region constructor
 
-        public AuthZoneManager(DnsServer dnsServer)
+        public AuthZoneManager(DnsServer dnsServer) : this(dnsServer, loadManifestOwnership: false)
+        {
+        }
+
+        internal AuthZoneManager(DnsServer dnsServer, bool loadManifestOwnership)
         {
             _dnsServer = dnsServer;
+
+            string ownershipFile = Path.Combine(_dnsServer.ConfigFolder, ManifestOwnershipFile);
+            if (loadManifestOwnership && File.Exists(ownershipFile))
+            {
+                var ownership = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllBytes(ownershipFile))
+                    ?? throw new InvalidDataException("Invalid zone manifest ownership file.");
+                _manifestOwnedZones = new SortedDictionary<string, bool>(ownership, StringComparer.Ordinal);
+            }
 
             _serverDomain = _dnsServer.ServerDomain;
 
@@ -619,11 +635,28 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         #region internal
 
+        internal static string GetManifestZonePath(string name) =>
+            ConfigurationPlan.AppendPath("/zones", name.Length == 0 ? "." : name);
+
+        internal void CheckManifestZoneMembership(string name)
+        {
+            name = name.ToLowerInvariant();
+            if (_manifestOwnedZones.ContainsKey(name))
+                throw new DnsWebServiceException($"{GetManifestZonePath(name)}: Zone membership is managed by the configuration manifest.");
+        }
+
+        internal void CheckManifestZoneEnabled(AuthZoneInfo zone, bool disabled)
+        {
+            if (zone.Disabled != disabled && _manifestOwnedZones.TryGetValue(zone.Name, out bool ownsEnabled) && ownsEnabled)
+                throw new DnsWebServiceException($"{GetManifestZonePath(zone.Name)}/enabled: Zone enabled state is managed by the configuration manifest.");
+        }
+
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZones(ConfigurationManifest manifest, AuthManager auth, User creator)
         {
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            var ownedZones = new SortedDictionary<string, bool>(StringComparer.Ordinal);
             string serverDomain = _dnsServer.ServerDomain;
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
             {
@@ -631,6 +664,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     string path = ConfigurationPlan.AppendPath("/zones", declaration.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
+                    ownedZones.Add(name, declaration.Value.ValueKind == JsonValueKind.Object &&
+                        declaration.Value.TryGetProperty("enabled", out _));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
                     if (zone is not null && (zone.Type != AuthZoneType.Primary || zone.CatalogZoneName is not null))
                         throw new InvalidDataException($"{path}: Apply requires a primary zone outside catalogs.");
@@ -676,12 +711,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
             }
 
-            if (changed.Count == 0)
+            bool ownershipChanged = !_manifestOwnedZones.SequenceEqual(ownedZones);
+            if (changed.Count == 0 && !ownershipChanged)
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
             if (membership.Count > 0)
                 files.Add("auth.config");
+            if (ownershipChanged)
+                files.Add(ManifestOwnershipFile);
             var created = new Dictionary<string, PrimaryZone>(StringComparer.Ordinal);
             var stagedRecords = new Dictionary<string, (PrimaryZone Zone, List<DnsResourceRecord> Records,
                 HashSet<(string Owner, DnsResourceRecordType Type)> ChangedSets)>(StringComparer.Ordinal);
@@ -739,6 +777,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
 
                 writeAuth?.Invoke();
+                if (ownershipChanged)
+                    WriteManifestZoneOwnership(ownedZones);
             }
 
             void Commit(Action persist)
@@ -776,6 +816,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             throw;
                         }
 
+                        _manifestOwnedZones = ownedZones;
                         foreach (var (name, current, remove, disabled, policies, records) in changed)
                         {
                             if (remove)
@@ -828,6 +869,24 @@ namespace DnsServerCore.Dns.ZoneManagers
                     _zoneIndexLock.ExitWriteLock();
                 }
             }
+        }
+
+        private void WriteManifestZoneOwnership(SortedDictionary<string, bool> ownership)
+        {
+            string path = Path.Combine(_dnsServer.ConfigFolder, ManifestOwnershipFile);
+            if (ownership.Count == 0)
+            {
+                File.Delete(path);
+                return;
+            }
+
+            string temporary = path + ".tmp";
+            using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(output, ownership);
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, true);
         }
 
         private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(PrimaryZone zone, JsonElement declaration, List<DnsResourceRecord> records,

@@ -2228,8 +2228,8 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/zones/create", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.CreateZoneAsync));
             _webService.MapGetAndPost("/api/zones/import", _zonesApi.ImportZoneAsync);
             _webService.MapGetAndPost("/api/zones/export", _zonesApi.ExportZoneAsync);
-            _webService.MapGetAndPost("/api/zones/clone", _zonesApi.CloneZone);
-            _webService.MapGetAndPost("/api/zones/convert", _zonesApi.ConvertZone);
+            _webService.MapGetAndPost("/api/zones/clone", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.CloneZone));
+            _webService.MapGetAndPost("/api/zones/convert", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.ConvertZone));
             _webService.MapGetAndPost("/api/zones/enable", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.EnableZone));
             _webService.MapGetAndPost("/api/zones/disable", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.DisableZone));
             _webService.MapGetAndPost("/api/zones/delete", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.DeleteZone));

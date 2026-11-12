@@ -275,6 +275,8 @@ namespace DnsServerCore.Configuration
                     scopes.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestDhcpOwnership", out JsonElement dhcpOwnership))
                     dhcpOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestZoneOwnership", out JsonElement zoneOwnership))
+                    zoneOwnership.WriteTo(writer);
                 writer.WriteEndArray();
             }
 

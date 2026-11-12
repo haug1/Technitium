@@ -926,9 +926,19 @@ namespace DnsServerCore
                 jsonWriter.WriteEndObject();
             }
 
-            private static void WriteZoneInfoAsJson(AuthZoneInfo zoneInfo, Utf8JsonWriter jsonWriter)
+            private void WriteZoneInfoAsJson(AuthZoneInfo zoneInfo, Utf8JsonWriter jsonWriter)
             {
                 jsonWriter.WriteStartObject();
+
+                if (_dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.TryGetValue(zoneInfo.Name, out bool ownsEnabled))
+                {
+                    string path = AuthZoneManager.GetManifestZonePath(zoneInfo.Name);
+                    jsonWriter.WriteStartArray("managedSettings");
+                    jsonWriter.WriteStringValue(path);
+                    if (ownsEnabled)
+                        jsonWriter.WriteStringValue(path + "/enabled");
+                    jsonWriter.WriteEndArray();
+                }
 
                 jsonWriter.WriteString("name", zoneInfo.Name);
 
@@ -1610,6 +1620,8 @@ namespace DnsServerCore
 
                 DnsClient.IsDomainNameValid(zoneName, true);
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(zoneName);
+
                 AuthZoneType type = request.GetQueryOrFormEnum("type", AuthZoneType.Primary);
                 string catalogZoneName = request.GetQueryOrForm("catalog", null);
 
@@ -2071,6 +2083,7 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sourceZoneInfo.Name, sessionUser, PermissionFlag.View))
                     throw new DnsWebServiceException("Access was denied.");
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(zoneName);
                 AuthZoneInfo zoneInfo = _dnsWebService._dnsServer.AuthZoneManager.CloneZone(zoneName, sourceZoneInfo.Name);
 
                 //clone user/group permissions from source zone
@@ -2116,6 +2129,8 @@ namespace DnsServerCore
                 if ((zoneInfo.Type == AuthZoneType.Primary) && _dnsWebService._clusterManager.ClusterInitialized && _dnsWebService._clusterManager.IsClusterPrimaryZone(zoneInfo.Name))
                     throw new DnsWebServiceException("Cannot convert the Cluster Primary zone '" + zoneInfo.DisplayName + "'.");
 
+                if (zoneInfo.Type != type)
+                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(zoneInfo.Name);
                 _dnsWebService._dnsServer.AuthZoneManager.ConvertZoneTypeTo(zoneInfo.Name, type);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] " + zoneInfo.TypeName + " zone '" + zoneInfo.DisplayName + "' was converted to " + AuthZoneInfo.GetZoneTypeName(type) + " zone sucessfully.");
@@ -2882,6 +2897,15 @@ namespace DnsServerCore
                 if (context.Request.TryGetQueryOrForm("zones", out string strZoneNames))
                 {
                     string[] zoneNames = strZoneNames.Split(",", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    foreach (string rawName in zoneNames)
+                    {
+                        string name = rawName.Trim('.');
+                        if (DnsClient.IsDomainNameUnicode(name))
+                            name = DnsClient.ConvertDomainNameToAscii(name);
+                        if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Delete))
+                            _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(name);
+                    }
+
                     List<string> deleted = new List<string>(zoneNames.Length);
                     Dictionary<string, string> failed = new Dictionary<string, string>(zoneNames.Length);
 
@@ -2936,6 +2960,8 @@ namespace DnsServerCore
                     if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Delete))
                         throw new DnsWebServiceException("Access was denied.");
 
+                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(zoneInfo.Name);
+
                     switch (zoneInfo.Type)
                     {
                         case AuthZoneType.Primary:
@@ -2983,6 +3009,7 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneEnabled(zoneInfo, false);
                 zoneInfo.Disabled = false;
                 _dnsWebService._dnsServer.AuthZoneManager.SaveZoneFile(zoneInfo.Name);
 
@@ -3026,6 +3053,7 @@ namespace DnsServerCore
                         break;
                 }
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneEnabled(zoneInfo, true);
                 zoneInfo.Disabled = true;
                 _dnsWebService._dnsServer.AuthZoneManager.SaveZoneFile(zoneInfo.Name);
 
@@ -3387,7 +3415,12 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
 
-                if (request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled))
+                bool setDisabled = request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled);
+                if (setDisabled)
+                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneEnabled(zoneInfo, disabled);
+                if (!string.IsNullOrEmpty(request.QueryOrForm("catalog")) && zoneInfo.CatalogZoneName is null)
+                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(zoneInfo.Name);
+                if (setDisabled && zoneInfo.Disabled != disabled)
                     zoneInfo.Disabled = disabled;
 
                 //catalog zone override options
