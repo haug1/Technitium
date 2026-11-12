@@ -72,13 +72,19 @@ jobs:
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer
         run: dotnet run --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json
+      - name: Publish the console host for integration tests
+        if: runner.os == 'Linux'
+        working-directory: DnsServer
+        run: dotnet publish DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-integration-build"
+      - name: Verify HTTPS app package retry
+        if: runner.os == 'Linux'
+        working-directory: DnsServer
+        run: python3 DnsServerCore.Tests/app_package_retry.py "$RUNNER_TEMP/technitium-integration-build/DnsServerApp.dll"
       - name: Verify declarative settings propagate between cluster nodes
         if: runner.os == 'Linux'
         working-directory: DnsServer
         timeout-minutes: 8
-        run: |
-          dotnet publish DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-build"
-          python3 DnsServerCore.Tests/mixed_cluster.py "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" --propagation
+        run: python3 DnsServerCore.Tests/mixed_cluster.py "$RUNNER_TEMP/technitium-integration-build/DnsServerApp.dll" --propagation
       - name: Verify older nodes block unsupported declarative changes
         if: runner.os == 'Linux'
         working-directory: DnsServer
@@ -86,7 +92,7 @@ jobs:
         run: |
           dotnet publish ../DnsServerBaseline/DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-baseline"
           python3 DnsServerCore.Tests/mixed_cluster.py \
-            "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" \
+            "$RUNNER_TEMP/technitium-integration-build/DnsServerApp.dll" \
             "$RUNNER_TEMP/technitium-cluster-baseline/DnsServerApp.dll"
       - uses: actions/upload-artifact@v7
         if: always() && runner.os == 'Linux'

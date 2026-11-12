@@ -53,6 +53,12 @@ python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll -
 
 The GitHub Actions regression workflow runs both modes. It publishes the current console host and the pinned compatibility baseline `281fcffd`.
 
+The Linux workflow also checks app package retry against a loopback HTTPS source. Run it against a published console host with Python 3 and OpenSSL available.
+
+```sh
+python3 DnsServerCore.Tests/app_package_retry.py /path/to/current/DnsServerApp.dll
+```
+
 ## For Windows
 
 To build the Technitium DNS Server Windows Setup, you need to install [Microsoft Visual Studio Community](https://visualstudio.microsoft.com/vs/) and [Inno Setup](https://jrsoftware.org/isinfo.php) on your computer. Once you have it installed, follow the steps below:
