@@ -696,7 +696,7 @@
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
-                    "address": {"type": "string", "minLength": 1},
+                    "address": {"anyOf": [{"type": "string", "minLength": 1}, {"$ref": "#/$defs/secretReference"}]},
                     "transport": {"enum": ["Udp", "Tcp", "Tls", "Https", "Quic"]},
                     "priority": {"type": "integer", "minimum": 0, "maximum": 255},
                     "dnssecValidation": {"type": "boolean"},

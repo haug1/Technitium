@@ -327,7 +327,7 @@ Record data is required unless the existing type permits empty fields. Use the e
 | SVCB, HTTPS | `svcPriority`, `svcTargetName`, `svcParams`. Keep automatically generated hints derived when the corresponding flags are enabled. |
 | URI | `uriPriority`, `uriWeight`, `uri`. |
 | CAA | `flags`, `tag`, `value`. |
-| FWD | `forwarder` or `value`, `protocol` (UDP), `forwarderPriority` (0), `dnssecValidation` (false), `proxyType`, `proxyAddress`, `proxyPort`, `proxyUsername`, `proxyPassword`. Password uses a secret reference. Legacy API defaults to the server proxy where supported. |
+| FWD | `forwarder` or `value`, `protocol` (UDP), `forwarderPriority` (0), `dnssecValidation` (false), `proxyType`, `proxyAddress`, `proxyPort`, `proxyUsername`, `proxyPassword`. The password and credential-bearing DoH address can use secret references. Legacy API defaults to the server proxy where supported. |
 | APP | `appName` or `value`, `classPath`, `recordData` (empty). Treat plugin-owned data as opaque and provide a reference when it contains secrets. |
 | Other record types | Use standard zone-file RDATA where supported, or lossless raw RDATA for numeric unknown types. Legacy fallback uses `rdata`. |
 

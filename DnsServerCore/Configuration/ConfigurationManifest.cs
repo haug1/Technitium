@@ -613,6 +613,7 @@ namespace DnsServerCore.Configuration
                 ["", "cluster", "bootstrap", "password" or "totp"] => true,
                 ["", "zones", _, "dnssec", "keys", _, "privateKey"] => true,
                 ["", "zones", _, "records", _, "data", "forwarder", "proxy", "password"] => true,
+                ["", "zones", _, "records", _, "data", "forwarder", "address"] => true,
                 ["", "zones", _, "records", _, "data", "app", "configuration", ..] => true,
                 ["", "apps", "packages", _, "source"] => true,
                 ["", "apps", "packages", _, "configuration", ..] => true,

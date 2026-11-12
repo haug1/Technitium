@@ -1662,7 +1662,9 @@ namespace DnsServerCore.Configuration
 
         private static DnsForwarderRecordData ReadForwarderRecord(ConfigurationManifest manifest, JsonElement record, string path)
         {
-            string address = record.GetProperty("address").GetString();
+            JsonElement addressValue = record.GetProperty("address");
+            string address = addressValue.ValueKind == JsonValueKind.String ? addressValue.GetString() :
+                manifest.ResolveReference(addressValue, path + "/address");
             var protocol = record.TryGetProperty("transport", out JsonElement transport)
                 ? Enum.Parse<DnsTransportProtocol>(transport.GetString()) : DnsTransportProtocol.Udp;
             byte priority = record.TryGetProperty("priority", out JsonElement priorityValue) ? decimal.ToByte(priorityValue.GetDecimal()) : (byte)0;

@@ -1120,7 +1120,7 @@ namespace DnsServerCore
                     manifest, _dnsWebService._clusterManager, user);
             }
 
-            private string ProtectBootstrapSecret(string secret) => secret is null ? null :
+            private string ProtectConfigurationSecret(string secret) => secret is null ? null :
                 Convert.ToHexString(HMACSHA256.HashData(_configurationRevisionKey, Encoding.UTF8.GetBytes(secret)));
 
             private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers = null, ConfigurationStaticSessions.Candidate preparedStaticSessions = null, ConfigurationSso.Settings preparedSso = null, ConfigurationApplications.Entry[] preparedApps = null, ConfigurationClusterOptions.Bootstrap preparedBootstrap = null)
@@ -1180,8 +1180,8 @@ namespace DnsServerCore
                             tlsPort = _dnsWebService.WebServiceTlsPort,
                             certificate = _dnsWebService.WebServiceTlsCertificate.Thumbprint,
                             records = records.Select(record => new { record.Zone, record.Owner, record.Revision }),
-                            password = ProtectBootstrapSecret(secondary?.Password),
-                            totp = ProtectBootstrapSecret(secondary?.Totp)
+                            password = ProtectConfigurationSecret(secondary?.Password),
+                            totp = ProtectConfigurationSecret(secondary?.Totp)
                         });
                     }
                     else if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0 ||
@@ -1496,14 +1496,20 @@ namespace DnsServerCore
                         writer.WriteStartArray("protectedRecordInputs");
                         foreach (var edit in edits)
                         {
-                            string input = edit.Data switch
+                            if (edit.Kind == ConfigurationChangeKind.Remove)
+                                continue;
+                            switch (edit.Data)
                             {
-                                DnsApplicationRecordData app => app.Data,
-                                DnsForwarderRecordData forwarder => forwarder.ProxyPassword,
-                                _ => null
-                            };
-                            if (edit.Kind != ConfigurationChangeKind.Remove && input is not null)
-                                writer.WriteStringValue(Convert.ToHexString(HMACSHA256.HashData(_configurationRevisionKey, Encoding.UTF8.GetBytes(input))));
+                                case DnsApplicationRecordData app:
+                                    writer.WriteStringValue(ProtectConfigurationSecret(app.Data));
+                                    break;
+                                case DnsForwarderRecordData forwarder:
+                                    writer.WriteStartArray();
+                                    writer.WriteStringValue(ProtectConfigurationSecret(forwarder.Forwarder));
+                                    writer.WriteStringValue(ProtectConfigurationSecret(forwarder.ProxyPassword));
+                                    writer.WriteEndArray();
+                                    break;
+                            }
                         }
                         writer.WriteEndArray();
                     }

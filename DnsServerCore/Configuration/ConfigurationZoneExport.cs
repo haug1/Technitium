@@ -127,7 +127,7 @@ namespace DnsServerCore.Configuration
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
             var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
-                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, string MissingInput)>();
+                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, List<string> MissingInputs)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -150,7 +150,8 @@ namespace DnsServerCore.Configuration
                     data = new DnsSOARecordData(soa.PrimaryNameServer, soa.ResponsiblePerson, 0, soa.Refresh, soa.Retry, soa.Expire, soa.Minimum);
                 else if (data is DnsSVCBRecordData svc)
                     data = ConfigurationPlan.WithoutAutomaticHints(svc, autoIpv4, autoIpv6);
-                string sortKey, missingInput = null;
+                string sortKey;
+                var recordInputs = new List<string>();
                 JsonObject declaration;
                 string owner = record.Name.ToLowerInvariant();
                 if (data is DnsApplicationRecordData application)
@@ -158,13 +159,12 @@ namespace DnsServerCore.Configuration
                     declaration = new JsonObject { ["app"] = new JsonObject { ["name"] = application.AppName, ["classPath"] = application.ClassPath } };
                     sortKey = string.Empty;
                     if (application.Data.Length > 0)
-                        missingInput = "/data/app/configuration";
+                        recordInputs.Add("/data/app/configuration");
                 }
                 else if (data is DnsForwarderRecordData forwarder)
                 {
                     if (forwarder.Protocol is not (DnsTransportProtocol.Udp or DnsTransportProtocol.Tcp or DnsTransportProtocol.Tls or
-                        DnsTransportProtocol.Https or DnsTransportProtocol.Quic) ||
-                        forwarder.NameServer?.DoHEndPoint is Uri uri && (uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0))
+                        DnsTransportProtocol.Https or DnsTransportProtocol.Quic))
                     {
                         missingInputs.Add(path + "/records");
                         return null;
@@ -177,17 +177,21 @@ namespace DnsServerCore.Configuration
                         if (!string.IsNullOrEmpty(forwarder.ProxyUsername))
                             proxy["username"] = forwarder.ProxyUsername;
                         if (!string.IsNullOrEmpty(forwarder.ProxyPassword))
-                            missingInput = "/data/forwarder/proxy/password";
+                            recordInputs.Add("/data/forwarder/proxy/password");
                     }
-                    declaration = new JsonObject
+                    var forwarderSettings = new JsonObject
                     {
-                        ["forwarder"] = new JsonObject
-                        {
-                            ["address"] = forwarder.Forwarder, ["transport"] = forwarder.Protocol.ToString(),
-                            ["priority"] = forwarder.Priority, ["dnssecValidation"] = forwarder.DnssecValidation, ["proxy"] = proxy
-                        }
+                        ["address"] = forwarder.Forwarder, ["transport"] = forwarder.Protocol.ToString(),
+                        ["priority"] = forwarder.Priority, ["dnssecValidation"] = forwarder.DnssecValidation, ["proxy"] = proxy
                     };
+                    declaration = new JsonObject { ["forwarder"] = forwarderSettings };
                     sortKey = declaration.ToJsonString();
+                    if (forwarder.NameServer?.DoHEndPoint is Uri uri &&
+                        (uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0))
+                    {
+                        forwarderSettings.Remove("address");
+                        recordInputs.Add("/data/forwarder/address");
+                    }
                 }
                 else
                 {
@@ -230,7 +234,7 @@ namespace DnsServerCore.Configuration
                 entries.Add((owner, (ushort)record.Type, sortKey, record.OriginalTtlValue, info?.Disabled ?? false,
                     info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue,
                     record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null,
-                    autoIpv4, autoIpv6, declaration, missingInput));
+                    autoIpv4, autoIpv6, declaration, recordInputs));
             }
 
             var exported = new JsonArray();
@@ -255,8 +259,8 @@ namespace DnsServerCore.Configuration
                     record["autoIpv4Hint"] = true;
                 if (entry.AutoIpv6Hint)
                     record["autoIpv6Hint"] = true;
-                if (entry.MissingInput is not null)
-                    missingInputs.Add($"{path}/records/{exported.Count}{entry.MissingInput}");
+                foreach (string input in entry.MissingInputs)
+                    missingInputs.Add($"{path}/records/{exported.Count}{input}");
                 exported.Add(record);
             }
             return exported;

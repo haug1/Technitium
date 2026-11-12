@@ -5489,8 +5489,12 @@ namespace DnsServerCore.Tests
         {
             const string variable = "TECHNITIUM_TEST_FORWARDER_PASSWORD";
             const string secret = "fixture-forwarder-password";
+            const string addressVariable = "TECHNITIUM_TEST_FORWARDER_ADDRESS";
+            const string address = "https://example.test/dns-query?token=fixture-forwarder-token";
             string? previous = Environment.GetEnvironmentVariable(variable);
+            string? previousAddress = Environment.GetEnvironmentVariable(addressVariable);
             Environment.SetEnvironmentVariable(variable, secret);
+            Environment.SetEnvironmentVariable(addressVariable, address);
             try
             {
                 await using var upstream = new LoopbackDnsServer();
@@ -5501,7 +5505,7 @@ namespace DnsServerCore.Tests
                     {"schemaVersion":1,"zones":{"route.test":{"type":"Forwarder","records":[
                       {"owner":"@","type":"FWD","data":{"forwarder":{"address":"{{{{{upstream.EndPoint}}}}}"}}},
                       {"owner":"unused.route.test","type":"FWD","disabled":true,"data":{"forwarder":{
-                        "address":"{{{{{upstream.EndPoint}}}}}","transport":"Tcp","priority":3,
+                        "address":{"environment":"TECHNITIUM_TEST_FORWARDER_ADDRESS"},"transport":"Https","priority":3,
                         "proxy":{"type":"Http","address":"127.0.0.1","port":8080,"username":"fixture",
                                  "password":{"environment":"TECHNITIUM_TEST_FORWARDER_PASSWORD"}}
                       }}}
@@ -5509,6 +5513,7 @@ namespace DnsServerCore.Tests
                     """;
                 JsonElement plan = await PreviewAsync(source, manifest);
                 Assert.DoesNotContain(secret, plan.GetRawText());
+                Assert.DoesNotContain(address, plan.GetRawText());
                 LoopbackWebService.AssertOk(await ApplyAsync(source, manifest, plan.GetProperty("revision").GetString()!));
                 Assert.Empty((await PreviewAsync(source, manifest)).GetProperty("changes").EnumerateArray());
                 await AssertForwardedAsync(source);
@@ -5518,15 +5523,25 @@ namespace DnsServerCore.Tests
                 JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
                 LoopbackWebService.AssertOk(export);
                 Assert.DoesNotContain(secret, export.GetRawText());
+                Assert.DoesNotContain("fixture-forwarder-token", export.GetRawText());
                 JsonElement result = export.GetProperty("response");
                 var zones = JsonNode.Parse(result.GetProperty("manifest").GetProperty("zones").GetRawText())!;
                 var records = zones["route.test"]!["records"]!.AsArray();
                 int index = records.IndexOf(Assert.Single(records, record => record!["owner"]!.GetValue<string>() == "unused.route.test"));
                 Assert.Contains(result.GetProperty("missingInputs").EnumerateArray(),
                     input => input.ValueEquals($"/zones/route.test/records/{index}/data/forwarder/proxy/password"));
+                Assert.Contains(result.GetProperty("missingInputs").EnumerateArray(),
+                    input => input.ValueEquals($"/zones/route.test/records/{index}/data/forwarder/address"));
+                Assert.False(records[index]!["data"]!["forwarder"]!.AsObject().ContainsKey("address"));
+                records[index]!["data"]!["forwarder"]!["address"] = new JsonObject { ["environment"] = addressVariable };
                 records[index]!["data"]!["forwarder"]!["proxy"]!["password"] = new JsonObject { ["environment"] = variable };
                 string migrated = new JsonObject { ["schemaVersion"] = 1, ["zones"] = zones }.ToJsonString();
                 await using var destination = await LoopbackWebService.StartAsync();
+                plan = await PreviewAsync(destination, migrated);
+                Environment.SetEnvironmentVariable(addressVariable, address + "-rotated");
+                JsonElement stale = await ApplyAsync(destination, migrated, plan.GetProperty("revision").GetString()!);
+                Assert.Equal("stale-preview", stale.GetProperty("errorCode").GetString());
+                Environment.SetEnvironmentVariable(addressVariable, address);
                 plan = await PreviewAsync(destination, migrated);
                 LoopbackWebService.AssertOk(await ApplyAsync(destination, migrated, plan.GetProperty("revision").GetString()!));
                 await AssertForwardedAsync(destination);
@@ -5535,6 +5550,7 @@ namespace DnsServerCore.Tests
             finally
             {
                 Environment.SetEnvironmentVariable(variable, previous);
+                Environment.SetEnvironmentVariable(addressVariable, previousAddress);
             }
 
             static async Task AssertForwardedAsync(LoopbackWebService server)
