@@ -255,6 +255,20 @@ namespace DnsServerCore.Tests
             await server.RestartAsync();
             Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
 
+            using var differentPackageBackup = new MemoryStream();
+            using (var archive = new ZipArchive(differentPackageBackup, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                archive.CreateEntryFromFile(oldPackage, "apps/FilterAaaa/FilterAaaa.zip");
+            }
+            using var pinnedRestore = new MultipartFormDataContent();
+            pinnedRestore.Add(new ByteArrayContent(differentPackageBackup.ToArray()), "file", "apps-backup.zip");
+            JsonElement pinnedConflict = await server.CallAsync("settings/restore?apps=true", server.AdminToken, pinnedRestore);
+            Assert.Equal("error", pinnedConflict.GetProperty("status").GetString());
+            Assert.Contains("/apps/packages/FilterAaaa/packageSha256", pinnedConflict.GetProperty("errorMessage").GetString());
+            Assert.Equal(packageDigest, Convert.ToHexString(SHA256.HashData(
+                await File.ReadAllBytesAsync(Path.Combine(appFolder, "FilterAaaa.zip")))));
+            Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+
             async Task<string> PreviewAsync(string input, bool expectChanges = true, string changePath = "/apps/packages/FilterAaaa/configuration")
             {
                 using var body = new StringContent(input, Encoding.UTF8, "application/json");

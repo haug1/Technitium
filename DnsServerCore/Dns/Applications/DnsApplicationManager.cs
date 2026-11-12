@@ -422,8 +422,11 @@ namespace DnsServerCore.Dns.Applications
 
         internal void CheckPackageUpdate(string name)
         {
+            string path = ConfigurationApplications.AppPath(name);
+            if (_manifestOwnedPaths.Contains(path + "/packageSha256"))
+                throw new InvalidDataException($"{path}/packageSha256: The package digest is managed by the manifest.");
             if (IsPackageUpdateManaged(name))
-                throw new InvalidDataException($"{ConfigurationApplications.AppPath(name)}: The package version or configuration is managed by the manifest.");
+                throw new InvalidDataException($"{path}: The package version or configuration is managed by the manifest.");
         }
 
         internal async Task SetApplicationConfigAsync(DnsApplication app, string config, bool skipUnchanged = false)
@@ -771,7 +774,8 @@ namespace DnsServerCore.Dns.Applications
                         continue;
                     if (MatchesFile(target, entry))
                         continue;
-                    throw new InvalidDataException($"{path}/{(config ? "configuration" : "version")}: Restore would change a managed app.");
+                    string field = config ? "configuration" : paths.Contains(path + "/packageSha256") ? "packageSha256" : "version";
+                    throw new InvalidDataException($"{path}/{field}: Restore would change a managed app.");
                 }
             }
         }
