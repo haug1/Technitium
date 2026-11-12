@@ -252,6 +252,7 @@ namespace DnsServerCore.Configuration
                 {
                     ["role"] = key.KeyType.ToString(),
                     ["algorithm"] = algorithm.Family,
+                    ["dnsKeySha256"] = GetDnsKeyDigest(key),
                     ["privateKey"] = new JsonObject { ["environment"] = $"TECHNITIUM_DNSSEC_{zoneHash}_{name}" }
                 };
                 if (key.State == DnssecPrivateKeyState.Generated)
@@ -326,6 +327,9 @@ namespace DnsServerCore.Configuration
             };
             int size = decimal.ToInt32(Read(value, "keySize")?.GetDecimal() ?? -1);
             JsonElement? reference = Read(value, "privateKey");
+            string digest = Read(value, "dnsKeySha256")?.GetString();
+            if (digest is not null && !reference.HasValue)
+                throw new InvalidDataException($"{path}/privateKey: A private-key reference is required for dnsKeySha256.");
             if (family == "RSA" ? ((size != -1 || !reference.HasValue) && (size is < 1024 or > 4096)) : size != -1)
                 throw new InvalidDataException($"{path}/keySize: Key size applies only to RSA and must be between 1024 and 4096 bits.");
             ushort rollover = decimal.ToUInt16(Read(value, "rolloverDays")?.GetDecimal() ??
@@ -347,9 +351,19 @@ namespace DnsServerCore.Configuration
                 }
                 if (size != -1 && ((DnssecRsaPrivateKey)imported).KeySize != size)
                     throw new InvalidDataException($"{path}/keySize: The referenced RSA key has a different size.");
+                if (digest is not null && !digest.Equals(GetDnsKeyDigest(imported), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"{path}/dnsKeySha256: The referenced private key does not match the declared DNSKEY digest.");
             }
 
             return new Key(role, algorithm, size, rollover, imported, path, value.TryGetProperty("rolloverDays", out _), Read(value, "publishOnSign")?.GetBoolean() ?? true);
+        }
+
+        private static string GetDnsKeyDigest(DnssecPrivateKey key)
+        {
+            using var wire = new MemoryStream();
+            key.DnsKey.WriteTo(wire);
+            // WriteTo prefixes the DNSKEY RDATA with its two-byte wire length.
+            return Convert.ToHexString(SHA256.HashData(wire.GetBuffer().AsSpan(2, checked((int)wire.Length - 2))));
         }
 
         private static JsonElement? Read(JsonElement value, string property) =>

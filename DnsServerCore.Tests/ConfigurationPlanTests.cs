@@ -3682,17 +3682,31 @@ namespace DnsServerCore.Tests
                 JsonElement keyDeclarations = zone.GetProperty("dnssec").GetProperty("keys");
                 JsonProperty pendingDeclaration = Assert.Single(keyDeclarations.EnumerateObject(), key =>
                     key.Value.TryGetProperty("publishOnSign", out JsonElement publish) && !publish.GetBoolean());
+                string? zskExportInput = null;
                 foreach (JsonProperty key in keyDeclarations.EnumerateObject())
                 {
                     Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
                         path => path.ValueEquals($"/zones/portable.test/dnssec/keys/{key.Name}/privateKey"));
                     string name = key.Value.GetProperty("privateKey").GetProperty("environment").GetString()!;
                     environment.Add(name);
+                    if (key.Name != pendingDeclaration.Name && key.Value.GetProperty("role").ValueEquals("ZoneSigningKey"))
+                        zskExportInput = name;
                     Environment.SetEnvironmentVariable(name, key.Name == pendingDeclaration.Name ? pendingPem :
                         key.Value.GetProperty("role").ValueEquals("KeySigningKey") ? kskPem : zskPem);
                 }
 
                 string exported = $$"""{"schemaVersion":1,"zones":{"portable.test":{{zone.GetRawText()}} } }""";
+                Assert.NotNull(zskExportInput);
+                Environment.SetEnvironmentVariable(zskExportInput, replacement.ExportPkcs8PrivateKeyPem());
+                using (var body = new StringContent(exported, Encoding.UTF8, "application/json"))
+                {
+                    JsonElement wrongKey = await destination.CallAsync("settings/config/plan", destination.AdminToken, body);
+                    Assert.Equal("error", wrongKey.GetProperty("status").GetString());
+                    Assert.Contains("/dnsKeySha256", wrongKey.GetProperty("errorMessage").GetString());
+                    Assert.DoesNotContain("PRIVATE KEY", wrongKey.GetRawText());
+                }
+                Assert.Empty((await destination.QueryAsync("portable.test", DnsResourceRecordType.DNSKEY)).Answer);
+                Environment.SetEnvironmentVariable(zskExportInput, zskPem);
                 revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
                 LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, revision));
                 await destination.RestartAsync();
