@@ -3272,6 +3272,8 @@ namespace DnsServerCore
                     clusterFiles.Add("cluster.config");
                 if (clusterOptions is { OwnershipChanged: true })
                     clusterFiles.Add(ConfigurationClusterOptions.OwnershipFile);
+                if (clusterOptions is { } clusterChange)
+                    clusterFiles.AddRange(clusterChange.AddressRecords.Select(record => Path.Combine("zones", record.Zone + ".zone")).Distinct());
                 DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
                 apps ??= ConfigurationApplications.Prepare(manifest, manager);
                 await ConfigurationApplications.ApplyAsync(manager, apps, ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>

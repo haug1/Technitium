@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 using Xunit;
 
 namespace DnsServerCore.Tests
@@ -24,7 +26,8 @@ namespace DnsServerCore.Tests
             JsonElement first = await ReadStateAsync();
             Assert.Equal("cluster.test", first.GetProperty("clusterDomain").GetString());
             Assert.Equal(120, first.GetProperty("configRefreshIntervalSeconds").GetInt32());
-            Assert.Equal("/cluster/configRefreshSeconds", Assert.Single(first.GetProperty("managedOptionPaths").EnumerateArray()).GetString());
+            Assert.Contains(first.GetProperty("managedOptionPaths").EnumerateArray(), path => path.ValueEquals("/cluster/configRefreshSeconds"));
+            Assert.Contains(first.GetProperty("managedOptionPaths").EnumerateArray(), path => path.ValueEquals("/cluster/node/addresses"));
             JsonElement originalNode = Assert.Single(first.GetProperty("clusterNodes").EnumerateArray());
             Assert.Equal("Primary", originalNode.GetProperty("type").GetString());
             Assert.True(File.Exists(Path.Combine(server.ConfigurationDirectory, "zones", "cluster.test.zone")));
@@ -50,6 +53,54 @@ namespace DnsServerCore.Tests
                 JsonElement state = await server.CallAsync("admin/cluster/state", server.AdminToken);
                 LoopbackWebService.AssertOk(state);
                 return state.GetProperty("response");
+            }
+        }
+
+        [Fact]
+        public async Task PrimaryAddressApplyUpdatesDnsRecordsAndRollsBackOnWriteFailure()
+        {
+            await using var server = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=2.0.192.in-addr.arpa&type=Primary", server.AdminToken));
+
+            const string manifest = """{"schemaVersion":1,"cluster":{"node":{"addresses":["127.0.0.1","192.0.2.10"]}}}""";
+            string blockedFile = Path.Combine(server.ConfigurationDirectory, "cluster.tmp");
+            Directory.CreateDirectory(blockedFile);
+            JsonElement rejected = await ApplyAddressesAsync();
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            var originalAnswer = (await server.QueryAsync("primary.cluster.test", DnsResourceRecordType.A)).Answer;
+            Assert.Contains(originalAnswer, record => record.RDATA.ToString() == "127.0.0.1");
+            Assert.DoesNotContain(originalAnswer, record => record.RDATA.ToString() == "192.0.2.10");
+            Assert.DoesNotContain((await server.QueryAsync("10.2.0.192.in-addr.arpa", DnsResourceRecordType.PTR)).Answer,
+                record => record.Type == DnsResourceRecordType.PTR);
+
+            Directory.Delete(blockedFile);
+            LoopbackWebService.AssertOk(await ApplyAddressesAsync());
+            Assert.Contains((await server.QueryAsync("primary.cluster.test", DnsResourceRecordType.A)).Answer,
+                record => record.RDATA.ToString() == "192.0.2.10");
+            Assert.Contains((await server.QueryAsync("10.2.0.192.in-addr.arpa", DnsResourceRecordType.PTR)).Answer,
+                record => record.Type == DnsResourceRecordType.PTR);
+
+            using var repeatBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement repeat = await server.CallAsync("settings/config/plan", server.AdminToken, repeatBody);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+
+            JsonElement blocked = await server.CallAsync("admin/cluster/updateIpAddress?ipAddresses=127.0.0.1", server.AdminToken);
+            Assert.Equal("error", blocked.GetProperty("status").GetString());
+            Assert.Contains("/cluster/node/addresses", blocked.GetProperty("errorMessage").GetString());
+
+            async Task<JsonElement> ApplyAddressesAsync()
+            {
+                using var previewBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement preview = await server.CallAsync("settings/config/plan", server.AdminToken, previewBody);
+                LoopbackWebService.AssertOk(preview);
+                Assert.Contains(preview.GetProperty("response").GetProperty("changes").EnumerateArray(),
+                    change => change.GetProperty("path").ValueEquals("/cluster/node/addresses"));
+                using var applyBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+                return await server.CallAsync("settings/config/apply", server.AdminToken, applyBody,
+                    preview.GetProperty("response").GetProperty("revision").GetString());
             }
         }
 

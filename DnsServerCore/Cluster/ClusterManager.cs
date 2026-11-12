@@ -1016,6 +1016,63 @@ namespace DnsServerCore.Cluster
 
         }
 
+        internal sealed record AddressRecordChange(string Zone, string Owner, DnsResourceRecordType Type,
+            IReadOnlyList<DnsResourceRecord> Previous, IReadOnlyList<DnsResourceRecord> Desired, DateTime Revision);
+
+        internal AddressRecordChange[] PreparePrimaryAddressRecords(ClusterNode self, IReadOnlyList<IPAddress> desired)
+        {
+            var zones = _dnsWebService.DnsServer.AuthZoneManager;
+            AuthZoneInfo zone = zones.GetAuthZoneInfo(_clusterDomain);
+            if (zone?.Type != AuthZoneType.Primary || zones.GetRecords(zone.Name, self.Name, DnsResourceRecordType.CNAME).Count != 0)
+                throw new InvalidDataException("/cluster/node/addresses: The Primary zone must contain an addressable node name.");
+
+            FindExistingRecordTtlValues(out _, out uint ttl);
+            var changes = new List<AddressRecordChange>();
+            AddForwardRecords(AddressFamily.InterNetwork, DnsResourceRecordType.A);
+            AddForwardRecords(AddressFamily.InterNetworkV6, DnsResourceRecordType.AAAA);
+
+            foreach (IPAddress address in self.IPAddresses.Except(desired).Concat(desired.Except(self.IPAddresses)))
+            {
+                string owner = Zone.GetReverseZone(address, address.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
+                AuthZoneInfo reverse = zones.FindAuthZoneInfo(owner);
+                if (reverse?.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder))
+                    continue;
+
+                IReadOnlyList<DnsResourceRecord> current = zones.GetRecords(reverse.Name, owner, DnsResourceRecordType.PTR);
+                var ptr = new DnsPTRRecordData(self.Name);
+                bool wanted = desired.Contains(address);
+                if (wanted == current.Any(record => record.RDATA.Equals(ptr)))
+                    continue;
+
+                zones.CheckManifestZoneRecords(reverse.Name);
+                IReadOnlyList<DnsResourceRecord> next = wanted
+                    ? [.. current, CreateRecord(owner, DnsResourceRecordType.PTR, current.FirstOrDefault()?.TTL ?? ttl, ptr)]
+                    : current.Where(record => !record.RDATA.Equals(ptr)).ToArray();
+                changes.Add(new AddressRecordChange(reverse.Name, owner, DnsResourceRecordType.PTR, current.ToArray(), next, reverse.LastModified));
+            }
+
+            return changes.ToArray();
+
+            void AddForwardRecords(AddressFamily family, DnsResourceRecordType type)
+            {
+                IReadOnlyList<DnsResourceRecord> current = zones.GetRecords(zone.Name, self.Name, type);
+                DnsResourceRecord[] next = desired.Where(address => address.AddressFamily == family)
+                    .Select(address => CreateRecord(self.Name, type, ttl,
+                        family == AddressFamily.InterNetwork ? new DnsARecordData(address) : new DnsAAAARecordData(address))).ToArray();
+                if (!current.Select(record => record.RDATA).ToHashSet().SetEquals(next.Select(record => record.RDATA)))
+                    changes.Add(new AddressRecordChange(zone.Name, self.Name, type, current.ToArray(), next, zone.LastModified));
+            }
+
+            static DnsResourceRecord CreateRecord(string owner, DnsResourceRecordType type, uint ttl, DnsResourceRecordData data)
+            {
+                var record = new DnsResourceRecord(owner, type, DnsClass.IN, ttl, data);
+                GenericRecordInfo info = record.GetAuthGenericRecordInfo();
+                info.LastModified = DateTime.UtcNow;
+                info.Comments = "Cluster managed record. Do not update or delete.";
+                return record;
+            }
+        }
+
         internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
         {
             if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.OwnershipChanged))
@@ -1030,13 +1087,50 @@ namespace DnsServerCore.Cluster
                     !ConfigurationClusterOptions.SameAddresses(GetSelfNode().IPAddresses, change.CurrentAddresses) || GetManifestOptions() != change.Current || !_managedOptionNames.SequenceEqual(change.CurrentOwnership))
                     throw new InvalidDataException("/cluster: Cluster options changed during apply. Create a new preview.");
 
-                persist(() =>
+                var zones = _dnsWebService.DnsServer.AuthZoneManager;
+                string[] recordZones = change.AddressRecords.Select(record => record.Zone).Distinct().ToArray();
+                int appliedRecords = 0;
+                try
                 {
-                    if (change.ValuesChanged || change.AddressesChanged)
-                        SaveConfigFileInternal(change.ValuesChanged ? change.Desired : null, change.AddressesChanged ? change.DesiredAddresses : null);
-                    if (change.OwnershipChanged)
-                        WriteManifestOwnership(change.DesiredOwnership);
-                });
+                    persist(() =>
+                    {
+                        foreach (AddressRecordChange record in change.AddressRecords)
+                        {
+                            if (zones.GetAuthZoneInfo(record.Zone)?.LastModified != record.Revision)
+                                throw new InvalidDataException("/cluster/node/addresses: An affected zone changed during apply. Create a new preview.");
+                        }
+                        foreach (AddressRecordChange record in change.AddressRecords)
+                        {
+                            appliedRecords++;
+                            ReplaceRecords(record, record.Desired);
+                        }
+                        if (recordZones.Length != 0)
+                            zones.FlushZoneSaves(recordZones);
+                        if (change.ValuesChanged || change.AddressesChanged)
+                            SaveConfigFileInternal(change.ValuesChanged ? change.Desired : null, change.AddressesChanged ? change.DesiredAddresses : null);
+                        if (change.OwnershipChanged)
+                            WriteManifestOwnership(change.DesiredOwnership);
+                    });
+                }
+                catch
+                {
+                    for (int index = appliedRecords - 1; index >= 0; index--)
+                    {
+                        AddressRecordChange record = change.AddressRecords[index];
+                        ReplaceRecords(record, record.Previous);
+                        zones.SaveZoneFile(record.Zone);
+                    }
+                    throw;
+                }
+
+                void ReplaceRecords(AddressRecordChange record, IReadOnlyList<DnsResourceRecord> values)
+                {
+                    if (values.Count == 0)
+                        zones.DeleteRecords(record.Zone, record.Owner, record.Type);
+                    else
+                        zones.SetRecords(record.Zone, values);
+                }
+
                 if (change.ValuesChanged)
                     SetManifestOptions(change.Desired);
                 if (change.AddressesChanged)
@@ -1045,11 +1139,10 @@ namespace DnsServerCore.Cluster
             }
 
             if (change.ValuesChanged)
-            {
                 UpdateHeartbeatTimerForAllClusterNodes();
+            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged))
                 TriggerNotifyAllSecondaryNodes();
-            }
-            if (change.AddressesChanged)
+            else if (change.AddressesChanged)
                 TriggerClusterUpdateForSecondaryNodeChanges();
         }
 
