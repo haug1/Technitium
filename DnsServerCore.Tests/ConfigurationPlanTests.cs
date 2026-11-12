@@ -6002,6 +6002,9 @@ namespace DnsServerCore.Tests
         {
             await using var source = await LoopbackWebService.StartAsync("source.test");
             LoopbackWebService.AssertOk(await source.CallAsync("zones/create?zone=delegated.test&type=Primary", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync("zones/create?zone=empty.test&type=Primary", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "zones/records/delete?zone=empty.test&domain=empty.test&type=NS&nameServer=source.test", source.AdminToken));
             const string declaration = """
                 {"schemaVersion":1,"zones":{"DELEGATED.test.":{"replaceApexNameServers":true,"records":[
                     {"owner":"@","type":"NS","ttl":120,"data":{"zoneFile":"ns1.external.test."}},
@@ -6016,6 +6019,7 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(export);
             JsonElement zones = export.GetProperty("response").GetProperty("manifest").GetProperty("zones");
             Assert.True(zones.GetProperty("delegated.test").GetProperty("replaceApexNameServers").GetBoolean());
+            Assert.True(zones.GetProperty("empty.test").GetProperty("replaceApexNameServers").GetBoolean());
 
             await using var destination = await LoopbackWebService.StartAsync("destination.test");
             string migration = JsonSerializer.Serialize(new { schemaVersion = 1, zones });
@@ -6026,6 +6030,7 @@ namespace DnsServerCore.Tests
             Assert.All(answer, record => Assert.Equal(120u, record.OriginalTtlValue));
             Assert.Equal(new[] { "ns1.external.test", "ns2.external.test" },
                 answer.Select(record => Assert.IsType<DnsNSRecordData>(record.RDATA).NameServer).Order(StringComparer.Ordinal));
+            Assert.Empty((await destination.QueryAsync("empty.test", DnsResourceRecordType.NS)).Answer);
             Assert.Empty((await PreviewAsync(destination, migration)).GetProperty("changes").EnumerateArray());
         }
 

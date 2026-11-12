@@ -736,15 +736,11 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 string zoneName = CanonicalDnsName(zone.Name, zonePath, allowRoot: true);
-                bool hasEnabledApexNs = false;
                 int index = 0;
                 foreach (JsonElement record in records.EnumerateArray())
                 {
                     string recordPath = $"{zonePath}/records/{index++}";
                     (string owner, DnsResourceRecordType type) = ReadZoneRecordIdentity(zoneName, record, recordPath);
-                    if (type == DnsResourceRecordType.NS && owner == zoneName &&
-                        (!record.TryGetProperty("disabled", out JsonElement nsDisabled) || !nsDisabled.GetBoolean()))
-                        hasEnabledApexNs = true;
                     if (type == DnsResourceRecordType.SOA &&
                         (owner != zoneName || record.TryGetProperty("disabled", out JsonElement disabled) && disabled.GetBoolean() ||
                         record.TryGetProperty("expiryTtl", out JsonElement expiry) && expiry.GetDecimal() != 0))
@@ -780,11 +776,7 @@ namespace DnsServerCore.Configuration
                     }
                 }
                 if (replace)
-                {
-                    if (!hasEnabledApexNs)
-                        throw new InvalidDataException($"{zonePath}/replaceApexNameServers: Declare at least one enabled apex NS record.");
                     replacements.Add(zoneName);
-                }
             }
             return replacements;
         }

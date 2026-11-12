@@ -47,8 +47,8 @@ namespace DnsServerCore.Tests
         [InlineData("""{"schemaVersion":1,"dns":{"retryCount":2}}""", "/dns/retryCount", "Unknown setting")]
         [InlineData("""{"schemaVersion":1,"logging":{"logQueries":true,"logQueries":false}}""", "/logging/logQueries", "Duplicate setting")]
         [InlineData("""{"schemaVersion":1,"zones":{"EXAMPLE.test":{},"example.test.":{}}}""", "/zones/example.test.", "Duplicate canonical DNS name")]
-        [InlineData("""{"schemaVersion":1,"zones":{"example.test":{"replaceApexNameServers":true,"records":[]}}}""",
-            "/zones/example.test/replaceApexNameServers", "Declare at least one enabled apex NS record")]
+        [InlineData("""{"schemaVersion":1,"zones":{"example.test":{"replaceApexNameServers":true}}}""",
+            "/zones/example.test/replaceApexNameServers", "an explicit record list are required")]
         [InlineData("""{"schemaVersion":1,"dns":{"tuning":{"clientTimeoutMs":999}}}""", "/dns/tuning/clientTimeoutMs", "outside the supported range")]
         [InlineData("""{"schemaVersion":1,"web":{"tlsEnabled":false,"http3Enabled":true}}""", "/web/http3Enabled", "requires web TLS")]
         [InlineData("""{"schemaVersion":1,"web":{"tlsEnabled":null,"redirectHttpToTls":true}}""", "/web/redirectHttpToTls", "requires web TLS")]

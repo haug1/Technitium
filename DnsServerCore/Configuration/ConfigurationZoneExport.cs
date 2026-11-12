@@ -125,7 +125,7 @@ namespace DnsServerCore.Configuration
                     {
                         var apexNameServers = records.Where(record => record.Type == DnsResourceRecordType.NS &&
                             record.Name.Equals(zone.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
-                        replaceApexNameServers = apexNameServers.Any(record => record.Tag is not GenericRecordInfo { Disabled: true }) &&
+                        replaceApexNameServers = apexNameServers.Length == 0 ||
                             apexNameServers.Any(record => !ConfigurationPlan.IsGeneratedRecord(zone.Name, dns.ServerDomain, record.Name, record.Type, record.RDATA) ||
                                 HasCustomizedNameServer(record, defaultNsTtl));
                     }
