@@ -254,12 +254,15 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void UpdateConfigRefreshTimer(int refreshInterval = CONFIG_REFRESH_TIMER_INTERVAL)
+        private void UpdateConfigRefreshTimer(int refreshInterval = CONFIG_REFRESH_TIMER_INTERVAL, bool preservePendingRefresh = false)
         {
             //ensure that the new refresh interval is applied using lock
             _configRefreshLock.Wait();
             try
             {
+                if (preservePendingRefresh && _configRefreshTimerTriggered)
+                    return;
+
                 if (ClusterInitialized && (GetSelfNode().Type == ClusterNodeType.Secondary))
                     _configRefreshTimer.Change(refreshInterval, Timeout.Infinite); //start config refresh timer only for secondary nodes
                 else
@@ -867,13 +870,16 @@ namespace DnsServerCore.Cluster
             return Convert.ToHexString(SHA256.HashData(payload));
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
 
             if (GetSelfNode().Type != ClusterNodeType.Primary)
                 throw new DnsServerException("Failed to add Secondary node: only a Primary node can add a Secondary node to the Cluster.");
+
+            if (_dnsWebService.DnsServer.BlockListZoneManager.HasManagedSettings && !supportsDeclarativeBlockLists)
+                throw new DnsServerException("/blocklists: The Secondary must support declarative blocklist settings before joining.");
 
             string secondaryNodeDomain = secondaryNodeUrl.Host.ToLowerInvariant();
 
@@ -892,7 +898,8 @@ namespace DnsServerCore.Cluster
             //add secondary node to cluster nodes
             ClusterNode secondaryNode = new ClusterNode(this, secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, ClusterNodeType.Secondary, ClusterNodeState.Unknown)
             {
-                SupportsDeclarativeClusterOptions = supportsDeclarativeOptions
+                SupportsDeclarativeClusterOptions = supportsDeclarativeOptions,
+                SupportsDeclarativeBlockLists = supportsDeclarativeBlockLists
             };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
@@ -1253,6 +1260,17 @@ namespace DnsServerCore.Cluster
                 info.Comments = "Cluster managed record. Do not update or delete.";
                 return record;
             }
+        }
+
+        internal int[] CheckDeclarativeBlockListPeers()
+        {
+            var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id).ToArray();
+            foreach (ClusterNode peer in peers)
+            {
+                if (!peer.SupportsDeclarativeBlockLists)
+                    throw new InvalidDataException($"/blocklists: Node '{peer.Name}' has not advertised support for declarative blocklist settings.");
+            }
+            return peers.Select(peer => peer.Id).ToArray();
         }
 
         internal int[] CheckDeclarativeIntervalPeers()
@@ -1835,7 +1853,7 @@ namespace DnsServerCore.Cluster
 
                 //join cluster
                 primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
-                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, cancellationToken);
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, cancellationToken);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);
@@ -2475,7 +2493,7 @@ namespace DnsServerCore.Cluster
             if (current.HeartbeatRefresh != desired.HeartbeatRefresh)
                 UpdateHeartbeatTimerForAllClusterNodes();
             if (rescheduleRefresh && current.ConfigRefresh != desired.ConfigRefresh)
-                UpdateConfigRefreshTimer(desired.ConfigRefresh * 1000);
+                UpdateConfigRefreshTimer(desired.ConfigRefresh * 1000, preservePendingRefresh: true);
         }
 
         private static string[] MergePrimaryIntervalOwnership(ClusterInfo primary, string[] local)

@@ -62,6 +62,7 @@ namespace DnsServerCore
                 jsonWriter.WriteString("dnsServerDomain", _dnsWebService._dnsServer.ServerDomain);
                 jsonWriter.WriteBoolean("clusterInitialized", _dnsWebService._clusterManager.ClusterInitialized);
                 jsonWriter.WriteBoolean("supportsDeclarativeClusterOptions", true);
+                jsonWriter.WriteBoolean("supportsDeclarativeBlockLists", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeClusterHandoff", true);
 
                 if (_dnsWebService._clusterManager.ClusterInitialized)
@@ -327,8 +328,9 @@ namespace DnsServerCore
                 X509Certificate2 secondaryNodeCertificate = X509CertificateLoader.LoadCertificate(Base64Url.DecodeFromChars(request.GetQueryOrForm("secondaryNodeCertificate")));
 
                 bool supportsDeclarativeOptions = request.GetQueryOrForm("supportsDeclarativeClusterOptions", bool.Parse, false);
+                bool supportsDeclarativeBlockLists = request.GetQueryOrForm("supportsDeclarativeBlockLists", bool.Parse, false);
                 ClusterNode secondaryNode = _dnsWebService._clusterManager.JoinCluster(secondaryNodeId, secondaryNodeUrl,
-                    secondaryNodeIpAddresses, secondaryNodeCertificate, supportsDeclarativeOptions);
+                    secondaryNodeIpAddresses, secondaryNodeCertificate, supportsDeclarativeOptions, supportsDeclarativeBlockLists);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Secondary node '" + secondaryNode.ToString() + "' joined the Cluster (" + _dnsWebService._clusterManager.ClusterDomain + ") successfully.");
 

@@ -1,6 +1,7 @@
 """Check cluster intervals across two builds or verify same-build propagation."""
 
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -72,7 +73,7 @@ class Node:
         with HTTP.open(request, timeout=10) as response:
             return json.load(response)
 
-    def start(self):
+    def start(self, release_seed=True):
         self.token = None
         env = {name: value for name, value in os.environ.items() if not name.startswith("DNS_SERVER_")}
         env["DNS_SERVER_ADMIN_PASSWORD"] = self.password
@@ -92,7 +93,7 @@ class Node:
                 time.sleep(0.2)
         else:
             raise RuntimeError(f"Server failed to start. Inspect {self.folder / 'console.log'}")
-        if self.manifest.exists():
+        if release_seed and self.manifest.exists():
             revision = ok(self.call("settings/config/plan", manifest=EMPTY_MANIFEST))["revision"]
             ok(self.call("settings/config/apply", manifest=EMPTY_MANIFEST, revision=revision))
             self.manifest.unlink()
@@ -131,6 +132,8 @@ def verify(current, previous, folder, propagation, graceful):
         }))
         assert initial["supportsDeclarativeClusterOptions"] is True
         revision = ok(primary.call("settings/config/plan", manifest=INTERVAL_MANIFEST))["revision"]
+        blocklist_manifest = {"schemaVersion": 1, "blocklists": {"updateIntervalHours": 0}}
+        blocklist_revision = ok(primary.call("settings/config/plan", manifest=blocklist_manifest))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -148,6 +151,9 @@ def verify(current, previous, folder, propagation, graceful):
         ):
             assert rejected["status"] == "error", rejected
             assert "has not advertised support" in rejected["errorMessage"], rejected
+        blocked = primary.call("settings/config/apply", manifest=blocklist_manifest, revision=blocklist_revision)
+        assert blocked["status"] == "error" and "declarative blocklist settings" in blocked["errorMessage"], blocked
+        assert ok(primary.call("settings/get"))["blockListUpdateIntervalHours"] == 24
         for node in (primary, secondary):
             state = ok(node.call("admin/cluster/state"))
             assert state["configRefreshIntervalSeconds"] == 900, state
@@ -328,6 +334,70 @@ def verify_propagation(primary, secondary, graceful):
                  "the Primary to publish the Secondary replacement certificate")
     finally:
         donor.stop()
+
+    source = primary.folder.parent / "blocklist.txt"
+    source.write_text("blocked.cluster-test.example\n", encoding="utf-8")
+    blocklists = {"schemaVersion": 1, "cluster": {"configRefreshSeconds": 130, "configRetrySeconds": 30},
+                  "blocklists": {"sources": [source.as_uri()], "updateIntervalHours": 0}}
+
+    def blocklist_plan():
+        response = primary.call("settings/config/plan", manifest=blocklists)
+        if response["status"] == "ok":
+            return ok(response)
+        if "declarative blocklist settings" not in response["errorMessage"]:
+            raise RuntimeError(response["errorMessage"])
+        return None
+
+    plan = wait_for(blocklist_plan, "the Secondary to advertise blocklist support")
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "blocklists": blocklists["blocklists"]})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+    ok(primary.call("settings/config/apply", manifest=blocklists, revision=plan["revision"]))
+
+    def secondary_blocklists_match(sources, interval):
+        state = ok(secondary.call("settings/get"))
+        return (state["blockListUrls"] == sources and state["blockListUpdateIntervalHours"] == interval
+                and "/blocklists/sources" in state["managedSettings"]
+                and "/blocklists/updateIntervalHours" in state["managedSettings"])
+
+    wait_for(lambda: secondary_blocklists_match([source.as_uri()], 0),
+             "the Secondary to receive the sources, schedule, and blocklist ownership")
+    wait_for(lambda: log_message_count(secondary, "DNS Server read block list file (1 domain(s) blocked) from: local file") > 0,
+             "the Secondary to load its managed local blocklist with automatic updates disabled")
+    primary.stop()
+    primary.manifest.write_text(json.dumps(blocklists), encoding="utf-8")
+    primary.start(release_seed=False)
+    primary.manifest.unlink()
+    persisted = ok(primary.call("settings/get"))
+    assert persisted["blockListUrls"] == [source.as_uri()] and persisted["blockListUpdateIntervalHours"] == 0
+    assert "/blocklists/sources" in persisted["managedSettings"]
+    rejected = primary.call("admin/cluster/primary/join", form={
+        "secondaryNodeId": 2147483647, "secondaryNodeUrl": "https://legacy.cluster.test:53443/",
+        "secondaryNodeIpAddresses": "127.0.0.1",
+        "secondaryNodeCertificate": base64.urlsafe_b64encode(ssl.PEM_cert_to_DER_cert(primary_certificate)).decode().rstrip("="),
+    })
+    assert rejected["status"] == "error" and "before joining" in rejected["errorMessage"], rejected
+    local_web = {"schemaVersion": 1, "web": web["web"]}
+    revision = ok(secondary.call("settings/config/plan", manifest=local_web))["revision"]
+    ok(secondary.call("settings/config/apply", manifest=local_web, revision=revision))
+    assert secondary_blocklists_match([source.as_uri()], 0)
+    rejected = secondary.call("settings/set?blockListUpdateIntervalHours=24")
+    assert rejected["status"] == "error" and "/blocklists/updateIntervalHours" in rejected["errorMessage"], rejected
+
+    blocklists["blocklists"] = {"sources": [], "updateIntervalHours": 12}
+    plan = wait_for(blocklist_plan, "blocklist support before the second update")
+    ok(primary.call("settings/config/apply", manifest=blocklists, revision=plan["revision"]))
+    wait_for(lambda: secondary_blocklists_match(None, 12), "the Secondary to receive the next managed update")
+
+    release = {"schemaVersion": 1, "cluster": blocklists["cluster"]}
+    plan = ok(primary.call("settings/config/plan", manifest=release))
+    ok(primary.call("settings/config/apply", manifest=release, revision=plan["revision"]))
+
+    def secondary_released_blocklists():
+        state = ok(secondary.call("settings/get"))
+        return (state["blockListUpdateIntervalHours"] == 12 and
+                not any(path.startswith("/blocklists/") for path in state["managedSettings"]))
+
+    wait_for(secondary_released_blocklists, "the Secondary to release ownership and retain the last interval")
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)

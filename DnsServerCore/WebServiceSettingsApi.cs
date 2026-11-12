@@ -1098,6 +1098,15 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    if (manifest is not null)
+                    {
+                        int[] blockListPeers = ConfigurationPlan.CheckClusterBlockListSupport(manifest, _dnsWebService._clusterManager);
+                        if (blockListPeers.Length != 0)
+                        {
+                            writer.WritePropertyName("blockListPeers");
+                            JsonSerializer.Serialize(writer, blockListPeers);
+                        }
+                    }
                     if ((preparedBootstrap ?? PrepareLiveBootstrap(manifest, sessionUser)) is { } bootstrap)
                     {
                         var records = bootstrap is ConfigurationClusterOptions.PrimaryBootstrap primary

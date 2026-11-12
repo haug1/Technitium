@@ -1004,6 +1004,7 @@ namespace DnsServerCore
                 }
 
                 if (isConfigTransfer && blockLists && _dnsServer.BlockListZoneManager.HasManagedSettings &&
+                    !_dnsServer.BlockListZoneManager.ManifestOwnershipFromPrimary &&
                     backupZip.GetEntry("blocklist.config") is ZipArchiveEntry managedBlockListEntry)
                 {
                     using Stream blockListConfiguration = managedBlockListEntry.Open();
@@ -3245,6 +3246,11 @@ namespace DnsServerCore
         private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null, ConfigurationSso.Settings sso = null, ConfigurationApplications.Entry[] apps = null, X509Certificate2 previousClusterCertificate = null)
         {
             string domain = manifest.GetServerDomain();
+            bool clustered = _clusterManager.ClusterInitialized;
+            bool secondary = clustered && _clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
+            var blockLists = _dnsServer.BlockListZoneManager;
+            var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
+                blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval);
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
                 ((webAddressesChanged && !_clusterManager.ClusterInitialized) || (domain is not null && !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase)));
             Action writeCertificate = regenerateCertificate ? () => CheckAndLoadSelfSignedCertificate(true, true, domain ?? _dnsServer.ServerDomain) : null;
@@ -3269,6 +3275,12 @@ namespace DnsServerCore
                 var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager,
                     webCertificate is { Changed: true }, previousClusterCertificate, WebServiceTlsCertificate);
                 Action writeCluster = null;
+                int[] blockListPeers = ConfigurationPlan.CheckClusterBlockListSupport(manifest, _clusterManager);
+                Action checkBlockListPeers = blockListPeers.Length == 0 ? null : () =>
+                {
+                    if (!_clusterManager.CheckDeclarativeBlockListPeers().SequenceEqual(blockListPeers))
+                        throw new InvalidDataException("/blocklists: Cluster membership changed during apply. Create a new preview.");
+                };
                 var clusterFiles = new List<string>(2);
                 if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
                     clusterFiles.Add("cluster.config");
@@ -3282,12 +3294,12 @@ namespace DnsServerCore
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
                         persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
                         {
                             writeCluster = write;
                             zones.Commit(persist);
-                        }))));
+                        }), preserveClusterBlockLists: secondary)));
             }
             catch
             {
@@ -3300,6 +3312,10 @@ namespace DnsServerCore
 
                 throw;
             }
+
+            if (clustered && !secondary && previousBlockLists != (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
+                blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval))
+                _clusterManager.TriggerNotifyAllSecondaryNodesIfPrimarySelfNode();
 
             if (webCertificate is { Changed: true })
             {

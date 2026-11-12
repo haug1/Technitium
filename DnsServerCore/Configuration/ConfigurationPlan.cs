@@ -294,6 +294,8 @@ namespace DnsServerCore.Configuration
                     proxyPassword.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestClusterOptions", out JsonElement clusterOptions))
                     clusterOptions.WriteTo(writer);
+                if (currentSettings.TryGetProperty("blockListPeers", out JsonElement blockListPeers))
+                    blockListPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -347,7 +349,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeResources, string[] resourceFiles, Action<Action> commitZones)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeResources, string[] resourceFiles, Action<Action> commitZones, bool preserveClusterBlockLists)
         {
             CheckApplySupport(manifest);
 
@@ -360,7 +362,7 @@ namespace DnsServerCore.Configuration
                 ? GetManifestLogFolder(folderValue, log) : null;
 
             return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, tsig, alreadyActive, listenerTuningStaged, dnsBindingsStaged, manifest, writeDnsConfig =>
-                dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
+                ApplyBlockLists(writeBlockListConfig =>
                     dns.AllowedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "allowZones"), writeAllowed =>
                     dns.BlockedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "blockZones"), writeBlocked =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => commitZones(() => log.ApplyManifestSettings(
@@ -370,6 +372,14 @@ namespace DnsServerCore.Configuration
                 localTime?.GetBoolean(),
                 folder,
                 writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked, writeResources, resourceFiles)))))));
+
+            void ApplyBlockLists(Action<Action> persist)
+            {
+                if (preserveClusterBlockLists)
+                    persist(null);
+                else
+                    dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), persist);
+            }
         }
 
         internal static DnsServer.DnsBindings GetDnsBindings(ConfigurationManifest manifest)
@@ -869,10 +879,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             if (GetAuthoritativeDefaults(manifest).HasValues)
                 throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
-            if (GetBlockListSources(manifest) is not null)
-                throw new InvalidDataException("/blocklists/sources: Applying blocklist sources to a cluster is not implemented.");
-            if (GetBlockListInterval(manifest).HasValue)
-                throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
+            CheckClusterBlockListSupport(manifest, cluster);
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
             if (GetDnsTuning(manifest) != default)
@@ -891,6 +898,26 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/clientSubnet: Applying EDNS Client Subnet settings to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
+        }
+
+        internal static int[] CheckClusterBlockListSupport(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (!cluster.ClusterInitialized)
+                return [];
+
+            IReadOnlyList<string> sources = GetBlockListSources(manifest);
+            int? interval = GetBlockListInterval(manifest);
+            if (sources is null && !interval.HasValue)
+                return [];
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new InvalidDataException("/blocklists: Only the Primary can apply cluster blocklist settings.");
+
+            var current = cluster.DnsWebService.DnsServer.BlockListZoneManager;
+            bool changes = current.ManifestOwnsSources != (sources is not null) ||
+                current.ManifestOwnsUpdateInterval != interval.HasValue ||
+                sources is not null && !sources.SequenceEqual(current.BlockListUrls, StringComparer.Ordinal) ||
+                interval.HasValue && interval.Value != current.BlockListUpdateIntervalHours;
+            return changes ? cluster.CheckDeclarativeBlockListPeers() : [];
         }
 
         internal static void CheckClusterWebListenerSupport(ConfigurationManifest manifest, ClusterManager cluster)

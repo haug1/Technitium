@@ -63,6 +63,7 @@ namespace DnsServerCore.Dns.ZoneManagers
         int _blockListUpdateIntervalHours = 24;
         bool _manifestOwnsUpdateInterval;
         bool _manifestOwnsSources;
+        bool _manifestOwnershipFromPrimary;
         const int BLOCK_LIST_UPDATE_TIMER_INITIAL_INTERVAL = 5000;
         const int BLOCK_LIST_UPDATE_TIMER_PERIODIC_INTERVAL = 900000;
 
@@ -232,6 +233,7 @@ namespace DnsServerCore.Dns.ZoneManagers
         internal bool HasManagedSettings => _manifestOwnsUpdateInterval || _manifestOwnsSources;
         internal bool ManifestOwnsUpdateInterval => _manifestOwnsUpdateInterval;
         internal bool ManifestOwnsSources => _manifestOwnsSources;
+        internal bool ManifestOwnershipFromPrimary => _manifestOwnershipFromPrimary;
 
         internal void CheckManifestSources(IReadOnlyList<string> sources)
         {
@@ -260,10 +262,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                 int previous = _blockListUpdateIntervalHours;
                 bool previouslyOwned = _manifestOwnsUpdateInterval;
                 bool previouslyOwnedSources = _manifestOwnsSources;
+                bool previouslyInherited = _manifestOwnershipFromPrimary;
                 int effective = interval ?? previous;
                 bool sourcesChanged = sources is not null && !sources.SequenceEqual(_blockListUrls, StringComparer.Ordinal);
                 if (effective == previous && interval.HasValue == previouslyOwned &&
-                    !sourcesChanged && (sources is not null) == previouslyOwnedSources)
+                    !sourcesChanged && (sources is not null) == previouslyOwnedSources && !previouslyInherited)
                 {
                     persist(null);
                     return;
@@ -272,6 +275,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 _blockListUpdateIntervalHours = effective;
                 _manifestOwnsUpdateInterval = interval.HasValue;
                 _manifestOwnsSources = sources is not null;
+                _manifestOwnershipFromPrimary = false;
                 try
                 {
                     persist(() => SaveConfigFileInternal(sourcesChanged ? sources : null));
@@ -283,6 +287,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     _blockListUpdateIntervalHours = previous;
                     _manifestOwnsUpdateInterval = previouslyOwned;
                     _manifestOwnsSources = previouslyOwnedSources;
+                    _manifestOwnershipFromPrimary = previouslyInherited;
                     throw;
                 }
 
@@ -319,19 +324,22 @@ namespace DnsServerCore.Dns.ZoneManagers
             var (blockListUrls, interval) = ReadConfigPrefix(new BinaryReader(s));
             _blockListUpdateIntervalHours = interval;
             DateTime blockListLastUpdatedOn = s.ReadDateTime();
-            if (readOwnership)
+            if (readOwnership || (isConfigTransfer && (!HasManagedSettings || _manifestOwnershipFromPrimary)))
             {
                 int ownership = s.ReadByte();
                 _manifestOwnsUpdateInterval = ownership >= 0 && (ownership & 1) != 0;
                 _manifestOwnsSources = ownership >= 0 && (ownership & 2) != 0;
+                _manifestOwnershipFromPrimary = HasManagedSettings && (isConfigTransfer || (ownership & 4) != 0);
             }
 
             if (!isConfigTransfer)
                 _blockListLastUpdatedOn = blockListLastUpdatedOn;
 
+            bool reloadManagedSources = isConfigTransfer && _manifestOwnershipFromPrimary &&
+                !blockListUrls.SequenceEqual(_blockListUrls, StringComparer.Ordinal);
             ApplyBlockListUrls(blockListUrls);
             ApplyBlockListUpdateInterval();
-            if (!isConfigTransfer && blockListUrls.Length > 0)
+            if ((!isConfigTransfer || reloadManagedSources) && blockListUrls.Length > 0)
                 QueueLoadBlockLists();
         }
 
@@ -350,7 +358,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             s.WriteDateTime(_blockListLastUpdatedOn);
             // Existing version 1 readers stop after the timestamp.
             if (HasManagedSettings)
-                bW.Write((byte)((_manifestOwnsUpdateInterval ? 1 : 0) | (_manifestOwnsSources ? 2 : 0)));
+                bW.Write((byte)((_manifestOwnsUpdateInterval ? 1 : 0) | (_manifestOwnsSources ? 2 : 0) | (_manifestOwnershipFromPrimary ? 4 : 0)));
         }
 
         #endregion

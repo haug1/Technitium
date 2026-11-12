@@ -5305,6 +5305,8 @@ Outbound proxy preview compares the effective proxy and forwarder configuration.
 
 Cluster nodes can preview and apply local web listener settings. Candidate `web.localAddresses` must cover the current and declared cluster addresses. Web TLS must stay enabled. A cluster node can declare a fixed `web.tlsPort`, which requires Administration Modify permission when its advertised URL changes. A Primary updates the signed TLSA records as part of the same apply when its HTTPS port or certificate changes. A Secondary publishes its replacement certificate after commit.
 
+On a cluster, only the Primary can declare blocklist sources and update schedules. Changes to declared blocklist settings or ownership require all members to advertise `supportsDeclarativeBlockLists`.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
