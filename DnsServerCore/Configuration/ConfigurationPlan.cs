@@ -1573,7 +1573,7 @@ namespace DnsServerCore.Configuration
                 if (isApp && !appOwners.Add(owner))
                     throw new InvalidDataException($"{recordPath}: Declare at most one APP record per owner.");
                 declaresSoa |= isSoa;
-                if (!isSoa && IsGeneratedRecord(zoneName, serverDomain, owner, type, rdata))
+                if (IsSigningRecord(type))
                     throw new InvalidDataException($"{recordPath}: This record is managed by the zone lifecycle.");
                 bool? autoIpv4 = record.TryGetProperty("autoIpv4Hint", out JsonElement ipv4) ? ipv4.GetBoolean() : null;
                 bool? autoIpv6 = record.TryGetProperty("autoIpv6Hint", out JsonElement ipv6) ? ipv6.GetBoolean() : null;

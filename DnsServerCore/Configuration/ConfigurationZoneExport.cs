@@ -119,7 +119,7 @@ namespace DnsServerCore.Configuration
                 {
                     var records = new List<DnsResourceRecord>();
                     dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);
-                    JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, path, records, missingInputs);
+                    JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, dns.AuthZoneManager.DefaultNsRecordTtl, path, records, missingInputs);
                     if (exportedRecords is not null)
                         declaration.Add("records", exportedRecords);
                 }
@@ -128,18 +128,23 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
+        private static JsonArray ExportRecords(string zone, string serverDomain, uint defaultNsTtl, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
             var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
                 JsonArray Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, List<string> MissingInputs)>();
             foreach (DnsResourceRecord record in records)
             {
+                var info = record.Tag as GenericRecordInfo;
+                bool customizedApexNs = record.Type == DnsResourceRecordType.NS &&
+                    (record.OriginalTtlValue != defaultNsTtl || info?.Disabled == true ||
+                        !string.IsNullOrEmpty(info?.Comments) || info?.ExpiryTtl > 0 ||
+                        info is NSRecordInfo { GlueRecords.Count: > 0 });
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
                     (record.Type != DnsResourceRecordType.SOA &&
+                        !customizedApexNs &&
                         ConfigurationPlan.IsGeneratedRecord(zone, serverDomain, record.Name, record.Type, record.RDATA)))
                     continue;
 
-                var info = record.Tag as GenericRecordInfo;
                 if (record.Class != DnsClass.IN)
                 {
                     missingInputs.Add(path + "/records");
