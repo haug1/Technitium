@@ -889,6 +889,10 @@ namespace DnsServerCore
                             !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Delete))
                             throw new DnsWebServiceException("Access was denied.");
 
+                        if (exists && currentZone.TryGetProperty("dnssecChange", out _) &&
+                            !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Delete))
+                            throw new DnsWebServiceException("Access was denied.");
+
                         PermissionFlag flag = deletion ? PermissionFlag.Delete : PermissionFlag.Modify;
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, flag) ||
                             (exists && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, flag)))
@@ -1420,6 +1424,17 @@ namespace DnsServerCore
                         }
                         if (type == AuthZoneType.Catalog)
                             ConfigurationZonePolicies.Prepare(declaration.Value, name, zonePath, zone);
+                        var signing = ConfigurationZoneDnssec.Prepare(manifest, declaration.Value, type, zone, zonePath);
+                        if (signing is not null)
+                        {
+                            writer.WriteBoolean("dnssecChange", true);
+                            if (zone is not null)
+                                writer.WriteString("dnssecRevision", zone.LastModified);
+                            writer.WriteStartArray("dnssecKeyIdentities");
+                            foreach (var key in signing.Keys.Where(key => key.Imported is not null))
+                                writer.WriteStringValue(Convert.ToHexString(SHA256.HashData(key.Imported.DnsKey.PublicKey.RawPublicKey)));
+                            writer.WriteEndArray();
+                        }
                         var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, keys, zonePath);
                         if (primary != default)
                         {
@@ -1446,6 +1461,8 @@ namespace DnsServerCore
                             _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
                             _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"),
                             type == AuthZoneType.Forwarder);
+                        if (zone?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned } && edits.Any(edit => edit.Kind.HasValue))
+                            throw new InvalidDataException($"{zonePath}/records: Applying records requires an unsigned primary zone.");
                         writer.WriteStartArray("recordChanges");
                         foreach (var edit in edits)
                         {

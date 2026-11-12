@@ -688,6 +688,12 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
+        internal void ActivateManifestSigning(PrimaryZone staged)
+        {
+            _dnssecPrivateKeys = staged._dnssecPrivateKeys;
+            UpdateDnssecStatus();
+        }
+
         public void UnsignZone()
         {
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)

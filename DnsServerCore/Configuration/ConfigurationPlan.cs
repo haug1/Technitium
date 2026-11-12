@@ -1245,7 +1245,7 @@ namespace DnsServerCore.Configuration
                             }
                             continue;
                         }
-                        if (field.Name is "enabled" or "records" or "permissions" or "primary" or "catalog" ||
+                        if (field.Name is "enabled" or "records" or "permissions" or "primary" or "catalog" or "dnssec" ||
                             (field.Name == "type" && field.Value.GetString() is "Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "Catalog" or "SecondaryCatalog" or "Stub"))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
@@ -1430,7 +1430,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled" or "records" or "permissions" or "primary" or "catalog") && !ConfigurationZonePolicies.IsPolicy(field.Name))
+                    if (field.Name is not ("type" or "enabled" or "records" or "permissions" or "primary" or "catalog" or "dnssec") && !ConfigurationZonePolicies.IsPolicy(field.Name))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 
@@ -1465,6 +1465,9 @@ namespace DnsServerCore.Configuration
                     foreach (JsonElement field in primaryChanges.EnumerateArray())
                         changes.Add(new ConfigurationChange($"{path}/primary/{field.GetString()}", ConfigurationChangeKind.Update, false));
                 }
+
+                if (current.TryGetProperty("dnssecChange", out _))
+                    changes.Add(new ConfigurationChange(path + "/dnssec", ConfigurationChangeKind.Update, false));
 
                 if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
                 {

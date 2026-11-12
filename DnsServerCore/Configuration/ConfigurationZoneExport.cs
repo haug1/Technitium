@@ -28,7 +28,7 @@ namespace DnsServerCore.Configuration
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
                 if (isClusterInfrastructure(zone.Name) ||
-                    (zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) &&
+                    (zone.ApexZone is not (PrimaryZone or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
                     (zone.CatalogZoneName is string catalog && (!AuthZoneManager.SupportsManifestCatalogMembership(zone.Type) ||
                         isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog)))
@@ -104,6 +104,9 @@ namespace DnsServerCore.Configuration
                     missingInputs.Add(path + "/updates/securityPolicies");
                 else
                     declaration["updates"].AsObject()["securityPolicies"] = ConfigurationZoneUpdatePolicies.Write(zone.UpdateSecurityPolicies);
+
+                if (zone.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned })
+                    declaration["dnssec"] = ConfigurationZoneDnssec.Export(zone, path, missingInputs);
 
                 if (getPermission?.Invoke(zone.Name) is Permission permission)
                     declaration["permissions"] = ConfigurationPermissions.ExportGrants(permission);

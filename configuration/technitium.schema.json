@@ -946,8 +946,8 @@
               "additionalProperties": false,
               "properties": {
                 "type": {"anyOf": [{"enum": ["NSEC", "NSEC3"]}, {"type": "null"}]},
-                "iterations": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
-                "saltLength": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 255}, {"type": "null"}]}
+                "iterations": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 50}, {"type": "null"}]},
+                "saltLength": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 32}, {"type": "null"}]}
               }
             },
             "keys": {
