@@ -1248,7 +1248,7 @@ namespace DnsServerCore.Dns.Zones
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("The zone must be signed.");
 
-            RemoveGeneratedPrivateKey(keyTag);
+            _dnsServer.AuthZoneManager.SerializeDnssecKeyChanges(() => RemoveGeneratedPrivateKey(keyTag));
         }
 
         internal void RemoveGeneratedPrivateKey(ushort keyTag)
@@ -1265,7 +1265,10 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
-        public void PublishAllGeneratedKeys()
+        public void PublishAllGeneratedKeys() =>
+            _dnsServer.AuthZoneManager.SerializeDnssecKeyChanges(PublishGeneratedKeys);
+
+        private void PublishGeneratedKeys()
         {
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("The zone must be signed.");
@@ -1403,7 +1406,10 @@ namespace DnsServerCore.Dns.Zones
             privateKey.SetState(DnssecPrivateKeyState.Active);
         }
 
-        public void RolloverDnsKey(ushort keyTag)
+        public void RolloverDnsKey(ushort keyTag) =>
+            _dnsServer.AuthZoneManager.SerializeDnssecKeyChanges(() => RolloverDnsKeyCore(keyTag));
+
+        private void RolloverDnsKeyCore(ushort keyTag)
         {
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("The zone must be signed.");
@@ -1450,7 +1456,7 @@ namespace DnsServerCore.Dns.Zones
                     throw new NotSupportedException("DNSSEC algorithm is not supported: " + privateKey.Algorithm.ToString());
             }
 
-            PublishAllGeneratedKeys();
+            PublishGeneratedKeys();
             privateKey.SetToRetire();
         }
 

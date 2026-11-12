@@ -309,6 +309,12 @@ namespace DnsServerCore.Dns.ZoneManagers
             _dnsServer.LogManager.Write("Saved zone file for domain: " + (zoneName == "" ? "<root>" : zoneName));
         }
 
+        internal void SerializeDnssecKeyChanges(Action change)
+        {
+            lock (_saveLock)
+                change();
+        }
+
         public void SaveZoneFile(string zoneName)
         {
             zoneName = zoneName.ToLowerInvariant();

@@ -3411,6 +3411,53 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ConcurrentDnssecPublicationAndManifestRemovalKeepZoneFileConsistent()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "signing-race.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256", server.AdminToken));
+            const string add = """
+                {"schemaVersion":1,"zones":{"signing-race.test":{"dnssec":{"keys":{
+                    "next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P384"}
+                }}}}}
+                """;
+            string revision = (await PreviewAsync(server, add)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, add, revision));
+            int tag = Assert.Single((await ReadKeyMetadataAsync()).EnumerateArray(),
+                key => key.GetProperty("state").ValueEquals("Generated")).GetProperty("keyTag").GetInt32();
+            string remove = $$"""{"schemaVersion":1,"zones":{"signing-race.test":{"dnssec":{"keys":{"{{tag}}":null} } } } }""";
+            revision = (await PreviewAsync(server, remove)).GetProperty("revision").GetString()!;
+
+            Task<JsonElement> apply = ApplyAsync(server, remove, revision);
+            Task<JsonElement> publish = server.CallAsync($"zones/dnssec/properties/publishAllPrivateKeys?zone={name}", server.AdminToken);
+            await Task.WhenAll(apply, publish);
+            bool removed = (await apply).GetProperty("status").ValueEquals("ok");
+            bool published = (await publish).GetProperty("status").ValueEquals("ok");
+            Assert.NotEqual(removed, published);
+
+            await AssertConsistentAsync();
+            await server.RestartAsync();
+            await AssertConsistentAsync();
+
+            async Task<JsonElement> ReadKeyMetadataAsync()
+            {
+                JsonElement result = await server.CallAsync($"zones/dnssec/properties/get?zone={name}", server.AdminToken);
+                LoopbackWebService.AssertOk(result);
+                return result.GetProperty("response").GetProperty("dnssecPrivateKeys");
+            }
+
+            async Task AssertConsistentAsync()
+            {
+                var metadata = await ReadKeyMetadataAsync();
+                var keys = (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer;
+                Assert.Equal(published, metadata.EnumerateArray().Any(key => key.GetProperty("keyTag").GetInt32() == tag));
+                Assert.Equal(published, keys.Any(record => record.RDATA is DnsDNSKEYRecordData key && key.ComputedKeyTag == tag));
+            }
+        }
+
+        [Fact]
         public async Task ManifestUpdatesSigningKeyRolloverWithoutChangingTheKeyOrSoaSerial()
         {
             await using var server = await LoopbackWebService.StartAsync();
