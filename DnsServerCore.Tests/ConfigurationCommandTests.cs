@@ -32,6 +32,14 @@ namespace DnsServerCore.Tests
 
             Assert.Contains("references are valid", (await RunAsync(source, "validate", manifest)).Output);
             await ApplyAsync(source, manifest);
+            const string password = "fixture-migration-reader-password";
+            using (var user = new FormUrlEncodedContent([new("user", "migration-reader"), new("pass", password)]))
+                LoopbackWebService.AssertOk(await source.CallAsync("admin/users/create", source.AdminToken, user));
+            LoopbackWebService.AssertOk(await source.CallAsync("admin/groups/create?group=MigrationReaders", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "admin/groups/set?group=MigrationReaders&members=migration-reader", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "admin/permissions/set?section=Settings&groupPermissions=MigrationReaders%7Ctrue%7Cfalse%7Cfalse", source.AdminToken));
             const string keyName = "cli-key.test";
             string secret = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
             LoopbackWebService.AssertOk(await source.CallAsync(
@@ -42,26 +50,38 @@ namespace DnsServerCore.Tests
             Assert.Contains("Supply separately /dns/tsigKeys/cli-key.test/secret", firstExport.Error);
             Assert.DoesNotContain(secret, firstExport.Output);
             Assert.DoesNotContain(secret, firstExport.Error);
+            Assert.Contains("Supply separately /auth/users/migration-reader/password", firstExport.Error);
+            Assert.DoesNotContain(password, firstExport.Output);
+            Assert.DoesNotContain(password, firstExport.Error);
 
             JsonNode exported = JsonNode.Parse(firstExport.Output)!;
             var migration = new JsonObject
             {
                 ["schemaVersion"] = exported["schemaVersion"]!.DeepClone(),
                 ["logging"] = exported["logging"]!.DeepClone(),
+                ["auth"] = exported["auth"]!.DeepClone(),
                 ["zones"] = new JsonObject { ["cli-migration.test"] = exported["zones"]!["cli-migration.test"]!.DeepClone() }
             };
             JsonNode keys = exported["dns"]!["tsigKeys"]!.DeepClone();
             string variable = "TECHNITIUM_TEST_CLI_TSIG_" + Guid.NewGuid().ToString("N");
+            string passwordVariable = variable + "_PASSWORD";
             keys[keyName]!["secret"] = new JsonObject { ["environment"] = variable };
             migration["dns"] = new JsonObject { ["tsigKeys"] = keys };
+            migration["auth"]!["users"]!["migration-reader"]!["password"] = new JsonObject { ["environment"] = passwordVariable };
             string migrationPath = Path.Combine(destination.ConfigurationDirectory, "cli-migration.json");
             await File.WriteAllTextAsync(migrationPath, migration.ToJsonString());
             try
             {
                 Environment.SetEnvironmentVariable(variable, secret);
+                Environment.SetEnvironmentVariable(passwordVariable, password);
                 await RunAsync(destination, "validate", migrationPath);
                 await ApplyAsync(destination, migrationPath);
+                await destination.RestartAsync();
                 Assert.Equal(42, (await destination.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+                string reader = await destination.LoginAsync("migration-reader", password);
+                LoopbackWebService.AssertOk(await destination.CallAsync("settings/get", reader));
+                Assert.Equal("error", (await destination.CallAsync("settings/set?maxLogFileDays=180", reader))
+                    .GetProperty("status").GetString());
                 var answer = await destination.QueryAsync("www.cli-migration.test", DnsResourceRecordType.A,
                     new TsigKey(keyName, secret, TsigAlgorithm.HMAC_SHA256));
                 Assert.Equal("192.0.2.82", Assert.IsType<DnsARecordData>(Assert.Single(answer.Answer).RDATA).Address.ToString());
@@ -71,6 +91,7 @@ namespace DnsServerCore.Tests
             finally
             {
                 Environment.SetEnvironmentVariable(variable, null);
+                Environment.SetEnvironmentVariable(passwordVariable, null);
             }
         }
 
