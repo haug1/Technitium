@@ -2499,6 +2499,50 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpManifestProtectsMembershipAndEnabledStateUntilReleased()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Default":{"enabled":false},"Reserved":null}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Empty(preview.GetProperty("changes").EnumerateArray());
+            string revision = preview.GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            Assert.NotEqual(revision, (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+            await server.RestartAsync();
+
+            JsonElement scopes = await server.CallAsync("dhcp/scopes/list", server.AdminToken);
+            LoopbackWebService.AssertOk(scopes);
+            Assert.Collection(scopes.GetProperty("response").GetProperty("managedSettings").EnumerateArray(),
+                path => Assert.Equal("/dhcp/scopes/Default", path.GetString()),
+                path => Assert.Equal("/dhcp/scopes/Default/enabled", path.GetString()),
+                path => Assert.Equal("/dhcp/scopes/Reserved", path.GetString()));
+
+            await AssertConflictAsync("dhcp/scopes/delete?name=Default", "/dhcp/scopes/Default");
+            await AssertConflictAsync("dhcp/scopes/enable?name=Default", "/dhcp/scopes/Default/enabled");
+            await AssertConflictAsync("dhcp/scopes/set?name=Default&newName=Other&leaseTimeDays=3", "/dhcp/scopes/Default");
+            await AssertConflictAsync(
+                "dhcp/scopes/set?name=Reserved&startingAddress=192.0.2.10&endingAddress=192.0.2.30&subnetMask=255.255.255.0",
+                "/dhcp/scopes/Reserved");
+            LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/disable?name=Default", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/set?name=Default&leaseTimeDays=2", server.AdminToken));
+
+            const string release = """{"schemaVersion":1}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            await server.RestartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/delete?name=Default", server.AdminToken));
+
+            async Task AssertConflictAsync(string endpoint, string path)
+            {
+                JsonElement result = await server.CallAsync(endpoint, server.AdminToken);
+                Assert.Equal("error", result.GetProperty("status").GetString());
+                Assert.Contains(path, result.GetProperty("errorMessage").GetString());
+            }
+        }
+
+        [Fact]
         public async Task DhcpApplyRestoresLoggingAndExistingScopeWhenScopeWriteFails()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -2528,6 +2572,9 @@ namespace DnsServerCore.Tests
             Assert.False((await server.GetSettingsAsync()).GetProperty("logQueries").GetBoolean());
             Assert.Contains((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray(),
                 change => change.GetProperty("path").ValueEquals("/dhcp/scopes/Lab/endingAddress"));
+            JsonElement scopes = await server.CallAsync("dhcp/scopes/list", server.AdminToken);
+            LoopbackWebService.AssertOk(scopes);
+            Assert.Empty(scopes.GetProperty("response").GetProperty("managedSettings").EnumerateArray());
         }
 
         [Fact]

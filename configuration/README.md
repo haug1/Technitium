@@ -72,7 +72,7 @@ TSIG preview uses `dns.tsigKeys`. A new key requires an algorithm and a secret r
 
 Explicit `allowZones` and `blockZones` apply live on standalone servers. Each declared array replaces its entire list, and an empty array or null clears it. Names are canonicalized and deduplicated. An IP address selects its reverse DNS name. Allow rules still take precedence over block rules. The settings API and backup restore reject changes to a list while the manifest owns it.
 
-DHCP apply supports live and startup reconciliation. The API requires DHCP Modify permission and also requires Delete permission to remove scopes. Enabled scopes must bind successfully before the server writes configuration. Scope files participate in the same rollback journal as DNS, web, and logging settings.
+DHCP apply supports live and startup reconciliation. The API requires DHCP Modify permission and also requires Delete permission to remove scopes. Enabled scopes must bind successfully before the server writes configuration. Scope files and DHCP ownership participate in the same rollback journal as DNS, web, and logging settings. The scope list reports managed paths. The scope API rejects creation, deletion, or renaming that conflicts with managed membership and rejects changes to a managed enabled state. Applying a manifest that omits these declarations releases ownership and retains the current scope configuration.
 
 DHCP preview uses one captured lease state to compare changes and validate the detached candidate against the existing scope file format. A new exclusion cannot cover an active dynamic lease. The live scope and DNS records stay unchanged during preview.
 

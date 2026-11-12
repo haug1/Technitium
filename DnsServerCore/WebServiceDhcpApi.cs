@@ -149,6 +149,11 @@ namespace DnsServerCore
                 }
 
                 jsonWriter.WriteEndArray();
+
+                jsonWriter.WriteStartArray("managedSettings");
+                foreach (string path in _dnsWebService._dhcpServer.ManagedPaths)
+                    jsonWriter.WriteStringValue(path);
+                jsonWriter.WriteEndArray();
             }
 
             public void GetDhcpScope(HttpContext context)
@@ -388,6 +393,12 @@ namespace DnsServerCore
 
                 bool scopeExists;
                 Scope scope = _dnsWebService._dhcpServer.GetScope(scopeName);
+                bool rename = request.TryGetQueryOrForm("newName", out string newName) && !newName.Equals(scopeName, StringComparison.Ordinal);
+                if (scope is null || rename)
+                    _dnsWebService._dhcpServer.CheckManifestScopeMembership(scopeName);
+                if (rename)
+                    _dnsWebService._dhcpServer.CheckManifestScopeMembership(newName);
+
                 if (scope is null)
                 {
                     //scope does not exists; create new scope
@@ -678,7 +689,7 @@ namespace DnsServerCore
                     _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was added successfully: " + scopeName);
                 }
 
-                if (request.TryGetQueryOrForm("newName", out string newName) && !newName.Equals(scopeName, StringComparison.Ordinal))
+                if (rename)
                 {
                     _dnsWebService._dhcpServer.RenameScope(scopeName, newName);
 
@@ -750,6 +761,7 @@ namespace DnsServerCore
 
                 string scopeName = context.Request.GetQueryOrForm("name");
 
+                _dnsWebService._dhcpServer.CheckManifestScopeEnabled(_dnsWebService._dhcpServer.GetScope(scopeName), true);
                 await _dnsWebService._dhcpServer.EnableScopeAsync(scopeName, true);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was enabled successfully: " + scopeName);
@@ -764,6 +776,7 @@ namespace DnsServerCore
 
                 string scopeName = context.Request.GetQueryOrForm("name");
 
+                _dnsWebService._dhcpServer.CheckManifestScopeEnabled(_dnsWebService._dhcpServer.GetScope(scopeName), false);
                 _dnsWebService._dhcpServer.DisableScope(scopeName, true);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was disabled successfully: " + scopeName);
@@ -778,6 +791,8 @@ namespace DnsServerCore
 
                 string scopeName = context.Request.GetQueryOrForm("name");
 
+                if (_dnsWebService._dhcpServer.GetScope(scopeName) is not null)
+                    _dnsWebService._dhcpServer.CheckManifestScopeMembership(scopeName);
                 _dnsWebService._dhcpServer.DeleteScope(scopeName);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was deleted successfully: " + scopeName);

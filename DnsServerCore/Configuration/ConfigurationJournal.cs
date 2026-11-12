@@ -120,7 +120,8 @@ namespace DnsServerCore.Configuration
             {
                 "zones" => name.EndsWith(".zone", StringComparison.Ordinal) &&
                     !name.Contains('*') && !name.Contains('\\') && !name.Contains('/'),
-                "scopes" => name.Length > ".scope".Length && name.EndsWith(".scope", StringComparison.Ordinal),
+                "scopes" => name == Dhcp.DhcpServer.ManifestOwnershipFile ||
+                    (name.Length > ".scope".Length && name.EndsWith(".scope", StringComparison.Ordinal)),
                 _ => false
             };
         }

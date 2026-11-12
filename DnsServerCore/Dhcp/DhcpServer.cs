@@ -87,6 +87,11 @@ namespace DnsServerCore.Dhcp
             }
         }
 
+        internal const string ManifestOwnershipFile = "dhcp-ownership.config";
+        private string[] _managedPaths = [];
+        private readonly string _manifestOwnershipPath;
+        internal IReadOnlyList<string> ManagedPaths => _managedPaths;
+
         readonly string _scopesFolder;
         readonly LogManager _log;
 
@@ -113,6 +118,10 @@ namespace DnsServerCore.Dhcp
         public DhcpServer(string scopesFolder, LogManager log)
         {
             _scopesFolder = scopesFolder;
+            _manifestOwnershipPath = Path.Combine(scopesFolder, ManifestOwnershipFile);
+            if (File.Exists(_manifestOwnershipPath))
+                _managedPaths = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(_manifestOwnershipPath))
+                    ?? throw new InvalidDataException("Invalid DHCP manifest ownership file.");
             _log = log;
 
             if (!Directory.Exists(_scopesFolder))
@@ -1329,24 +1338,25 @@ namespace DnsServerCore.Dhcp
 
         internal async Task ApplyManifestScopesAsync(ConfigurationManifest manifest, Func<Action, string[], Task> persist)
         {
-            if (!manifest.Settings.TryGetProperty("dhcp", out var dhcp) || !dhcp.TryGetProperty("scopes", out var declarations))
-            {
-                await persist(null, []);
-                return;
-            }
-
-            using var snapshot = new MemoryStream();
-            using (var writer = new Utf8JsonWriter(snapshot))
-            {
-                writer.WriteStartObject();
-                ConfigurationDhcp.WriteSnapshot(writer, declarations, _scopes);
-                writer.WriteEndObject();
-            }
-            snapshot.Position = 0;
-            using var state = JsonDocument.Parse(snapshot);
+            JsonElement declarations = default;
+            bool declared = manifest.Settings.TryGetProperty("dhcp", out var dhcp) && dhcp.TryGetProperty("scopes", out declarations);
+            string[] managedPaths = GetManifestOwnership(declarations);
+            bool ownershipChanged = !_managedPaths.SequenceEqual(managedPaths, StringComparer.Ordinal);
             var changes = new List<ConfigurationChange>();
-            ConfigurationDhcp.Compare(dhcp, state.RootElement.GetProperty("manifestDhcpScopes"), changes);
-            if (changes.Count == 0)
+            if (declared)
+            {
+                using var snapshot = new MemoryStream();
+                using (var writer = new Utf8JsonWriter(snapshot))
+                {
+                    writer.WriteStartObject();
+                    ConfigurationDhcp.WriteSnapshot(writer, declarations, _scopes);
+                    writer.WriteEndObject();
+                }
+                snapshot.Position = 0;
+                using var state = JsonDocument.Parse(snapshot);
+                ConfigurationDhcp.Compare(dhcp, state.RootElement.GetProperty("manifestDhcpScopes"), changes);
+            }
+            if (changes.Count == 0 && !ownershipChanged)
             {
                 await persist(null, []);
                 return;
@@ -1362,7 +1372,7 @@ namespace DnsServerCore.Dhcp
                     foreach (string name in _scopes.Keys)
                         candidates.Add(name, null);
                 }
-                else
+                else if (declarations.ValueKind == JsonValueKind.Object)
                 {
                     foreach (var entry in declarations.EnumerateObject())
                     {
@@ -1385,8 +1395,13 @@ namespace DnsServerCore.Dhcp
                     activated.Add(scope);
                 }
 
+                var files = candidates.Keys.Select(name => Path.Combine("scopes", name + ".scope")).ToList();
+                if (ownershipChanged)
+                    files.Add(Path.Combine("scopes", ManifestOwnershipFile));
                 await persist(() =>
                 {
+                    if (ownershipChanged)
+                        WriteManifestOwnership(managedPaths);
                     foreach (var (name, scope) in candidates)
                     {
                         if (scope is null)
@@ -1394,9 +1409,10 @@ namespace DnsServerCore.Dhcp
                         else
                             WriteScopeFile(scope);
                     }
-                }, candidates.Keys.Select(name => Path.Combine("scopes", name + ".scope")).ToArray());
+                }, files.ToArray());
 
                 committed = true;
+                _managedPaths = managedPaths;
                 foreach (var (name, candidate) in candidates)
                 {
                     _scopes.TryGetValue(name, out Scope previous);
@@ -1436,6 +1452,59 @@ namespace DnsServerCore.Dhcp
                         scope?.Dispose();
                 }
             }
+        }
+
+        private static string[] GetManifestOwnership(JsonElement declarations)
+        {
+            const string scopesPath = "/dhcp/scopes";
+            if (declarations.ValueKind == JsonValueKind.Null)
+                return [scopesPath];
+            if (declarations.ValueKind != JsonValueKind.Object)
+                return [];
+
+            var paths = new List<string>();
+            foreach (JsonProperty entry in declarations.EnumerateObject())
+            {
+                string path = ConfigurationPlan.AppendPath(scopesPath, entry.Name);
+                paths.Add(path);
+                if (entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("enabled", out _))
+                    paths.Add(path + "/enabled");
+            }
+            paths.Sort(StringComparer.Ordinal);
+            return paths.ToArray();
+        }
+
+        private void WriteManifestOwnership(string[] paths)
+        {
+            if (paths.Length == 0)
+            {
+                File.Delete(_manifestOwnershipPath);
+                return;
+            }
+
+            string temporary = _manifestOwnershipPath + ".tmp";
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(stream, paths);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, _manifestOwnershipPath, true);
+        }
+
+        internal void CheckManifestScopeMembership(string name)
+        {
+            string path = ConfigurationPlan.AppendPath("/dhcp/scopes", name);
+            if (_managedPaths.Contains("/dhcp/scopes", StringComparer.Ordinal) || _managedPaths.Contains(path, StringComparer.Ordinal))
+                throw new DhcpServerException($"{path}: Scope membership is managed by the configuration manifest.");
+        }
+
+        internal void CheckManifestScopeEnabled(Scope scope, bool enabled)
+        {
+            if (scope is null || scope.Enabled == enabled)
+                return;
+            string path = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name) + "/enabled";
+            if (_managedPaths.Contains(path, StringComparer.Ordinal))
+                throw new DhcpServerException($"{path}: Scope enabled state is managed by the configuration manifest.");
         }
 
         private Task[] LoadAllScopeFiles()

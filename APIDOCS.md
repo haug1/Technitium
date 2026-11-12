@@ -5812,7 +5812,7 @@ RESPONSE:
 
 ### List DHCP Scopes
 
-Lists all the DHCP scopes available on the server.
+Lists all the DHCP scopes available on the server and returns managed scope membership and enabled-state paths in `managedSettings`.
 
 URL:\
 `http://localhost:5380/api/dhcp/scopes/list`
@@ -5833,6 +5833,7 @@ RESPONSE:
 ```
 {
 	"response": {
+		"managedSettings": ["/dhcp/scopes/Default", "/dhcp/scopes/Default/enabled"],
 		"scopes": [
 			{
 				"name": "Default",

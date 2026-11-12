@@ -745,11 +745,13 @@ namespace DnsServerCore
                 var webCertificate = _dnsWebService.PrepareWebCertificate(manifest);
                 var tsig = _dnsWebService.PrepareTsigKeys(manifest);
                 using ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = CaptureDhcpScopeSnapshot(manifest, sessionUser);
+                if ((dhcpSnapshot is not null || _dnsWebService._dhcpServer.ManagedPaths.Count > 0) &&
+                    !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+
                 using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot);
                 if (dhcpSnapshot is not null)
                 {
-                    if (!_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Modify))
-                        throw new DnsWebServiceException("Access was denied.");
                     var changes = new List<ConfigurationChange>();
                     ConfigurationDhcp.Compare(manifest.Settings.GetProperty("dhcp"), current.RootElement.GetProperty("manifestDhcpScopes"), changes);
                     if (changes.Any(change => change.Kind == ConfigurationChangeKind.Remove &&
@@ -895,6 +897,10 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WriteStartArray("manifestDhcpOwnership");
+                    foreach (string path in _dnsWebService._dhcpServer.ManagedPaths)
+                        writer.WriteStringValue(path);
+                    writer.WriteEndArray();
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
                     if (webCertificate.HasValue)

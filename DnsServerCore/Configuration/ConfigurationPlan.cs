@@ -273,6 +273,8 @@ namespace DnsServerCore.Configuration
                     tsigKeys.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
                     scopes.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestDhcpOwnership", out JsonElement dhcpOwnership))
+                    dhcpOwnership.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
