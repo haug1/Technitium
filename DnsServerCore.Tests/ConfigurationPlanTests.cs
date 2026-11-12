@@ -3343,6 +3343,77 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestPermissionGrantsResolveNewPrincipalsAndControlAccessAfterRestart()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_PERMISSION_USER_PASSWORD";
+            const string password = "fixture-permission-user-password";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, password);
+            try
+            {
+                const string manifest = """
+                    {"schemaVersion":1,"auth":{
+                      "groups":{"Configuration Readers":{}},
+                      "users":{"reader":{"groups":["Configuration Readers"],"password":{"environment":"TECHNITIUM_TEST_PERMISSION_USER_PASSWORD"}}},
+                      "permissions":{"Settings":{"groups":{"Configuration Readers":["View"]}},
+                                     "Administration":{"users":{"reader":["View"]}}}
+                    }}
+                    """;
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                    change.GetProperty("path").ValueEquals("/auth/permissions/Settings/groups/configuration readers") &&
+                    change.GetProperty("kind").ValueEquals("Add"));
+                string revision = preview.GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                string reader = await server.LoginAsync("reader", password);
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", reader));
+                LoopbackWebService.AssertOk(await server.CallAsync("admin/users/list", reader));
+                Assert.Equal("error", (await server.CallAsync("settings/set?dnsServerDomain=forbidden.test", reader))
+                    .GetProperty("status").GetString());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement permissions = export.GetProperty("response").GetProperty("manifest").GetProperty("auth").GetProperty("permissions");
+                Assert.Collection(permissions.GetProperty("Settings").GetProperty("groups").GetProperty("Configuration Readers").EnumerateArray(),
+                    flag => Assert.Equal("View", flag.GetString()));
+
+                const string lockout = """
+                    {"schemaVersion":1,"auth":{"permissions":{"Administration":{"groups":{"Administrators":null}}}}}
+                    """;
+                using (var content = new StringContent(lockout, Encoding.UTF8, "application/json"))
+                {
+                    JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                    Assert.Equal("error", rejected.GetProperty("status").GetString());
+                    Assert.Contains("/auth/permissions/Administration/groups/administrators", rejected.GetProperty("errorMessage").GetString());
+                }
+
+                const string reset = """
+                    {"schemaVersion":1,"auth":{
+                      "groups":{"Configuration Readers":null},
+                      "users":{"reader":{"groups":[]}},
+                      "permissions":{"Settings":null,"Administration":{"users":{"reader":null}}}
+                    }}
+                    """;
+                revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+                reader = await server.LoginAsync("reader", password);
+                Assert.Equal("error", (await server.CallAsync("settings/get", reader)).GetProperty("status").GetString());
+                Assert.Equal("error", (await server.CallAsync("admin/users/list", reader)).GetProperty("status").GetString());
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", server.AdminToken));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task ManifestTotpEnrollmentSurvivesRestartAndRequiresTheConfiguredCode()
         {
             await using var server = await LoopbackWebService.StartAsync();

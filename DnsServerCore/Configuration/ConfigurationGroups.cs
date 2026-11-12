@@ -119,23 +119,25 @@ namespace DnsServerCore.Configuration
         }
 
         internal static void ValidateRemovals(AuthManager auth, IReadOnlyDictionary<string, Group> groups, ConfigurationLdap.Settings ldap,
-            IReadOnlyDictionary<string, ConfigurationUsers.Change> users)
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants)
         {
             foreach (var (name, candidate) in groups)
             {
                 if (candidate is null && auth.GetGroup(name) is Group group)
-                    ValidateRemoval(auth, group, ldap, users);
+                    ValidateRemoval(auth, group, ldap, users, grants);
             }
         }
 
         private static void ValidateRemoval(AuthManager auth, Group group, ConfigurationLdap.Settings ldap,
-            IReadOnlyDictionary<string, ConfigurationUsers.Change> users)
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants)
         {
             string name = group.Name.ToLowerInvariant();
             if (auth.GetGroupMembers(group).Any(user =>
                     users?.TryGetValue(user.Username, out ConfigurationUsers.Change change) != true ||
                     !change.Remove && change.Groups.Contains(name)) ||
-                auth.Permissions.Any(permission => permission.GroupPermissions.ContainsKey(group) ||
+                auth.Permissions.Any(permission =>
+                    (permission.GroupPermissions.ContainsKey(group) && !grants.Any(grant =>
+                        grant.Section == permission.Section && grant.Group && grant.Name == name && grant.After is null)) ||
                     permission.SubItemPermissions.Values.Any(item => item.GroupPermissions.ContainsKey(group))) ||
                 (ldap ?? auth.GetManifestLdapSettings()).GroupMap?.Values.Any(IsMapping) == true ||
                 auth.SsoGroupMap?.Values.Any(IsMapping) == true)

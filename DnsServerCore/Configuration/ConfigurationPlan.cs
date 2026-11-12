@@ -208,8 +208,13 @@ namespace DnsServerCore.Configuration
                     {
                         if (authSection.Name == "ldap" && currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
                             ConfigurationLdap.Compare(ldap, changes);
-                        else if ((authSection.Name is "groups" or "users") &&
-                            currentSettings.TryGetProperty(authSection.Name == "groups" ? "manifestGroups" : "manifestUsers", out JsonElement snapshot))
+                        else if ((authSection.Name is "groups" or "users" or "permissions") &&
+                            currentSettings.TryGetProperty(authSection.Name switch
+                            {
+                                "groups" => "manifestGroups",
+                                "users" => "manifestUsers",
+                                _ => "manifestPermissions"
+                            }, out JsonElement snapshot))
                         {
                             foreach (JsonProperty change in snapshot.GetProperty("changes").EnumerateObject())
                                 changes.Add(new ConfigurationChange(change.Name, (ConfigurationChangeKind)change.Value.GetInt32(), false));
@@ -305,6 +310,8 @@ namespace DnsServerCore.Configuration
                     userOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestUsers", out JsonElement users))
                     users.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestPermissions", out JsonElement permissions))
+                    permissions.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
@@ -812,6 +819,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (ConfigurationPermissions.TryGetDeclaration(manifest, out _))
+                throw new InvalidDataException("/auth/permissions: Applying permissions to a cluster is not implemented.");
             if (ConfigurationUsers.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/auth/users: Applying user settings to a cluster is not implemented.");
             if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
@@ -928,7 +937,7 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (path is ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 

@@ -506,9 +506,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0)
             {
                 persist(null);
                 return;
@@ -516,7 +516,7 @@ namespace DnsServerCore.Auth
 
             lock (_saveLock)
             {
-                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges);
+                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants);
 
                 Dictionary<string, User> stagedUsers = null;
                 if (userChanges.Count > 0)
@@ -580,6 +580,33 @@ namespace DnsServerCore.Auth
                         zonePermissions.SetSubItemPermission(name, creator, PermissionFlag.ViewModifyDelete);
                     zonePermissions.SetSubItemPermission(name, admins, PermissionFlag.ViewModifyDelete);
                     zonePermissions.SetSubItemPermission(name, dnsAdmins, PermissionFlag.ViewModifyDelete);
+                }
+
+                foreach (ConfigurationPermissions.Grant grant in grants)
+                {
+                    if (!permissions.TryGetValue(grant.Section, out Permission section))
+                    {
+                        section = GetPermission(grant.Section)?.CopySection() ?? new Permission(grant.Section);
+                        permissions.Add(grant.Section, section);
+                    }
+
+                    if (grant.Group)
+                    {
+                        Group group = GetGroup(grant.Name);
+                        if (grant.After is PermissionFlag flags)
+                            section.SetPermission(group ?? groupChanges[grant.Name], flags);
+                        else if (group is not null)
+                            section.RemovePermission(group);
+                    }
+                    else
+                    {
+                        User user = GetUser(grant.Name);
+                        if (grant.After is PermissionFlag flags)
+                            section.SetPermission(user ?? stagedUsers?.GetValueOrDefault(grant.Name) ??
+                                throw new InvalidDataException($"{grant.SettingPath}: The user changed during apply."), flags);
+                        else if (user is not null)
+                            section.RemovePermission(user);
+                    }
                 }
 
                 persist(() =>
@@ -1049,10 +1076,21 @@ namespace DnsServerCore.Auth
             foreach (User user in users.Values)
                 user.WriteTo(bW);
 
-            bW.Write(_permissions.Count);
-
-            foreach (KeyValuePair<PermissionSection, Permission> permission in _permissions)
-                (stagedPermissions?.TryGetValue(permission.Key, out Permission staged) == true ? staged : permission.Value).WriteTo(bW);
+            if (stagedPermissions is null)
+            {
+                bW.Write(_permissions.Count);
+                foreach (Permission permission in _permissions.Values)
+                    permission.WriteTo(bW);
+            }
+            else
+            {
+                var permissions = new Dictionary<PermissionSection, Permission>(_permissions);
+                foreach (var (section, permission) in stagedPermissions)
+                    permissions[section] = permission;
+                bW.Write(permissions.Count);
+                foreach (Permission permission in permissions.Values)
+                    permission.WriteTo(bW);
+            }
 
             List<UserSession> activeSessions = new List<UserSession>(_sessions.Count);
 
@@ -1142,41 +1180,10 @@ namespace DnsServerCore.Auth
         private void CreateDefaultConfig()
         {
             Group adminGroup = CreateGroup(Group.ADMINISTRATORS, "Super administrators");
-            Group dnsAdminGroup = CreateGroup(Group.DNS_ADMINISTRATORS, "DNS service administrators");
-            Group dhcpAdminGroup = CreateGroup(Group.DHCP_ADMINISTRATORS, "DHCP service administrators");
-            Group everyoneGroup = CreateGroup(Group.EVERYONE, "All users");
-
-            SetPermission(PermissionSection.Dashboard, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Zones, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Cache, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Allowed, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Blocked, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Apps, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.DnsClient, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Settings, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.DhcpServer, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Administration, adminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Logs, adminGroup, PermissionFlag.ViewModifyDelete);
-
-            SetPermission(PermissionSection.Zones, dnsAdminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Cache, dnsAdminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Allowed, dnsAdminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Blocked, dnsAdminGroup, PermissionFlag.ViewModifyDelete);
-            SetPermission(PermissionSection.Apps, dnsAdminGroup, PermissionFlag.ViewModify);
-            SetPermission(PermissionSection.DnsClient, dnsAdminGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Settings, dnsAdminGroup, PermissionFlag.ViewModify);
-
-            SetPermission(PermissionSection.DhcpServer, dhcpAdminGroup, PermissionFlag.ViewModifyDelete);
-
-            SetPermission(PermissionSection.Dashboard, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Zones, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Cache, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Allowed, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Blocked, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Apps, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.DnsClient, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.DhcpServer, everyoneGroup, PermissionFlag.View);
-            SetPermission(PermissionSection.Logs, everyoneGroup, PermissionFlag.View);
+            CreateGroup(Group.DNS_ADMINISTRATORS, "DNS service administrators");
+            CreateGroup(Group.DHCP_ADMINISTRATORS, "DHCP service administrators");
+            CreateGroup(Group.EVERYONE, "All users");
+            ConfigurationPermissions.InstallDefaults(this);
 
             string adminPassword = Environment.GetEnvironmentVariable("DNS_SERVER_ADMIN_PASSWORD");
             string adminPasswordFile = Environment.GetEnvironmentVariable("DNS_SERVER_ADMIN_PASSWORD_FILE");

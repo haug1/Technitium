@@ -589,7 +589,8 @@ namespace DnsServerCore
                         manifest.Add("auth", new System.Text.Json.Nodes.JsonObject
                         {
                             ["groups"] = ConfigurationGroups.Export(_dnsWebService._authManager),
-                            ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs)
+                            ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs),
+                            ["permissions"] = ConfigurationPermissions.Export(_dnsWebService._authManager)
                         });
                     ConfigurationLdap.Settings ldap = _dnsWebService._authManager.GetManifestLdapSettings();
                     if (!ConfigurationLdap.Same(ldap, ConfigurationLdap.Default))
@@ -1002,15 +1003,20 @@ namespace DnsServerCore
                     var auth = _dnsWebService._authManager;
                     var groups = ConfigurationGroups.Prepare(manifest, auth);
                     var users = preparedUsers ?? PrepareUsersForSession(manifest, sessionUser, groups);
-                    if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
+                    bool declaresGroups = ConfigurationGroups.TryGetDeclaration(manifest, out _);
+                    bool declaresPermissions = ConfigurationPermissions.TryGetDeclaration(manifest, out _);
+                    if ((declaresGroups || declaresPermissions) && !auth.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
+                        throw new DnsWebServiceException("Access was denied.");
+                    var grants = ConfigurationPermissions.Prepare(manifest, auth, groups, users, sessionUser);
+                    if (declaresGroups)
                     {
-                        if (!auth.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
-                            throw new DnsWebServiceException("Access was denied.");
-                        ConfigurationGroups.ValidateRemovals(auth, groups, ldap, users);
+                        ConfigurationGroups.ValidateRemovals(auth, groups, ldap, users, grants);
                         ConfigurationGroups.WriteSnapshot(writer, auth, groups);
                     }
                     if (users is not null)
                         ConfigurationUsers.WriteSnapshot(writer, users, _configurationRevisionKey);
+                    if (declaresPermissions)
+                        ConfigurationPermissions.WriteSnapshot(writer, auth, grants);
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
                     if (webCertificate.HasValue)
