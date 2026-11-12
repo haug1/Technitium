@@ -91,8 +91,17 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}/source: A local package requires a file reference in the startup manifest.");
                     }
                 }
-                if (!manager.Applications.TryGetValue(item.Name, out DnsApplication app))
+                manager.Applications.TryGetValue(item.Name, out DnsApplication app);
+                string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
+                if (pin is not null && !System.Version.TryParse(pin, out _))
+                    throw new InvalidDataException($"{path}/version: Invalid app version.");
+                string before = app?.ReadManifestConfig();
+                bool replace = app is not null && pin is not null && pin != DnsWebService.GetCleanVersion(app.Version) &&
+                    new System.Version(pin) != app.Version;
+                if (app is null || replace)
                 {
+                    if (replace && source.ValueKind != JsonValueKind.Object)
+                        throw new InvalidDataException($"{path}/version: The installed version does not match and needs a replacement package.");
                     if (source.ValueKind != JsonValueKind.Object)
                         throw new InvalidDataException($"{path}: The DNS app is not installed and needs a package source.");
                     byte[] package = null;
@@ -111,19 +120,10 @@ namespace DnsServerCore.Configuration
                         }
                     }
 
-                    string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
-                    if (pin is not null && !System.Version.TryParse(pin, out _))
-                        throw new InvalidDataException($"{path}/version: Invalid app version.");
-                    entries.Add(new Entry(null, null, ReadConfig(item.Value, null, path), InstallName: item.Name,
+                    entries.Add(new Entry(app, before, ReadConfig(item.Value, before, path), InstallName: item.Name,
                         Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _), RemoteSource: remoteSource));
                     continue;
                 }
-                if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null &&
-                    version.GetString() != DnsWebService.GetCleanVersion(app.Version) &&
-                    (!Version.TryParse(version.GetString(), out Version desired) || app.Version != desired))
-                    throw new InvalidDataException($"{path}/version: The installed version does not match.");
-
-                string before = app.ReadManifestConfig();
                 string after = ReadConfig(item.Value, before, path);
                 entries.Add(new Entry(app, before, after));
             }
@@ -187,6 +187,7 @@ namespace DnsServerCore.Configuration
                 writer.WriteStartObject(entry.SettingPath);
                 writer.WriteString("version", entry.Application?.Version.ToString() ?? entry.Version);
                 writer.WriteBoolean("install", entry.InstallName is not null);
+                writer.WriteBoolean("upgrade", entry.InstallName is not null && entry.Application is not null);
                 if (entry.Package is not null)
                     writer.WriteString("package", Convert.ToHexString(HMACSHA256.HashData(key, entry.Package)));
                 writer.WriteBoolean("remove", entry.Remove);
@@ -206,7 +207,8 @@ namespace DnsServerCore.Configuration
             {
                 if (entry.Value.GetProperty("install").GetBoolean())
                 {
-                    changes.Add(new ConfigurationChange(entry.Name, ConfigurationChangeKind.Add, false));
+                    changes.Add(new ConfigurationChange(entry.Name, entry.Value.GetProperty("upgrade").GetBoolean()
+                        ? ConfigurationChangeKind.Update : ConfigurationChangeKind.Add, false));
                     continue;
                 }
                 if (entry.Value.GetProperty("remove").GetBoolean())
@@ -247,7 +249,7 @@ namespace DnsServerCore.Configuration
             await manager.EnterManifestGateAsync();
             var activated = new List<Entry>();
             var removed = new List<DnsApplication>();
-            var installed = new List<DnsApplication>();
+            var installed = new List<(DnsApplication App, DnsApplication Previous)>();
             try
             {
                 bool ownershipChanged = !manager.ManagedPaths.SequenceEqual(ownership);
@@ -299,8 +301,8 @@ namespace DnsServerCore.Configuration
                 foreach (Entry entry in entries.Where(entry => entry.InstallName is not null))
                 {
                     DnsApplication app = await manager.InstallManifestAppAsync(entry.Name, packages[entry.Name], entry.Version,
-                        entry.After, entry.HasConfig);
-                    installed.Add(app);
+                        entry.After, entry.HasConfig, entry.Application);
+                    installed.Add((app, entry.Application));
                 }
 
                 foreach (Entry entry in removals)
@@ -309,13 +311,17 @@ namespace DnsServerCore.Configuration
                     removed.Add(entry.Application);
                 }
                 string[] resources = [.. files, .. removals.Select(entry => entry.FileName),
-                    .. installed.Select(app => ConfigurationJournal.AppInstallPath(app.Name))];
+                    .. installed.Select(entry => entry.Previous is null ? ConfigurationJournal.AppInstallPath(entry.App.Name) :
+                        ConfigurationJournal.AppUpgradePath(entry.App.Name))];
                 await commit(resources.Length > 0 || ownershipChanged ? Write : null,
                     ownershipChanged ? [.. resources, OwnershipFile] : resources);
                 if (ownershipChanged)
                     manager.PublishManifestOwnership(ownership);
                 foreach (DnsApplication app in removed)
                     manager.DisposeManifestApp(app);
+                foreach (var (_, previous) in installed)
+                    if (previous is not null)
+                        manager.DisposeManifestApp(previous);
 
                 void Write()
                 {
@@ -325,17 +331,28 @@ namespace DnsServerCore.Configuration
                         ConfigurationJournal.StageAppRemoval(manager.ConfigurationFolder, entry.Application.Name);
                     if (ownershipChanged)
                         manager.WriteManifestOwnership(ownership);
-                    foreach (DnsApplication app in installed)
-                        ConfigurationJournal.FinishAppInstall(manager.ConfigurationFolder, app.Name);
+                    foreach (var (app, previous) in installed)
+                    {
+                        if (previous is null)
+                            ConfigurationJournal.FinishAppInstall(manager.ConfigurationFolder, app.Name);
+                        else
+                            ConfigurationJournal.FinishAppUpgrade(manager.ConfigurationFolder, app.Name);
+                    }
                 }
             }
             catch
             {
-                foreach (DnsApplication app in installed)
+                foreach (var (app, previous) in installed)
                 {
                     manager.DetachManifestApp(app);
                     manager.DisposeManifestApp(app);
-                    ConfigurationJournal.CancelAppInstall(manager.ConfigurationFolder, app.Name);
+                    if (previous is null)
+                        ConfigurationJournal.CancelAppInstall(manager.ConfigurationFolder, app.Name);
+                    else
+                    {
+                        ConfigurationJournal.CancelAppUpgrade(manager.ConfigurationFolder, app.Name);
+                        manager.ReattachManifestApp(previous);
+                    }
                 }
                 foreach (DnsApplication app in removed)
                     manager.ReattachManifestApp(app);

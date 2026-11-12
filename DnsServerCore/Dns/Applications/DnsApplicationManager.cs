@@ -547,28 +547,42 @@ namespace DnsServerCore.Dns.Applications
             throw new InvalidDataException("The app package download exceeded the redirect limit.");
         }
 
-        internal async Task<DnsApplication> InstallManifestAppAsync(string name, byte[] package, string version, string config, bool hasConfig)
+        internal async Task<DnsApplication> InstallManifestAppAsync(string name, byte[] package, string version, string config, bool hasConfig, DnsApplication previous)
         {
             string path = ConfigurationApplications.AppPath(name);
             string folder = Path.Combine(_appsPath, name);
-            if (Directory.Exists(folder))
+            if (previous is null && Directory.Exists(folder))
                 throw new InvalidDataException($"{path}: The application folder already exists.");
+            if (previous is not null)
+                DetachManifestApp(previous);
 
-            ConfigurationJournal.BeginAppInstall(ConfigurationFolder, name);
+            if (previous is null)
+                ConfigurationJournal.BeginAppInstall(ConfigurationFolder, name);
             DnsApplication app = null;
             bool attached = false;
             try
             {
+                string priorFolder = previous is null ? null : ConfigurationJournal.BeginAppUpgrade(ConfigurationFolder, name);
                 Directory.CreateDirectory(folder);
+                if (priorFolder is not null)
+                {
+                    var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+                    foreach (string file in Directory.EnumerateFiles(priorFolder, "*", options))
+                    {
+                        string target = Path.Combine(folder, Path.GetRelativePath(priorFolder, file));
+                        Directory.CreateDirectory(Path.GetDirectoryName(target));
+                        File.Copy(file, target);
+                    }
+                }
                 using var stream = new MemoryStream(package, writable: false);
                 using (var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
-                    await archive.ExtractToDirectoryAsync(folder, overwriteFiles: false);
+                    await archive.ExtractToDirectoryAsync(folder, overwriteFiles: previous is not null);
                 await File.WriteAllBytesAsync(Path.Combine(folder, name + ".zip"), package);
 
                 app = new DnsApplication(new InternalDnsServer(_dnsServer, name, folder), name);
                 if (version is not null && version != DnsWebService.GetCleanVersion(app.Version) && new Version(version) != app.Version)
                     throw new InvalidDataException($"{path}/version: The package version does not match.");
-                string effectiveConfig = hasConfig ? config : app.ReadManifestConfig();
+                string effectiveConfig = hasConfig || previous is not null && config is not null ? config : app.ReadManifestConfig();
                 try
                 {
                     await app.ActivateConfigAsync(effectiveConfig);
@@ -577,7 +591,7 @@ namespace DnsServerCore.Dns.Applications
                 {
                     throw new InvalidDataException($"{path}/configuration: The app rejected its configuration.");
                 }
-                if (hasConfig)
+                if (hasConfig || previous is not null && config is not null)
                     app.WriteManifestConfig(effectiveConfig);
 
                 attached = _applications.TryAdd(name, app);
@@ -593,7 +607,13 @@ namespace DnsServerCore.Dns.Applications
                     DetachManifestApp(app);
                 if (app is not null)
                     DisposeManifestApp(app);
-                ConfigurationJournal.CancelAppInstall(ConfigurationFolder, name);
+                if (previous is null)
+                    ConfigurationJournal.CancelAppInstall(ConfigurationFolder, name);
+                else
+                {
+                    ConfigurationJournal.CancelAppUpgrade(ConfigurationFolder, name);
+                    ReattachManifestApp(previous);
+                }
                 throw;
             }
         }

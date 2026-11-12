@@ -202,6 +202,27 @@ namespace DnsServerCore.Tests
             Assert.Contains("/apps/packages/FilterAaaa/version", mismatch.Message);
             Assert.False(Directory.Exists(appFolder));
 
+            string oldPackage = Path.Combine(server.ConfigurationDirectory, "old-package.zip");
+            using (ZipArchive archive = ZipFile.Open(oldPackage, ZipArchiveMode.Create))
+            {
+                using var writer = new StreamWriter(archive.CreateEntry("dnsApp.config").Open());
+                writer.Write("""{"enableFilterAaaa":true,"defaultTtl":30,"filterDomains":[]}""");
+            }
+            JsonNode old = install.DeepClone();
+            JsonNode oldEntry = old["apps"]!["packages"]!["FilterAaaa"]!;
+            oldEntry["version"] = "0.0";
+            oldEntry["source"] = new JsonObject { ["file"] = "old-package.zip" };
+            await File.WriteAllTextAsync(startupPath, old.ToJsonString());
+            await server.RestartAsync();
+            Assert.Single((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+
+            await File.WriteAllTextAsync(startupPath, wrongVersion.ToJsonString());
+            mismatch = await Assert.ThrowsAsync<InvalidDataException>(() => server.RestartAsync());
+            Assert.Contains("/apps/packages/FilterAaaa/version", mismatch.Message);
+            Assert.True(Directory.Exists(appFolder));
+            Assert.Equal(File.ReadAllBytes(oldPackage), File.ReadAllBytes(Path.Combine(appFolder, "FilterAaaa.zip")));
+
+            install["apps"]!["packages"]!["FilterAaaa"]!.AsObject().Remove("configuration");
             await File.WriteAllTextAsync(startupPath, install.ToJsonString());
             await server.RestartAsync();
             Assert.True(File.Exists(Path.Combine(appFolder, "FilterAaaa.zip")));
