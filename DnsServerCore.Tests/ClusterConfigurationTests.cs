@@ -16,6 +16,65 @@ namespace DnsServerCore.Tests
     public sealed class ClusterConfigurationTests
     {
         [Fact]
+        public async Task LivePrimaryBootstrapRequiresFreshPreviewAndRollsBackFailedWrites()
+        {
+            const string manifest = """
+                {"schemaVersion":1,"cluster":{"domain":"cluster.test","bootstrap":{"role":"Primary"},
+                  "node":{"addresses":["127.0.0.1","192.0.2.10"]},"configRefreshSeconds":120}}
+                """;
+            await using var server = await LoopbackWebService.StartAsync("primary.test", enableTls: true);
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=2.0.192.in-addr.arpa&type=Primary", server.AdminToken));
+            string revision = await PreviewAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=180", server.AdminToken));
+            JsonElement stale = await ApplyAsync(revision);
+            Assert.Equal("error", stale.GetProperty("status").GetString());
+            Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+
+            string blocked = Path.Combine(server.ConfigurationDirectory, "cluster-ownership.config.tmp");
+            Directory.CreateDirectory(blocked);
+            JsonElement rejected = await ApplyAsync(await PreviewAsync());
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            JsonElement state = await server.CallAsync("admin/cluster/state", server.AdminToken);
+            LoopbackWebService.AssertOk(state);
+            Assert.False(state.GetProperty("response").GetProperty("clusterInitialized").GetBoolean());
+            Assert.Equal("primary.test", state.GetProperty("response").GetProperty("dnsServerDomain").GetString());
+            Assert.False(File.Exists(Path.Combine(server.ConfigurationDirectory, "cluster.config")));
+
+            Assert.DoesNotContain((await server.QueryAsync("10.2.0.192.in-addr.arpa", DnsResourceRecordType.PTR)).Answer,
+                record => record.Type == DnsResourceRecordType.PTR);
+            Directory.Delete(blocked);
+            LoopbackWebService.AssertOk(await ApplyAsync(await PreviewAsync()));
+            state = await server.CallAsync("admin/cluster/state", server.AdminToken);
+            LoopbackWebService.AssertOk(state);
+            Assert.Equal("cluster.test", state.GetProperty("response").GetProperty("clusterDomain").GetString());
+            Assert.Equal(120, state.GetProperty("response").GetProperty("configRefreshIntervalSeconds").GetInt32());
+
+            Assert.Contains((await server.QueryAsync("10.2.0.192.in-addr.arpa", DnsResourceRecordType.PTR)).Answer,
+                record => record.Type == DnsResourceRecordType.PTR);
+            using var repeatBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement repeat = await server.CallAsync("settings/config/plan", server.AdminToken, repeatBody);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+
+            async Task<string> PreviewAsync()
+            {
+                using var body = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement preview = await server.CallAsync("settings/config/plan", server.AdminToken, body);
+                LoopbackWebService.AssertOk(preview);
+                JsonElement plan = preview.GetProperty("response");
+                Assert.Contains(plan.GetProperty("changes").EnumerateArray(), change =>
+                    change.GetProperty("path").ValueEquals("/cluster/bootstrap") && change.GetProperty("kind").ValueEquals("Add"));
+                return plan.GetProperty("revision").GetString()!;
+            }
+
+            async Task<JsonElement> ApplyAsync(string revision)
+            {
+                using var body = new StringContent(manifest, Encoding.UTF8, "application/json");
+                return await server.CallAsync("settings/config/apply", server.AdminToken, body, revision);
+            }
+        }
+
+        [Fact]
         public async Task StartupManifestInitializesPrimaryOnceAndPersistsOwnedOptions()
         {
             const string manifest = """

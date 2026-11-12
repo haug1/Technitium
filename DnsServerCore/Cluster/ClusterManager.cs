@@ -540,6 +540,7 @@ namespace DnsServerCore.Cluster
                 throw new DnsServerException("Failed to initialize Cluster: specify between 1 and 255 Primary node IP addresses.");
 
             string clusterDomain = ConfigurationManifest.CanonicalDnsName(domain, "/cluster/domain", allowRoot: false);
+            _dnsWebService.DnsServer.CheckManifestServerDomain(GetPrimaryNodeName(clusterDomain));
             string catalogDomain = ConfigurationManifest.CanonicalDnsName("cluster-catalog." + clusterDomain, "/cluster/domain", allowRoot: false);
             var zones = _dnsWebService.DnsServer.AuthZoneManager;
             CheckZone(clusterDomain, AuthZoneType.Primary);
@@ -556,22 +557,23 @@ namespace DnsServerCore.Cluster
             }
         }
 
+        private string GetPrimaryNodeName(string clusterDomain)
+        {
+            string serverDomain = _dnsWebService.DnsServer.ServerDomain;
+            if (serverDomain.EndsWith("." + clusterDomain, StringComparison.OrdinalIgnoreCase))
+                return serverDomain;
+
+            int labelEnd = serverDomain.IndexOf('.');
+            return labelEnd < 0 ? serverDomain + "." + clusterDomain : string.Concat(serverDomain.AsSpan(0, labelEnd), ".", clusterDomain);
+        }
+
         internal void InitializeCluster(string clusterDomain, IReadOnlyList<IPAddress> primaryNodeIpAddresses, User user, IPAddress remoteAddress, string userAgent, ConfigurationClusterOptions.Settings? options = null)
         {
             if (!_dnsWebService.IsWebServiceTlsEnabled)
                 throw new InvalidOperationException();
 
             //create self node
-            string serverDomain = _dnsWebService.DnsServer.ServerDomain;
-            if (!serverDomain.EndsWith("." + clusterDomain, StringComparison.OrdinalIgnoreCase))
-            {
-                int x = serverDomain.IndexOf('.');
-                if (x < 0)
-                    serverDomain = serverDomain + "." + clusterDomain;
-                else
-                    serverDomain = string.Concat(serverDomain.AsSpan(0, x), ".", clusterDomain);
-            }
-
+            string serverDomain = GetPrimaryNodeName(clusterDomain);
             Uri primaryNodeUrl = new Uri($"https://{serverDomain}:{_dnsWebService.WebServiceTlsPort}/");
 
             ClusterNode selfPrimaryNode = new ClusterNode(this, RandomNumberGenerator.GetInt32(int.MaxValue), primaryNodeUrl, primaryNodeIpAddresses, ClusterNodeType.Primary, ClusterNodeState.Self);
@@ -715,6 +717,108 @@ namespace DnsServerCore.Cluster
                 }
             }, "dns.config", "auth.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile,
                 Path.Combine("zones", bootstrap.Domain + ".zone"), Path.Combine("zones", catalog + ".zone"));
+            _managedOptionNames = bootstrap.Ownership;
+        }
+
+        internal AddressRecordChange[] PrepareLivePrimaryBootstrap(ConfigurationClusterOptions.PrimaryBootstrap bootstrap)
+        {
+            var zones = _dnsWebService.DnsServer.AuthZoneManager;
+            if (zones.GetAuthZoneInfo(bootstrap.Domain) is not null ||
+                zones.GetAuthZoneInfo("cluster-catalog." + bootstrap.Domain) is not null)
+                throw new InvalidDataException("/cluster/bootstrap: Use startup bootstrap to adopt existing cluster zones.");
+
+            var reverseRecords = new List<AddressRecordChange>();
+            foreach (IPAddress address in bootstrap.Addresses)
+            {
+                string owner = Zone.GetReverseZone(address, address.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
+                AuthZoneInfo reverse = zones.FindAuthZoneInfo(owner);
+                if (reverse?.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder))
+                    continue;
+
+                zones.CheckManifestZoneRecords(reverse.Name);
+                reverseRecords.Add(new AddressRecordChange(reverse.Name, owner, DnsResourceRecordType.PTR,
+                    zones.GetRecords(reverse.Name, owner, DnsResourceRecordType.PTR).ToArray(), [], reverse.LastModified));
+            }
+
+            return reverseRecords.ToArray();
+        }
+
+        internal void InitializeLivePrimaryFromManifest(ConfigurationClusterOptions.PrimaryBootstrap bootstrap, User actor,
+            AddressRecordChange[] reverseRecords)
+        {
+            var dns = _dnsWebService.DnsServer;
+            var zones = dns.AuthZoneManager;
+            var auth = _dnsWebService.AuthManager;
+            string domain = dns.ServerDomain;
+            var keys = dns.TsigKeys;
+            var tokens = auth.Sessions.Where(session => session.Type == UserSessionType.ClusterApiToken).Select(session => session.Token).ToHashSet();
+            string catalog = "cluster-catalog." + bootstrap.Domain;
+            string[] reverseZones = reverseRecords.Select(record => record.Zone).Distinct().ToArray();
+            var previousOptions = GetManifestOptions();
+            var previousGrants = new[] { bootstrap.Domain, catalog }.Select(name =>
+                (Name: name, Groups: auth.GetPermission(PermissionSection.Zones, name)?.GroupPermissions.ToArray())).ToArray();
+            bool started = false;
+            try
+            {
+                ConfigurationJournal.Persist(_dnsWebService.ConfigFolder, () =>
+                {
+                    try
+                    {
+                        started = true;
+                        InitializeCluster(bootstrap.Domain, bootstrap.Addresses, actor, IPAddress.Loopback, null, bootstrap.Options);
+                        zones.FlushZoneSaves([bootstrap.Domain, catalog, .. reverseZones]);
+                        WriteManifestOwnership(bootstrap.Ownership);
+                    }
+                    finally
+                    {
+                        zones.ClearClusterBootstrapSaves([bootstrap.Domain, catalog, .. reverseZones]);
+                    }
+                }, ["dns.config", "auth.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile,
+                    Path.Combine("zones", bootstrap.Domain + ".zone"), Path.Combine("zones", catalog + ".zone"),
+                    .. reverseZones.Select(name => Path.Combine("zones", name + ".zone"))]);
+            }
+            catch
+            {
+                if (started)
+                {
+                    lock (_saveLock)
+                    {
+                        DisposeAllNodes();
+                        _clusterNodes = null;
+                        _clusterDomain = null;
+                        _pendingSave = false;
+                        SetManifestOptions(previousOptions);
+                    }
+                    zones.DeleteZone(bootstrap.Domain);
+                    zones.DeleteZone(catalog);
+                    foreach (AddressRecordChange record in reverseRecords)
+                    {
+                        if (record.Previous.Count == 0)
+                            zones.DeleteRecords(record.Zone, record.Owner, record.Type);
+                        else
+                            zones.SetRecords(record.Zone, record.Previous);
+                        zones.SaveZoneFile(record.Zone);
+                    }
+                    foreach (var (name, groups) in previousGrants)
+                    {
+                        foreach (string groupName in new[] { Group.ADMINISTRATORS, Group.DNS_ADMINISTRATORS })
+                        {
+                            Group group = auth.GetGroup(groupName);
+                            auth.RemovePermission(PermissionSection.Zones, name, group);
+                            if (groups is not null && groups.FirstOrDefault(entry => entry.Key == group) is { Value: not PermissionFlag.None } grant)
+                                auth.SetPermission(PermissionSection.Zones, name, group, grant.Value);
+                        }
+                    }
+                    foreach (UserSession session in auth.Sessions)
+                    {
+                        if (session.Type == UserSessionType.ClusterApiToken && !tokens.Contains(session.Token))
+                            auth.DeleteSession(session.Token);
+                    }
+                    dns.TsigKeys = keys;
+                    dns.ServerDomain = domain;
+                }
+                throw;
+            }
             _managedOptionNames = bootstrap.Ownership;
         }
 

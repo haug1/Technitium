@@ -57,6 +57,10 @@ namespace DnsServerCore.Configuration
             public override string ToString() => nameof(SecondaryBootstrap);
         }
 
+        internal static bool RequestsPrimaryBootstrap(ConfigurationManifest manifest) =>
+            IsDeclared(manifest) && manifest.Settings.GetProperty("cluster").TryGetProperty("bootstrap", out JsonElement bootstrap) &&
+            bootstrap.TryGetProperty("role", out JsonElement role) && role.ValueKind == JsonValueKind.String && role.ValueEquals("Primary");
+
         internal static Bootstrap PrepareStartupBootstrap(ConfigurationManifest manifest, ClusterManager cluster, Auth.User admin)
         {
             if (cluster.ClusterInitialized || !IsDeclared(manifest))
@@ -68,7 +72,7 @@ namespace DnsServerCore.Configuration
                 return null;
 
             if (manifest.Settings.EnumerateObject().Any(field => field.Name is not ("schemaVersion" or "$schema" or "cluster")))
-                throw new InvalidDataException("/cluster/bootstrap: Bootstrap the node in a cluster-only startup manifest before applying other settings.");
+                throw new InvalidDataException("/cluster/bootstrap: Bootstrap the node with a cluster-only manifest before applying other settings.");
 
             string domain = section.TryGetProperty("domain", out JsonElement declaredDomain) ? declaredDomain.GetString() : null;
             if (string.IsNullOrWhiteSpace(domain))
@@ -262,6 +266,12 @@ namespace DnsServerCore.Configuration
 
         internal static void Compare(JsonElement snapshot, List<ConfigurationChange> changes)
         {
+            if (snapshot.TryGetProperty("primaryBootstrap", out _))
+            {
+                changes.Add(new ConfigurationChange("/cluster/bootstrap", ConfigurationChangeKind.Add, false));
+                return;
+            }
+
             if (snapshot.GetProperty("addressesChanged").GetBoolean())
                 changes.Add(new ConfigurationChange($"{Path}/{AddressName}", ConfigurationChangeKind.Update, false));
 

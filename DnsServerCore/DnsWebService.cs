@@ -2365,7 +2365,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/primary/updateSecondary", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.UpdateSecondaryNode));
             _webService.MapGetAndPost("/api/admin/cluster/primary/transferConfig", _clusterApi.TransferConfigAsync);
             _webService.MapGetAndPost("/api/admin/cluster/primary/setOptions", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.SetClusterOptions));
-            _webService.MapGetAndPost("/api/admin/cluster/initJoin", _clusterApi.InitializeAndJoinClusterAsync);
+            _webService.MapGetAndPost("/api/admin/cluster/initJoin", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.InitializeAndJoinClusterAsync));
             _webService.MapGetAndPost("/api/admin/cluster/secondary/leave", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.LeaveClusterAsync));
             _webService.MapGetAndPost("/api/admin/cluster/secondary/notify", _clusterApi.ConfigUpdateNotificationAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/resync", _clusterApi.ResyncCluster);

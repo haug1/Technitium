@@ -742,6 +742,14 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     ConfigurationPlan.CheckApplySupport(manifest);
+                    if (PrepareLivePrimaryBootstrap(manifest, sessionUser) is { } bootstrap)
+                    {
+                        using JsonDocument snapshot = CaptureConfigurationSnapshot(manifest, sessionUser);
+                        CheckRevision(manifest, snapshot.RootElement, expected);
+                        var reverseRecords = _dnsWebService._clusterManager.PrepareLivePrimaryBootstrap(bootstrap);
+                        _dnsWebService._clusterManager.InitializeLivePrimaryFromManifest(bootstrap, sessionUser, reverseRecords);
+                        return;
+                    }
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
                     if (HasDhcpScopeDeclaration(manifest))
                     {
@@ -863,9 +871,7 @@ namespace DnsServerCore
                           !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Modify))))
                         throw new DnsWebServiceException("Access was denied.");
                 }
-                string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
-                if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
-                    throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+                CheckRevision(manifest, current.RootElement, expected);
                 ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, ConfigurationPlan.GetDnsBindings(manifest),
                     _dnsWebService._dnsServer.CaptureDnsBindings(), _dnsWebService._dnsServer.HasDnsListenerCertificate);
                 return (proxy, dnsCertificate, webCertificate, tsig, ldap,
@@ -1048,6 +1054,28 @@ namespace DnsServerCore
                 return ConfigurationApplications.Prepare(manifest, _dnsWebService._dnsServer.DnsApplicationManager);
             }
 
+            private void CheckRevision(ConfigurationManifest manifest, JsonElement snapshot, string expected)
+            {
+                string revision = ConfigurationPlan.GetRevision(manifest, snapshot, _configurationRevisionKey);
+                if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
+                    throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+            }
+
+            private ConfigurationClusterOptions.PrimaryBootstrap PrepareLivePrimaryBootstrap(ConfigurationManifest manifest, User user)
+            {
+                if (_dnsWebService._clusterManager.ClusterInitialized || !ConfigurationClusterOptions.RequestsPrimaryBootstrap(manifest))
+                    return null;
+
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, user, PermissionFlag.Delete))
+                    throw new DnsWebServiceException("Access was denied.");
+                if (!_dnsWebService.IsWebServiceTlsEnabled)
+                    throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before bootstrapping the node.");
+
+                ConfigurationPlan.CheckApplySupport(manifest);
+                return (ConfigurationClusterOptions.PrimaryBootstrap)ConfigurationClusterOptions.PrepareStartupBootstrap(
+                    manifest, _dnsWebService._clusterManager, user);
+            }
+
             private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers = null, ConfigurationStaticSessions.Candidate preparedStaticSessions = null, ConfigurationSso.Settings preparedSso = null, ConfigurationApplications.Entry[] preparedApps = null)
             {
                 using var snapshot = new MemoryStream();
@@ -1055,7 +1083,20 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
-                    if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0))
+                    if (PrepareLivePrimaryBootstrap(manifest, sessionUser) is { } bootstrap)
+                    {
+                        var records = _dnsWebService._clusterManager.PrepareLivePrimaryBootstrap(bootstrap);
+                        writer.WritePropertyName("manifestClusterOptions");
+                        JsonSerializer.Serialize(writer, new
+                        {
+                            primaryBootstrap = bootstrap.Domain,
+                            actor = sessionUser.Username,
+                            tlsPort = _dnsWebService.WebServiceTlsPort,
+                            certificate = _dnsWebService.WebServiceTlsCertificate.Thumbprint,
+                            records = records.Select(record => new { record.Zone, record.Owner, record.Revision })
+                        });
+                    }
+                    else if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0))
                     {
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Modify))
                             throw new DnsWebServiceException("Access was denied.");
