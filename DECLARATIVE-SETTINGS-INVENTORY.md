@@ -394,3 +394,41 @@ Local user and group changes apply through the authentication manager. OIDC enab
 | `auth.ldap.allowSignup` | `ldapAllowSignup` | `ALLOW_SIGNUP` | Boolean, false. |
 | `auth.ldap.allowSignupOnlyForMappedUsers` | `ldapAllowSignupOnlyForMappedUsers` | `ALLOW_SIGNUP_ONLY_FOR_MAPPED_USERS` | Boolean, true. Applies to signup when enabled. |
 | `auth.ldap.groupMap` | `ldapGroupMap` | `GROUP_MAP` | Map of external to local groups, unset. Up to 255 mappings. Validate referenced local groups. |
+
+## DNS apps
+
+App packages and configuration live under `apps/<name>/`. The app manager applies install, update, uninstall, and configuration changes live. Cluster configuration transfer can carry app packages and configuration. The existing global update flag is mapped to `apps.autoUpdate` in the DNS settings. [App API](DnsServerCore/WebServiceAppsApi.cs#L280) · [Installation](DnsServerCore/Dns/Applications/DnsApplicationManager.cs#L396) · [Configuration](DnsServerCore/Dns/Applications/DnsApplication.cs#L231) · [Cluster transfer](DnsServerCore/DnsWebService.cs#L811)
+
+| Proposed manifest path | API field or source | Type, default, and validation |
+| --- | --- | --- |
+| `apps.packages.<name>` | `name` on app install, update, and uninstall | Named package, no apps by default. Reuse the app manager's folder-name validation and enforce unique names. |
+| `apps.packages.<name>.source` | `url` or uploaded ZIP | Optional package reference for existing installs, required to install a missing package. The download API uses HTTPS. An installed package's ZIP can be reused when available, and the original URL is not reliably persisted. |
+| `apps.packages.<name>.version` | Installed app version in list response and package assembly | Optional version for existing apps. Verify the version against the installed or supplied package. Reconcile explicit pins with the global automatic update flag. |
+| `apps.packages.<name>.configuration` | `config` in the app config API | Optional native text or file reference. Default comes from the package when present. The manager calls each loaded implementation's initializer and saves `dnsApp.config`; empty clears the file if the app accepts it. Use file or secret references for sensitive app settings. |
+
+App-owned configuration stays opaque to the server's schema and is validated by the app. Package installation must preserve any existing app configuration unless the manifest explicitly manages it. App caches, downloaded data, logs, and derived version information remain app state.
+
+## Clustering
+
+`cluster.config` version 1 persists the cluster domain, intervals, last sync timestamp, and a membership list. Node entries store an ID, URL, IP addresses, role, and state. Cluster lifecycle APIs initialize, join, leave, and promote nodes. The manifest should express the intended topology and use those operations so it preserves membership identities, certificates, and the cluster catalog. [Cluster persistence](DnsServerCore/Cluster/ClusterManager.cs#L346) · [Node persistence](DnsServerCore/Cluster/ClusterNode.cs#L692) · [Cluster API](DnsServerCore/WebServiceClusterApi.cs#L230)
+
+| Proposed manifest path | API field or operation | Type, default, and validation |
+| --- | --- | --- |
+| `cluster.bootstrap.role` | Initialize primary or initialize and join secondary | Explicit role for an uninitialized instance. A fresh server starts without a cluster. Existing promotion, leave, and delete operations change topology and require explicit intent. |
+| `cluster.domain` | `clusterDomain` | DNS name, required for initialization. Normalize the domain and validate compatibility with the cluster zones and node names. The domain is fixed after initialization. |
+| `cluster.node.addresses` | `ipAddresses`, bootstrap aliases `primaryNodeIpAddresses` and `secondaryNodeIpAddresses` | Node-local IP address array, required to initialize or join. The node URL derives from the DNS server domain and TLS listener port. Updates publish the advertised addresses through the cluster manager. |
+| `cluster.bootstrap.primaryUrl` | `primaryNodeUrl` | Primary URL for a joining secondary. Use the primary's DNS hostname. Validate compatibility with the primary returned by the cluster. |
+| `cluster.bootstrap.primaryAddress` | `primaryNodeIpAddress` | Optional IP address, unset. Allows the join to contact the primary before cluster DNS resolution is available. |
+| `cluster.bootstrap.username` | `primaryNodeUsername` | Required account name for join. The account must be able to perform the primary-side operation. |
+| `cluster.bootstrap.password`, `cluster.bootstrap.totp` | `primaryNodePassword`, `primaryNodeTotp` | Join credential references. Password required by the existing join API, TOTP conditional. Resolve on use and keep credential material out of exported topology. |
+| `cluster.bootstrap.ignoreCertificateErrors` | `ignoreCertificateErrors` | Boolean, false. Applies to the initial join connection. |
+| `cluster.heartbeatRefreshSeconds` | `heartbeatRefreshIntervalSeconds` | Integer seconds, 30. Range 10–300. Only the primary updates cluster options. |
+| `cluster.heartbeatRetrySeconds` | `heartbeatRetryIntervalSeconds` | Integer seconds, 10. Range 10–300. Only the primary updates cluster options. |
+| `cluster.configRefreshSeconds` | `configRefreshIntervalSeconds` | Integer seconds, 900. Range 30–3600 and greater than the heartbeat refresh interval. |
+| `cluster.configRetrySeconds` | `configRetryIntervalSeconds` | Integer seconds, 60. Range 30–3600. Only the primary updates cluster options. |
+
+Remote member URLs and addresses are synchronized topology. Updating them maps to cluster node lifecycle operations with the relevant node identity. Node IDs, current membership state, last-seen and last-sync timestamps, generated cluster credentials, and certificate material are managed by the cluster. TLS must be available for cluster communication. Preserve node-local DNS listeners, web service, logging, and DHCP settings across transfers. [Options validation](DnsServerCore/Cluster/ClusterManager.cs#L885) · [Join lifecycle](DnsServerCore/Cluster/ClusterManager.cs#L1313)
+
+## Host startup inputs
+
+The console and Windows service select the configuration directory before loading settings. Console portable mode influences the default log directory, and `--stop-if-bind-fails` controls listener startup failure handling. Keep these as host inputs so the server can find the manifest before interpreting its fields. Container mounts, exposed ports, service-manager settings, and installer options belong to deployment configuration. [Console startup](DnsServerApp/Program.cs#L30) · [Windows startup](DnsServerWindowsService/DnsServiceWorker.cs#L33)
