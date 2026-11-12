@@ -95,9 +95,7 @@ namespace DnsServerCore.Configuration
                     }
                 }
                 manager.Applications.TryGetValue(item.Name, out DnsApplication app);
-                string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
-                if (pin is not null && !System.Version.TryParse(pin, out _))
-                    throw new InvalidDataException($"{path}/version: Invalid app version.");
+                string pin = ReadVersionPin(item.Value, path);
                 var (packageDigest, sourceDigest) = ReadPackagePins(item.Value, source, path);
                 string before = app?.ReadManifestConfig();
                 bool versionDiffers = app is not null && pin is not null && pin != DnsWebService.GetCleanVersion(app.Version) &&
@@ -166,6 +164,7 @@ namespace DnsServerCore.Configuration
 
         internal static void ValidatePackageReferences(ConfigurationManifest manifest, JsonElement declaration, string path)
         {
+            ReadVersionPin(declaration, path);
             declaration.TryGetProperty("source", out JsonElement source);
             var (packageDigest, sourceDigest) = ReadPackagePins(declaration, source, path);
             if (source.ValueKind != JsonValueKind.Object)
@@ -175,6 +174,15 @@ namespace DnsServerCore.Configuration
                 ReadRemoteSource(url, path);
             else if (source.TryGetProperty("file", out _))
                 ValidateLocalSource(manifest, source, path, packageDigest, sourceDigest);
+        }
+
+        private static string ReadVersionPin(JsonElement declaration, string path)
+        {
+            string pin = declaration.TryGetProperty("version", out JsonElement version) ? version.GetString() : null;
+            if (pin is not null && !System.Version.TryParse(pin, out _))
+                throw new InvalidDataException($"{path}/version: Invalid app version.");
+
+            return pin;
         }
 
         private static Uri ReadRemoteSource(JsonElement url, string path)

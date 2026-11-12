@@ -167,6 +167,24 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public void OfflineValidationRejectsInvalidAppVersionPins()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"apps":{"packages":{"Fixture":{"version":"fixture-invalid-version",
+                 "source":{"url":"https://example.test/app.zip"}}}}}
+                """);
+            var error = Assert.Throws<InvalidDataException>(ConfigurationManifest.Load(path).ValidateReferences);
+            Assert.Contains("/apps/packages/Fixture/version", error.Message);
+            Assert.DoesNotContain("fixture-invalid-version", error.Message);
+
+            path = WriteManifest("""
+                {"schemaVersion":1,"apps":{"packages":{"Fixture":{"version":"1.2.3",
+                 "source":{"url":"https://example.test/app.zip"}}}}}
+                """);
+            ConfigurationManifest.Load(path).ValidateReferences();
+        }
+
+        [Fact]
         public void ResolvesRelativeFileReferencesBesideTheManifest()
         {
             string path = WriteManifest("""{"schemaVersion":1,"web":{"certificate":{"password":{"file":"private-name"}}}}""");

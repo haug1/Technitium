@@ -40,6 +40,13 @@ namespace DnsServerCore.Tests
             Assert.Equal("error", applied.GetProperty("status").GetString());
             Assert.Contains("/apps/packages/RemoteFixture/source", applied.GetProperty("errorMessage").GetString());
             Assert.False(Directory.Exists(Path.Combine(server.ConfigurationDirectory, "apps", "RemoteFixture")));
+
+            using var retryBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement retried = await server.CallAsync("settings/config/apply", server.AdminToken, retryBody,
+                plan.GetProperty("response").GetProperty("revision").GetString());
+            Assert.Equal("error", retried.GetProperty("status").GetString());
+            Assert.Equal(applied.GetProperty("errorMessage").GetString(), retried.GetProperty("errorMessage").GetString());
+            Assert.False(Directory.Exists(Path.Combine(server.ConfigurationDirectory, "apps", "RemoteFixture")));
         }
 
         [Fact]
