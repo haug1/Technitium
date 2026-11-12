@@ -1,5 +1,30 @@
 # Build Instructions
 
+## Linux development with Nix
+
+On x86-64 or ARM64 Linux, run `nix develop` from the repository root. If flakes are disabled, run `nix --extra-experimental-features 'nix-command flakes' develop`. The shell provides the pinned .NET 10 SDK, MsQuic for DNS-over-QUIC and HTTP/3, and `dig` for DNS checks.
+
+Inside the shell, build the sibling library checkout once and rebuild it after library changes. Skip the clone if you already have `../TechnitiumLibrary`.
+
+```sh
+git clone https://github.com/TechnitiumSoftware/TechnitiumLibrary.git ../TechnitiumLibrary
+for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
+    dotnet build "../TechnitiumLibrary/$project/$project.csproj" -c Release || break
+done
+```
+
+Build the server and run it with a scratch configuration directory. Reuse that directory on later runs to keep your local settings.
+
+```sh
+dotnet build DnsServerApp/DnsServerApp.csproj
+scratch_config=$(mktemp -d)
+DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES=127.0.0.1 \
+    dotnet run --no-build --project DnsServerApp/DnsServerApp.csproj -- \
+    --portable-app --stop-if-bind-fails "$scratch_config"
+```
+
+Open the web console URL printed at startup. A fresh configuration uses DNS port 53, which must be available and may require bind privileges. Use the web console to change the DNS listener to a development port such as 5353 for subsequent runs with the same configuration directory.
+
 ## For Windows
 
 To build the Technitium DNS Server Windows Setup, you need to install [Microsoft Visual Studio Community](https://visualstudio.microsoft.com/vs/) and [Inno Setup](https://jrsoftware.org/isinfo.php) on your computer. Once you have it installed, follow the steps below:
