@@ -733,12 +733,17 @@ namespace DnsServerCore.Tests
                 JsonElement inUse = await server.CallAsync("settings/config/plan", server.AdminToken, clearContent);
                 Assert.Equal("error", inUse.GetProperty("status").GetString());
                 Assert.Contains("still referenced by a zone", inUse.GetProperty("errorMessage").GetString());
-                LoopbackWebService.AssertOk(await server.CallAsync("zones/options/set?zone=transfer.test&zoneTransferTsigKeyNames=false", server.AdminToken));
-                JsonElement cleared = await PreviewAsync(server, clear);
-                LoopbackWebService.AssertOk(await ApplyAsync(server, clear, cleared.GetProperty("revision").GetString()!));
+                const string clearWithReferences = """
+                    {"schemaVersion":1,"dns":{"tsigKeys":null},"zones":{"transfer.test":{"transfer":{"tsigKeys":null}}}}
+                    """;
+                JsonElement cleared = await PreviewAsync(server, clearWithReferences);
+                Assert.Contains(cleared.GetProperty("changes").EnumerateArray(),
+                    change => change.GetProperty("path").ValueEquals("/zones/transfer.test/transfer/tsigKeys"));
+                LoopbackWebService.AssertOk(await ApplyAsync(server, clearWithReferences, cleared.GetProperty("revision").GetString()!));
                 await server.RestartAsync();
                 JsonElement settings = await server.GetSettingsAsync();
                 Assert.Empty(settings.GetProperty("tsigKeys").EnumerateArray());
+                Assert.Empty((await PreviewAsync(server, clearWithReferences)).GetProperty("changes").EnumerateArray());
                 Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), path => path.GetString() == "/dns/tsigKeys");
             }
             finally

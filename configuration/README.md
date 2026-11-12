@@ -70,7 +70,7 @@ The current preview covers the DNS server domain, DNS listener endpoints and sou
 
 TSIG preview uses `dns.tsigKeys`. A new key requires an algorithm and a secret reference that resolves to nonempty base64. Existing keys retain omitted fields. A null entry previews removal, and a null map previews clearing the operator keys. The cluster catalog key is reserved. Standalone servers can apply these changes without restarting DNS. The server rejects removal of a key still referenced by a zone and prevents conflicting settings writes and backup restores while keys are managed.
 
-Primary-zone `transfer.tsigKeys` lists canonical names of TSIG keys in the effective DNS configuration, including keys added in the same manifest. An empty list or null clears the references. Export includes the names and reports TSIG secrets separately as missing inputs. Clear zone references before applying a manifest that deletes a key.
+Primary-zone `transfer.tsigKeys` lists canonical names of TSIG keys in the effective DNS configuration, including keys added in the same manifest. An empty list or null clears the references. Export includes the names and reports TSIG secrets separately as missing inputs. A manifest can remove a key and its primary-zone transfer references in one apply. A key still referenced by any effective zone policy cannot be removed.
 
 Explicit `allowZones` and `blockZones` apply live on standalone servers. Each declared array replaces its entire list, and an empty array or null clears it. Names are canonicalized and deduplicated. An IP address selects its reverse DNS name. Allow rules still take precedence over block rules. The settings API and backup restore reject changes to a list while the manifest owns it.
 

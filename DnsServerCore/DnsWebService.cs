@@ -3069,7 +3069,7 @@ namespace DnsServerCore
 
             string catalogKey = _clusterManager.ClusterInitialized ? ConfigurationTsig.GetCatalogKey(_clusterManager.ClusterDomain) : null;
             var candidate = ConfigurationTsig.Prepare(manifest, declaration, _dnsServer.TsigKeys, catalogKey);
-            _dnsServer.ValidateManifestTsigRemovals(candidate.Keys);
+            _dnsServer.ValidateManifestTsigRemovals(candidate.Keys, manifest);
             return candidate;
         }
 

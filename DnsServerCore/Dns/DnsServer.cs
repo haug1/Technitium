@@ -51,6 +51,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary;
@@ -705,7 +706,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        internal void ValidateManifestTsigRemovals(IReadOnlyDictionary<string, TsigKey> candidate)
+        internal void ValidateManifestTsigRemovals(IReadOnlyDictionary<string, TsigKey> candidate, ConfigurationManifest manifest)
         {
             if (_tsigKeys is null)
                 return;
@@ -713,12 +714,31 @@ namespace DnsServerCore.Dns
             string[] removed = _tsigKeys.Keys.Where(name => !candidate.ContainsKey(name)).ToArray();
             if (removed.Length == 0)
                 return;
-            IReadOnlyList<AuthZoneInfo> zones = _authZoneManager.GetAllZones();
-            foreach (string name in removed)
+            var declarations = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            if (manifest.Settings.TryGetProperty("zones", out JsonElement declaredZones))
             {
-                foreach (AuthZoneInfo zone in zones)
+                foreach (JsonProperty declaration in declaredZones.EnumerateObject())
                 {
-                    if (zone.ZoneTransferTsigKeyNames?.Contains(name) == true || zone.UpdateSecurityPolicies?.ContainsKey(name) == true)
+                    string path = ConfigurationPlan.AppendPath("/zones", declaration.Name);
+                    declarations.Add(ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true), declaration.Value);
+                }
+            }
+
+            foreach (AuthZoneInfo zone in _authZoneManager.GetAllZones())
+            {
+                IReadOnlySet<string> transferKeys = zone.ZoneTransferTsigKeyNames;
+                if (zone.Type == AuthZoneType.Primary && zone.CatalogZoneName is null &&
+                    declarations.TryGetValue(zone.Name, out JsonElement declaration))
+                {
+                    if (declaration.ValueKind == JsonValueKind.Null)
+                        continue;
+                    transferKeys = ConfigurationZonePolicies.ReadTransferKeys(declaration,
+                        AuthZoneManager.GetManifestZonePath(zone.Name)) ?? transferKeys;
+                }
+
+                foreach (string name in removed)
+                {
+                    if (transferKeys?.Contains(name) == true || zone.UpdateSecurityPolicies?.ContainsKey(name) == true)
                         throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationTsig.Path, name)}: The TSIG key is still referenced by a zone.");
                 }
             }
@@ -8577,7 +8597,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, ConfigurationTsig.Candidate tsig, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, ConfigurationTsig.Candidate tsig, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationManifest manifest, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8911,7 +8931,7 @@ namespace DnsServerCore.Dns
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
                     if (tsig.Keys is not null)
-                        ValidateManifestTsigRemovals(tsig.Keys);
+                        ValidateManifestTsigRemovals(tsig.Keys, manifest);
                     bool tsigChanged = tsig.Keys is not null && (tsig.Keys.Count != (_tsigKeys?.Count ?? 0) ||
                         tsig.Keys.Any(entry => _tsigKeys is null || !_tsigKeys.TryGetValue(entry.Key, out TsigKey existing) ||
                             !ConfigurationTsig.SameKey(existing, entry.Value)));
