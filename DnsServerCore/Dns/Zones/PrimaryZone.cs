@@ -2611,25 +2611,21 @@ namespace DnsServerCore.Dns.Zones
             return 24 * 60 * 60;
         }
 
-        internal void CheckDnsKeyTtlUpdate()
+        private void CheckDnsKeyTtlUpdate()
         {
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("The zone must be signed.");
 
             lock (_dnssecPrivateKeys)
-            {
-                foreach (KeyValuePair<ushort, DnssecPrivateKey> privateKeyEntry in _dnssecPrivateKeys)
-                {
-                    switch (privateKeyEntry.Value.State)
-                    {
-                        case DnssecPrivateKeyState.Ready:
-                        case DnssecPrivateKeyState.Active:
-                            break;
+                CheckDnsKeyTtlUpdate(_dnssecPrivateKeys.Values);
+        }
 
-                        default:
-                            throw new DnsServerException("Cannot update DNSKEY TTL value: one or more private keys have state other than Ready or Active.");
-                    }
-                }
+        internal static void CheckDnsKeyTtlUpdate(IEnumerable<DnssecPrivateKey> keys)
+        {
+            foreach (DnssecPrivateKey key in keys)
+            {
+                if (key.State is not (DnssecPrivateKeyState.Ready or DnssecPrivateKeyState.Active))
+                    throw new DnsServerException("Cannot update DNSKEY TTL value: one or more private keys have state other than Ready or Active.");
             }
         }
 

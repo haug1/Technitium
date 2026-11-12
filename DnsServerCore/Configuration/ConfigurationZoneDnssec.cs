@@ -153,7 +153,8 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{removal.Path}: Only Generated keys can be removed. Use the DNSSEC lifecycle to retire a published key.");
                     removals.Add(removal);
                 }
-                var remaining = existingKeys.Where(key => !key.IsRetiring && !removals.Any(removal => removal.Tag == key.KeyTag)).ToList();
+                var removedTags = removals.Select(removal => removal.Tag).ToHashSet();
+                var remaining = existingKeys.Where(key => !key.IsRetiring && !removedTags.Contains(key.KeyTag)).ToList();
                 var rollovers = new List<RolloverChange>();
                 foreach (Key expected in parsed.OrderBy(key => key.Imported is null))
                 {
@@ -197,7 +198,7 @@ namespace DnsServerCore.Configuration
                 {
                     try
                     {
-                        ((PrimaryZone)current.ApexZone).CheckDnsKeyTtlUpdate();
+                        PrimaryZone.CheckDnsKeyTtlUpdate(existingKeys.Where(key => !removedTags.Contains(key.KeyTag)));
                     }
                     catch (DnsServerException ex)
                     {

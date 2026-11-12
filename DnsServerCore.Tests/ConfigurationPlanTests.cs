@@ -2,6 +2,7 @@
 using DnsServerCore.Dhcp;
 using DnsServerCore.Dhcp.Options;
 using DnsServerCore.Dns.Zones;
+using DnsServerCore.Dns.Dnssec;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -3408,6 +3409,48 @@ namespace DnsServerCore.Tests
                 Assert.Equal(2, (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer.Count);
                 return key;
             }
+        }
+
+        [Fact]
+        public async Task ManifestValidatesDnsKeyTtlAgainstKeysRemainingAfterRemoval()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "candidate-keys.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256", server.AdminToken));
+            const string add = """
+                {"schemaVersion":1,"zones":{"candidate-keys.test":{"dnssec":{"keys":{
+                    "next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P384"}
+                }}}}}
+                """;
+            string revision = (await PreviewAsync(server, add)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, add, revision));
+
+            var keys = server.Dns.AuthZoneManager.GetAuthZoneInfo(name).DnssecPrivateKeys!;
+            // Prepare the existing KSK as though its publication interval has elapsed.
+            Assert.Single(keys, key => key.KeyType == DnssecPrivateKeyType.KeySigningKey).SetState(DnssecPrivateKeyState.Ready);
+            ushort pendingTag = Assert.Single(keys, key => key.State == DnssecPrivateKeyState.Generated).KeyTag;
+            const string ttlOnly = """{"schemaVersion":1,"zones":{"candidate-keys.test":{"dnssec":{"dnsKeyTtl":1800}}}}""";
+            using (var body = new StringContent(ttlOnly, Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, body);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/dnssec/dnsKeyTtl", rejected.GetProperty("errorMessage").GetString());
+            }
+
+            string combined = $$"""
+                {"schemaVersion":1,"zones":{"candidate-keys.test":{"dnssec":{"dnsKeyTtl":1800,"keys":{"{{pendingTag}}":null} } } } }
+                """;
+            var plan = await PreviewAsync(server, combined);
+            Assert.Equal(2, plan.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, combined, plan.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            Assert.DoesNotContain(server.Dns.AuthZoneManager.GetAuthZoneInfo(name).DnssecPrivateKeys!, key => key.KeyTag == pendingTag);
+            var answer = (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer;
+            Assert.Equal(2, answer.Count);
+            Assert.All(answer, record => Assert.Equal(1800u, record.OriginalTtlValue));
+            Assert.Empty((await PreviewAsync(server, combined)).GetProperty("changes").EnumerateArray());
         }
 
         [Fact]

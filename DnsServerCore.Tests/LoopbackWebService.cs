@@ -24,7 +24,8 @@ namespace DnsServerCore.Tests
 
         public HttpClient Client { get; private set; } = null!;
         public string ConfigurationDirectory => _configuration.FullName;
-        public DnsApplicationManager Applications => _service!.DnsServer.DnsApplicationManager;
+        internal DnsServer Dns => _service!.DnsServer;
+        public DnsApplicationManager Applications => Dns.DnsApplicationManager;
         public int DnsPort => DnsEndPoint.Port;
         public string AdminPassword { get; private init; } = null!;
         public string AdminToken { get; private set; } = null!;
