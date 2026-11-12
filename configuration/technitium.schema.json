@@ -1191,6 +1191,7 @@
             {"type": "null"}
           ]
         },
+        "packageSha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9A-Fa-f]{64}$"},
         "version": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
         "configuration": {"anyOf": [{"$ref": "#/$defs/appConfiguration"}, {"type": "null"}]}
       }

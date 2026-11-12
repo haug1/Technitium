@@ -39,6 +39,8 @@ namespace DnsServerCore.Configuration
                     paths.Add(path + "/configuration");
                 if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null)
                     paths.Add(path + "/version");
+                if (item.Value.TryGetProperty("packageSha256", out _))
+                    paths.Add(path + "/packageSha256");
             }
             return paths.ToArray();
         }
@@ -96,13 +98,24 @@ namespace DnsServerCore.Configuration
                 string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
                 if (pin is not null && !System.Version.TryParse(pin, out _))
                     throw new InvalidDataException($"{path}/version: Invalid app version.");
+                string sourceDigest = source.ValueKind == JsonValueKind.Object ? ReadPackageSha256(source) : null;
+                string packageDigest = item.Value.TryGetProperty("packageSha256", out JsonElement digest) ? digest.GetString() : null;
+                if (sourceDigest is not null && packageDigest is not null && !sourceDigest.Equals(packageDigest, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"{path}/source/sha256: The source digest differs from packageSha256.");
                 string before = app?.ReadManifestConfig();
-                bool replace = app is not null && pin is not null && pin != DnsWebService.GetCleanVersion(app.Version) &&
+                bool versionDiffers = app is not null && pin is not null && pin != DnsWebService.GetCleanVersion(app.Version) &&
                     new System.Version(pin) != app.Version;
+                bool digestDiffers = app is not null && packageDigest is not null &&
+                    !packageDigest.Equals(ReadInstalledPackageHash(app), StringComparison.OrdinalIgnoreCase);
+                bool replace = versionDiffers || digestDiffers;
                 if (app is null || replace)
                 {
                     if (replace && source.ValueKind != JsonValueKind.Object)
-                        throw new InvalidDataException($"{path}/version: The installed version does not match and needs a replacement package.");
+                    {
+                        if (versionDiffers)
+                            throw new InvalidDataException($"{path}/version: The installed version does not match and needs a replacement package.");
+                        throw new InvalidDataException($"{path}/packageSha256: The stored package digest does not match. Supply a replacement package.");
+                    }
                     if (source.ValueKind != JsonValueKind.Object)
                         throw new InvalidDataException($"{path}: The DNS app is not installed and needs a package source.");
                     byte[] package = null;
@@ -121,7 +134,7 @@ namespace DnsServerCore.Configuration
                         }
                     }
 
-                    string sha256 = ReadPackageSha256(source);
+                    string sha256 = packageDigest ?? sourceDigest;
                     if (package is not null && sha256 is not null)
                         CheckPackageHash(sha256, SHA256.HashData(package), path + "/source");
 
@@ -131,7 +144,7 @@ namespace DnsServerCore.Configuration
                     continue;
                 }
                 string after = ReadConfig(item.Value, before, path);
-                entries.Add(new Entry(app, before, after));
+                entries.Add(new Entry(app, before, after, PackageSha256: packageDigest));
             }
             return entries.ToArray();
 
@@ -257,6 +270,8 @@ namespace DnsServerCore.Configuration
             {
                 string path = ConfigurationPlan.AppendPath(Path, app.Name);
                 var declaration = new JsonObject { ["version"] = app.Version.ToString() };
+                if (ReadInstalledPackageHash(app) is string digest)
+                    declaration["packageSha256"] = digest;
                 result[app.Name] = declaration;
                 missingInputs.Add(path + "/source");
                 if (app.ReadManifestConfig() is not null)
@@ -265,6 +280,19 @@ namespace DnsServerCore.Configuration
                     declaration["configuration"] = null;
             }
             return result;
+        }
+
+        private static string ReadInstalledPackageHash(DnsApplication app)
+        {
+            try
+            {
+                using var package = File.OpenRead(System.IO.Path.Combine(app.DnsServer.ApplicationFolder, app.Name + ".zip"));
+                return Convert.ToHexString(SHA256.HashData(package));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return null;
+            }
         }
 
         internal static async Task ApplyAsync(DnsApplicationManager manager, Entry[] entries, string[] ownership, Func<Action, string[], Task> commit,
@@ -289,7 +317,9 @@ namespace DnsServerCore.Configuration
                 foreach (Entry entry in entries)
                 {
                     manager.Applications.TryGetValue(entry.Name, out DnsApplication current);
-                    if (!ReferenceEquals(current, entry.Application) || (current is not null && current.ReadManifestConfig() != entry.Before))
+                    if (!ReferenceEquals(current, entry.Application) || (current is not null && current.ReadManifestConfig() != entry.Before) ||
+                        (entry.InstallName is null && entry.PackageSha256 is not null &&
+                        !entry.PackageSha256.Equals(ReadInstalledPackageHash(current), StringComparison.OrdinalIgnoreCase)))
                         throw new InvalidDataException($"{entry.SettingPath}: The app changed during apply. Create a new preview.");
                 }
                 var packages = new Dictionary<string, byte[]>(StringComparer.Ordinal);

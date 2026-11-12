@@ -417,7 +417,7 @@ namespace DnsServerCore.Dns.Applications
         {
             string path = ConfigurationApplications.AppPath(name);
             var paths = _manifestOwnedPaths;
-            return paths.Contains(path + "/version") || paths.Contains(path + "/configuration");
+            return paths.Contains(path + "/version") || paths.Contains(path + "/packageSha256") || paths.Contains(path + "/configuration");
         }
 
         internal void CheckPackageUpdate(string name)

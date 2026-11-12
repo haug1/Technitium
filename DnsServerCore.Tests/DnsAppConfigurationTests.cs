@@ -113,6 +113,16 @@ namespace DnsServerCore.Tests
             JsonElement response = export.GetProperty("response");
             JsonElement appConfig = response.GetProperty("manifest").GetProperty("apps").GetProperty("packages").GetProperty("FilterAaaa");
             Assert.Equal(version, appConfig.GetProperty("version").GetString());
+            string packageDigest = Convert.ToHexString(SHA256.HashData(package.ToArray()));
+            Assert.Equal(packageDigest, appConfig.GetProperty("packageSha256").GetString());
+            var wrongInstalledPackage = JsonNode.Parse(BuildManifest(version, """{"enableFilterAaaa":false}"""))!;
+            wrongInstalledPackage["apps"]!["packages"]!["FilterAaaa"]!["packageSha256"] = new string('0', 64);
+            using (var body = new StringContent(wrongInstalledPackage.ToJsonString(), Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, body);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/apps/packages/FilterAaaa/packageSha256", rejected.GetProperty("errorMessage").GetString());
+            }
             Assert.False(appConfig.TryGetProperty("configuration", out _));
             Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
                 input => input.ValueEquals("/apps/packages/FilterAaaa/configuration"));
@@ -234,7 +244,10 @@ namespace DnsServerCore.Tests
             Assert.True(Directory.Exists(appFolder));
             Assert.Equal(File.ReadAllBytes(oldPackage), File.ReadAllBytes(Path.Combine(appFolder, "FilterAaaa.zip")));
 
-            install["apps"]!["packages"]!["FilterAaaa"]!.AsObject().Remove("configuration");
+            var migrated = install["apps"]!["packages"]!["FilterAaaa"]!.AsObject();
+            migrated.Remove("configuration");
+            migrated["packageSha256"] = packageDigest;
+            migrated["source"]!.AsObject().Remove("sha256");
             await File.WriteAllTextAsync(startupPath, install.ToJsonString());
             await server.RestartAsync();
             Assert.True(File.Exists(Path.Combine(appFolder, "FilterAaaa.zip")));
