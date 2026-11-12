@@ -795,6 +795,10 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (ldap is not null && ConfigurationLdap.Same(ldap, auth.GetManifestLdapSettings()))
                 ldap = null;
 
+            string[] ldapOwnership = ConfigurationLdap.GetOwnedFields(manifest);
+            if (auth.ManagedLdapFields.SequenceEqual(ldapOwnership))
+                ldapOwnership = null;
+
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
@@ -855,7 +859,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
                 !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
-            if (changed.Count == 0 && !ownershipChanged && ldap is null)
+            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null)
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
@@ -863,6 +867,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 files.Add("auth.config");
             if (ownershipChanged)
                 files.Add(ManifestOwnershipFile);
+            if (ldapOwnership is not null)
+                files.Add(AuthManager.LdapOwnershipFile);
             var created = new Dictionary<string, PrimaryZone>(StringComparer.Ordinal);
             var stagedRecords = new Dictionary<string, (PrimaryZone Zone, List<DnsResourceRecord> Records,
                 HashSet<(string Owner, DnsResourceRecordType Type)> ChangedSets)>(StringComparer.Ordinal);
@@ -941,7 +947,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         try
                         {
-                            auth.ApplyManifestAuth(membership, creator, ldap, write =>
+                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, write =>
                             {
                                 writeAuth = write;
                                 persist();

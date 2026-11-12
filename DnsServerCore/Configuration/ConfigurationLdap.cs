@@ -110,6 +110,57 @@ namespace DnsServerCore.Configuration
             groupMap = settings.GroupMap?.OrderBy(entry => entry.Key, StringComparer.Ordinal).ToDictionary() ?? []
         }).AsObject();
 
+        internal static string[] GetOwnedFields(ConfigurationManifest manifest)
+        {
+            if (!IsDeclared(manifest))
+                return [];
+
+            var fields = new List<string>();
+            foreach (JsonProperty field in manifest.Settings.GetProperty("auth").GetProperty("ldap").EnumerateObject())
+            {
+                if (field.Name == "groupMap" && field.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (JsonProperty entry in field.Value.EnumerateObject())
+                        fields.Add(ConfigurationPlan.AppendPath("groupMap", entry.Name));
+                }
+                else
+                {
+                    fields.Add(field.Name);
+                }
+            }
+            fields.Sort(StringComparer.Ordinal);
+            return fields.ToArray();
+        }
+
+        internal static void CheckOwnership(Settings current, Settings candidate, IReadOnlyList<string> fields)
+        {
+            if (fields.Count == 0)
+                return;
+
+            JsonObject before = Export(current);
+            JsonObject after = Export(candidate);
+            foreach (string field in fields)
+            {
+                bool changed;
+                if (field == "bindPassword")
+                {
+                    changed = current.BindPassword != candidate.BindPassword;
+                }
+                else if (field.StartsWith("groupMap/", StringComparison.Ordinal))
+                {
+                    string key = field["groupMap/".Length..].Replace("~1", "/").Replace("~0", "~");
+                    changed = !JsonNode.DeepEquals(before["groupMap"]?[key], after["groupMap"]?[key]);
+                }
+                else
+                {
+                    changed = !JsonNode.DeepEquals(before[field], after[field]);
+                }
+
+                if (changed)
+                    throw new InvalidDataException($"{Path}/{field}: LDAP setting is managed by the configuration manifest.");
+            }
+        }
+
         internal static bool Same(Settings first, Settings second) =>
             first.BindPassword == second.BindPassword && JsonNode.DeepEquals(Export(first), Export(second));
 

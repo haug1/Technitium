@@ -3269,6 +3269,12 @@ namespace DnsServerCore.Tests
         public async Task LdapManifestPersistsSettingsAndExportsWithoutTheBindPassword()
         {
             await using var server = await LoopbackWebService.StartAsync();
+            using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+            backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+            backup.EnsureSuccessStatusCode();
+            byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
             const string variable = "TECHNITIUM_TEST_LDAP_BIND_SECRET";
             const string secret = "test-directory-bind-password";
             string? previous = Environment.GetEnvironmentVariable(variable);
@@ -3294,6 +3300,21 @@ namespace DnsServerCore.Tests
                 await server.RestartAsync();
                 Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
 
+                JsonElement rejected = await server.CallAsync(
+                    "admin/ldap/set?ldapServer=other.test&ldapIgnoreSslErrors=true", server.AdminToken);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/auth/ldap/server", rejected.GetProperty("errorMessage").GetString());
+                JsonElement ldapConfig = await server.CallAsync("admin/ldap/get", server.AdminToken);
+                LoopbackWebService.AssertOk(ldapConfig);
+                Assert.False(ldapConfig.GetProperty("response").GetProperty("ldapIgnoreSslErrors").GetBoolean());
+
+                using var form = new MultipartFormDataContent();
+                form.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+                JsonElement restore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, form);
+                Assert.Equal("error", restore.GetProperty("status").GetString());
+                Assert.Contains("/auth/ldap/", restore.GetProperty("errorMessage").GetString());
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
                 JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
                 LoopbackWebService.AssertOk(export);
                 JsonElement response = export.GetProperty("response");
@@ -3304,6 +3325,12 @@ namespace DnsServerCore.Tests
                 Assert.False(ldap.TryGetProperty("bindPassword", out _));
                 Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/auth/ldap/bindPassword"));
                 Assert.DoesNotContain(secret, export.GetRawText());
+
+                const string release = """{"schemaVersion":1}""";
+                revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+                await server.RestartAsync();
+                LoopbackWebService.AssertOk(await server.CallAsync("admin/ldap/set?ldapServer=other.test", server.AdminToken));
             }
             finally
             {

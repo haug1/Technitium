@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Auth;
+using DnsServerCore.Configuration;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
 using System;
@@ -461,6 +462,11 @@ namespace DnsServerCore
 
             private void WriteLdapConfig(Utf8JsonWriter jsonWriter, bool includeGroups)
             {
+                jsonWriter.WriteStartArray("managedSettings");
+                foreach (string field in _dnsWebService._authManager.ManagedLdapFields)
+                    jsonWriter.WriteStringValue(ConfigurationLdap.Path + "/" + field);
+                jsonWriter.WriteEndArray();
+
                 jsonWriter.WriteBoolean("ldapEnabled", _dnsWebService._authManager.LdapEnabled);
                 jsonWriter.WriteString("ldapServer", _dnsWebService._authManager.LdapServer);
                 jsonWriter.WriteNumber("ldapPort", _dnsWebService._authManager.LdapPort);
@@ -2086,6 +2092,41 @@ namespace DnsServerCore
 
                 HttpRequest request = context.Request;
 
+                AuthManager auth = _dnsWebService._authManager;
+                bool hasGroupMap = request.TryQueryOrFormArray("ldapGroupMap", static tableRow =>
+                    new KeyValuePair<string, string>(tableRow[0], tableRow[1]),
+                    2, out KeyValuePair<string, string>[] groupMapEntries, '|');
+                var groups = hasGroupMap ? new Dictionary<string, string>(groupMapEntries) : null;
+
+                if (auth.ManagedLdapFields.Count > 0)
+                {
+                    ConfigurationLdap.Settings current = auth.GetManifestLdapSettings();
+                    string password = ReadText("ldapBindPassword", current.BindPassword);
+                    var candidate = current with
+                    {
+                        Enabled = ReadFlag("ldapEnabled", current.Enabled),
+                        Server = ReadText("ldapServer", current.Server),
+                        Port = request.TryGetQueryOrForm("ldapPort", int.Parse, out int port) ? port : current.Port,
+                        SslOption = request.TryGetQueryOrFormEnum("ldapSslOption", out LdapAuthSslOption ssl) ? ssl : current.SslOption,
+                        IgnoreSslErrors = ReadFlag("ldapIgnoreSslErrors", current.IgnoreSslErrors),
+                        BindUsername = ReadText("ldapBindUsername", current.BindUsername),
+                        BindPassword = password == "************" ? current.BindPassword : password,
+                        SearchBase = ReadText("ldapSearchBase", current.SearchBase),
+                        UserSearchFilter = ReadText("ldapUserSearchFilter", current.UserSearchFilter),
+                        GroupAttribute = ReadText("ldapGroupAttribute", current.GroupAttribute),
+                        AllowSignup = ReadFlag("ldapAllowSignup", current.AllowSignup),
+                        AllowSignupOnlyForMappedUsers = ReadFlag("ldapAllowSignupOnlyForMappedUsers", current.AllowSignupOnlyForMappedUsers),
+                        GroupMap = hasGroupMap ? groups : current.GroupMap
+                    };
+                    ConfigurationLdap.CheckOwnership(current, candidate, auth.ManagedLdapFields);
+                }
+
+                bool ReadFlag(string name, bool previous) =>
+                    request.TryGetQueryOrForm(name, bool.Parse, out bool value) ? value : previous;
+
+                string ReadText(string name, string previous) =>
+                    request.TryQueryOrForm(name, out string value) ? string.IsNullOrEmpty(value) ? null : value : previous;
+
                 if (request.TryGetQueryOrForm("ldapEnabled", bool.Parse, out bool ldapEnabled))
                     _dnsWebService._authManager.LdapEnabled = ldapEnabled;
 
@@ -2125,13 +2166,8 @@ namespace DnsServerCore
                 if (request.TryGetQueryOrForm("ldapAllowSignupOnlyForMappedUsers", bool.Parse, out bool ldapAllowSignupOnlyForMappedUsers))
                     _dnsWebService._authManager.LdapAllowSignupOnlyForMappedUsers = ldapAllowSignupOnlyForMappedUsers;
 
-                if (request.TryQueryOrFormArray("ldapGroupMap", delegate (ArraySegment<string> tableRow)
-                {
-                    return new KeyValuePair<string, string>(tableRow[0], tableRow[1]);
-                }, 2, out KeyValuePair<string, string>[] ldapGroupMapEntries, '|'))
-                {
-                    _dnsWebService._authManager.LdapGroupMap = new Dictionary<string, string>(ldapGroupMapEntries);
-                }
+                if (hasGroupMap)
+                    auth.LdapGroupMap = groups;
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] LDAP config was updated successfully.");
 

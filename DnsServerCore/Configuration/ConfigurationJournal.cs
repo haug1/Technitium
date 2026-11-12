@@ -12,7 +12,7 @@ namespace DnsServerCore.Configuration
 
         private static readonly HashSet<string> _configurationFiles = new(StringComparer.Ordinal)
         {
-            "dns.config", "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config", "auth.config", "allowed.config", "blocked.config", Dns.ZoneManagers.AuthZoneManager.ManifestOwnershipFile
+            "dns.config", "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config", "auth.config", "allowed.config", "blocked.config", Dns.ZoneManagers.AuthZoneManager.ManifestOwnershipFile, Auth.AuthManager.LdapOwnershipFile
         };
 
         internal static void Recover(string configFolder)

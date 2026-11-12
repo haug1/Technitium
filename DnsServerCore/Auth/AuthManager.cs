@@ -25,6 +25,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary;
@@ -79,6 +80,10 @@ namespace DnsServerCore.Auth
         bool _ldapAllowSignupOnlyForMappedUsers = true;
         IReadOnlyDictionary<string, string> _ldapGroupMap;
 
+        internal const string LdapOwnershipFile = "ldap-ownership.config";
+        private string[] _managedLdapFields = [];
+        internal IReadOnlyList<string> ManagedLdapFields => _managedLdapFields;
+
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
         bool _pendingLazySave;
@@ -94,6 +99,11 @@ namespace DnsServerCore.Auth
             _dnsWebService = dnsWebService;
             _configFolder = configFolder;
             _log = log;
+
+            string ownershipFile = Path.Combine(configFolder, LdapOwnershipFile);
+            if (File.Exists(ownershipFile))
+                _managedLdapFields = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(ownershipFile))
+                    ?? throw new InvalidDataException("Invalid LDAP manifest ownership file.");
 
             _saveTimer = new Timer(delegate (object state)
             {
@@ -488,9 +498,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null)
             {
                 persist(null);
                 return;
@@ -512,27 +522,43 @@ namespace DnsServerCore.Auth
                     permissions.SetSubItemPermission(name, dnsAdmins, PermissionFlag.ViewModifyDelete);
                 }
 
-                persist(() => SaveConfigFileInternal(permissions, ldap));
+                persist(() =>
+                {
+                    if (permissions is not null || ldap is not null)
+                        SaveConfigFileInternal(permissions, ldap);
+                    if (ldapOwnership is not null)
+                        WriteLdapOwnership(ldapOwnership);
+                });
+                if (ldapOwnership is not null)
+                    _managedLdapFields = ldapOwnership;
                 if (permissions is not null)
                     _permissions[PermissionSection.Zones] = permissions;
                 if (ldap is not null)
-                {
-                    _ldapServer = ldap.Server;
-                    _ldapPort = ldap.Port;
-                    _ldapSslOption = ldap.SslOption;
-                    _ldapIgnoreSslErrors = ldap.IgnoreSslErrors;
-                    _ldapBindUsername = ldap.BindUsername;
-                    _ldapBindPassword = ldap.BindPassword;
-                    _ldapSearchBase = ldap.SearchBase;
-                    _ldapUserSearchFilter = ldap.UserSearchFilter;
-                    _ldapGroupAttribute = ldap.GroupAttribute;
-                    _ldapAllowSignup = ldap.AllowSignup;
-                    _ldapAllowSignupOnlyForMappedUsers = ldap.AllowSignupOnlyForMappedUsers;
-                    _ldapGroupMap = ldap.GroupMap?.Count > 0 ? ldap.GroupMap : null;
-                    _ldapEnabled = ldap.Enabled;
-                }
+                    SetLdapSettings(ldap);
             }
         }
+
+        private void WriteLdapOwnership(string[] fields)
+        {
+            string file = Path.Combine(_configFolder, LdapOwnershipFile);
+            if (fields.Length == 0)
+            {
+                File.Delete(file);
+                return;
+            }
+
+            string temporary = file + ".tmp";
+            using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(output, fields);
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, file, true);
+        }
+
+        internal void CheckLdapRestoreOwnership(Stream stream) =>
+            ReadConfigFrom(stream, false, out _, candidate => ConfigurationLdap.CheckOwnership(
+                GetManifestLdapSettings(), candidate, _managedLdapFields));
 
         internal ConfigurationLdap.Settings GetManifestLdapSettings() => new(
             _ldapEnabled, _ldapServer, _ldapPort, _ldapSslOption, _ldapIgnoreSslErrors, _ldapBindUsername, _ldapBindPassword,
@@ -566,7 +592,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings> inspectLdap = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -637,7 +663,7 @@ namespace DnsServerCore.Auth
                         {
                             ssoIsStillDisabled = !ssoEnabled;
                         }
-                        else
+                        else if (inspectLdap is null)
                         {
                             _ssoEnabled = ssoEnabled;
                             restartWebService = true;
@@ -650,7 +676,7 @@ namespace DnsServerCore.Auth
                         else
                             ssoAuthority = new Uri(strSsoAuthority);
 
-                        if (_ssoAuthority != ssoAuthority)
+                        if (inspectLdap is null && _ssoAuthority != ssoAuthority)
                         {
                             _ssoAuthority = ssoAuthority;
                             restartWebService = true;
@@ -660,7 +686,7 @@ namespace DnsServerCore.Auth
                         if (ssoClientId.Length == 0)
                             ssoClientId = null;
 
-                        if (_ssoClientId != ssoClientId)
+                        if (inspectLdap is null && _ssoClientId != ssoClientId)
                         {
                             _ssoClientId = ssoClientId;
                             restartWebService = true;
@@ -670,7 +696,7 @@ namespace DnsServerCore.Auth
                         if (ssoClientSecret.Length == 0)
                             ssoClientSecret = null;
 
-                        if (_ssoClientSecret != ssoClientSecret)
+                        if (inspectLdap is null && _ssoClientSecret != ssoClientSecret)
                         {
                             _ssoClientSecret = ssoClientSecret;
                             restartWebService = true;
@@ -683,7 +709,7 @@ namespace DnsServerCore.Auth
                         else
                             ssoMetadataAddress = new Uri(strSsoMetadataAddress);
 
-                        if (_ssoMetadataAddress != ssoMetadataAddress)
+                        if (inspectLdap is null && _ssoMetadataAddress != ssoMetadataAddress)
                         {
                             _ssoMetadataAddress = ssoMetadataAddress;
                             restartWebService = true;
@@ -697,15 +723,20 @@ namespace DnsServerCore.Auth
                             for (int i = 0; i < count; i++)
                                 ssoScopes.Add(s.ReadShortString());
 
-                            if (!_ssoScopes.HasSameItems(ssoScopes))
+                            if (inspectLdap is null && !_ssoScopes.HasSameItems(ssoScopes))
                             {
                                 _ssoScopes = ssoScopes;
                                 restartWebService = true;
                             }
                         }
 
-                        _ssoAllowSignup = bR.ReadBoolean();
-                        _ssoAllowSignupOnlyForMappedUsers = bR.ReadBoolean();
+                        bool allowSignup = bR.ReadBoolean();
+                        bool mappedSignupOnly = bR.ReadBoolean();
+                        if (inspectLdap is null)
+                        {
+                            _ssoAllowSignup = allowSignup;
+                            _ssoAllowSignupOnlyForMappedUsers = mappedSignupOnly;
+                        }
 
                         {
                             int count = bR.ReadByte();
@@ -721,11 +752,13 @@ namespace DnsServerCore.Auth
                                     ssoGroupMap.TryAdd(key, value);
                                 }
 
-                                _ssoGroupMap = ssoGroupMap;
+                                if (inspectLdap is null)
+                                    _ssoGroupMap = ssoGroupMap;
                             }
                             else
                             {
-                                _ssoGroupMap = null;
+                                if (inspectLdap is null)
+                                    _ssoGroupMap = null;
                             }
                         }
 
@@ -734,60 +767,18 @@ namespace DnsServerCore.Auth
 
                     if (version >= 4)
                     {
-                        _ldapEnabled = bR.ReadBoolean();
-
-                        _ldapServer = s.ReadShortString();
-                        if (_ldapServer.Length == 0)
-                            _ldapServer = null;
-
-                        _ldapPort = bR.ReadInt32();
-                        _ldapSslOption = (LdapAuthSslOption)bR.ReadByte();
-                        _ldapIgnoreSslErrors = bR.ReadBoolean();
-
-                        _ldapBindUsername = s.ReadShortString();
-                        if (_ldapBindUsername.Length == 0)
-                            _ldapBindUsername = null;
-
-                        _ldapBindPassword = s.ReadShortString();
-                        if (_ldapBindPassword.Length == 0)
-                            _ldapBindPassword = null;
-
-                        _ldapSearchBase = s.ReadShortString();
-                        if (_ldapSearchBase.Length == 0)
-                            _ldapSearchBase = null;
-
-                        _ldapUserSearchFilter = s.ReadShortString();
-                        if (_ldapUserSearchFilter.Length == 0)
-                            _ldapUserSearchFilter = null;
-
-                        _ldapGroupAttribute = s.ReadShortString();
-                        if (_ldapGroupAttribute.Length == 0)
-                            _ldapGroupAttribute = null;
-
-                        _ldapAllowSignup = bR.ReadBoolean();
-                        _ldapAllowSignupOnlyForMappedUsers = bR.ReadBoolean();
-
+                        ConfigurationLdap.Settings ldap = ReadLdapSettings(bR);
+                        if (inspectLdap is not null)
                         {
-                            int count = bR.ReadByte();
-                            if (count > 0)
-                            {
-                                Dictionary<string, string> ldapGroupMap = new Dictionary<string, string>(count);
-
-                                for (int i = 0; i < count; i++)
-                                {
-                                    string key = s.ReadShortString();
-                                    string value = s.ReadShortString();
-
-                                    ldapGroupMap.TryAdd(key, value);
-                                }
-
-                                _ldapGroupMap = ldapGroupMap;
-                            }
-                            else
-                            {
-                                _ldapGroupMap = null;
-                            }
+                            inspectLdap(ldap);
+                            return;
                         }
+                        SetLdapSettings(ldap);
+                    }
+                    else if (inspectLdap is not null)
+                    {
+                        inspectLdap(GetManifestLdapSettings());
+                        return;
                     }
 
                     break;
@@ -853,6 +844,52 @@ namespace DnsServerCore.Auth
                 _permissions = permissions;
                 _sessions = sessions;
             }
+        }
+
+        private static ConfigurationLdap.Settings ReadLdapSettings(BinaryReader reader)
+        {
+            bool enabled = reader.ReadBoolean();
+            string server = ReadText();
+            int port = reader.ReadInt32();
+            var ssl = (LdapAuthSslOption)reader.ReadByte();
+            bool ignoreSslErrors = reader.ReadBoolean();
+            string bindUsername = ReadText();
+            string bindPassword = ReadText();
+            string searchBase = ReadText();
+            string userSearchFilter = ReadText();
+            string groupAttribute = ReadText();
+            bool allowSignup = reader.ReadBoolean();
+            bool mappedSignupOnly = reader.ReadBoolean();
+            int count = reader.ReadByte();
+            Dictionary<string, string> groupMap = count == 0 ? null : new(count);
+            for (int index = 0; index < count; index++)
+                groupMap.TryAdd(reader.BaseStream.ReadShortString(), reader.BaseStream.ReadShortString());
+
+            return new ConfigurationLdap.Settings(enabled, server, port, ssl, ignoreSslErrors, bindUsername,
+                bindPassword, searchBase, userSearchFilter, groupAttribute, allowSignup, mappedSignupOnly, groupMap);
+
+            string ReadText()
+            {
+                string value = reader.BaseStream.ReadShortString();
+                return value.Length == 0 ? null : value;
+            }
+        }
+
+        private void SetLdapSettings(ConfigurationLdap.Settings ldap)
+        {
+            _ldapServer = ldap.Server;
+            _ldapPort = ldap.Port;
+            _ldapSslOption = ldap.SslOption;
+            _ldapIgnoreSslErrors = ldap.IgnoreSslErrors;
+            _ldapBindUsername = ldap.BindUsername;
+            _ldapBindPassword = ldap.BindPassword;
+            _ldapSearchBase = ldap.SearchBase;
+            _ldapUserSearchFilter = ldap.UserSearchFilter;
+            _ldapGroupAttribute = ldap.GroupAttribute;
+            _ldapAllowSignup = ldap.AllowSignup;
+            _ldapAllowSignupOnlyForMappedUsers = ldap.AllowSignupOnlyForMappedUsers;
+            _ldapGroupMap = ldap.GroupMap?.Count > 0 ? ldap.GroupMap : null;
+            _ldapEnabled = ldap.Enabled;
         }
 
         private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null)

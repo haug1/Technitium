@@ -281,6 +281,8 @@ namespace DnsServerCore.Configuration
                     zoneOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
                     ldap.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestLdapOwnership", out JsonElement ldapOwnership))
+                    ldapOwnership.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
