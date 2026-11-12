@@ -90,6 +90,10 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/schemaVersion: Unsupported schema version.");
 
             ValidateSchema(root);
+            if (root.TryGetProperty("allowZones", out JsonElement allowed))
+                ConfigurationDomainLists.Read(allowed, "/allowZones");
+            if (root.TryGetProperty("blockZones", out JsonElement blocked))
+                ConfigurationDomainLists.Read(blocked, "/blockZones");
             CheckDnsNameKeys(root, "zones", "", allowRoot: true);
             ValidateZoneRecords(root);
             ConfigurationZonePolicies.Validate(root);

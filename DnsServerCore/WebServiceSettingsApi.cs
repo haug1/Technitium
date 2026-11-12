@@ -493,6 +493,10 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue("/web/realIpHeader");
                 if (_dnsWebService._manifestOwnsFrameAncestors)
                     jsonWriter.WriteStringValue("/web/frameAncestors");
+                if (_dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList)
+                    jsonWriter.WriteStringValue("/allowZones");
+                if (_dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList)
+                    jsonWriter.WriteStringValue("/blockZones");
                 if (_dnsWebService._manifestOwnsWebRoot)
                     jsonWriter.WriteStringValue("/web/rootPath");
                 if ((_dnsWebService._managedWebListeners & ManagedWebSelfSigned) != 0)
@@ -559,7 +563,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 bool includePreviewOnly = context.Request.TryGetQueryOrForm("includePreviewOnly", bool.Parse, out bool include) && include;
-                using JsonDocument snapshot = CaptureConfigurationSnapshot();
+                using JsonDocument snapshot = CaptureConfigurationSnapshot(sessionUser: sessionUser, exportDomainLists: true);
                 var manifest = ConfigurationPlan.Export(snapshot.RootElement, includePreviewOnly);
                 var missingInputs = new SortedSet<string>(StringComparer.Ordinal);
                 DnsServer dns = _dnsWebService._dnsServer;
@@ -706,6 +710,14 @@ namespace DnsServerCore
 
             private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
+                if ((_dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList &&
+                     !manifest.Settings.TryGetProperty("allowZones", out _) &&
+                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Allowed, sessionUser, PermissionFlag.Modify)) ||
+                    (_dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList &&
+                     !manifest.Settings.TryGetProperty("blockZones", out _) &&
+                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Blocked, sessionUser, PermissionFlag.Modify)))
+                    throw new DnsWebServiceException("Access was denied.");
+
                 ConfigurationProxy.Candidate proxy = ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
                 ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer);
                 var webCertificate = _dnsWebService.PrepareWebCertificate(manifest);
@@ -758,6 +770,15 @@ namespace DnsServerCore
                     writer.WriteString("message", operation.Error);
             }
 
+            public Task WithConfigurationLockAsync(HttpContext context, Action<HttpContext> action)
+            {
+                return WithConfigurationLockAsync(context, current =>
+                {
+                    action(current);
+                    return Task.CompletedTask;
+                });
+            }
+
             public async Task WithConfigurationLockAsync(HttpContext context, Func<HttpContext, Task> action)
             {
                 Task waitForConfiguration;
@@ -808,7 +829,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null)
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
@@ -839,6 +860,10 @@ namespace DnsServerCore
                         var candidate = preparedTsig ?? _dnsWebService.PrepareTsigKeys(manifest);
                         ConfigurationTsig.WriteSnapshot(writer, _dnsWebService._dnsServer.TsigKeys, candidate.Keys, _configurationRevisionKey);
                     }
+                    WriteDomainListSnapshot(writer, manifest, sessionUser, "allowZones", PermissionSection.Allowed,
+                        _dnsWebService._dnsServer.AllowedZoneManager.GetManifestNames, exportDomainLists);
+                    WriteDomainListSnapshot(writer, manifest, sessionUser, "blockZones", PermissionSection.Blocked,
+                        _dnsWebService._dnsServer.BlockedZoneManager.GetManifestNames, exportDomainLists);
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
                     if (manifest is not null && manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) && dhcp.TryGetProperty("scopes", out JsonElement scopes))
@@ -852,6 +877,35 @@ namespace DnsServerCore
 
                 snapshot.Position = 0;
                 return JsonDocument.Parse(snapshot);
+            }
+
+            private void WriteDomainListSnapshot(Utf8JsonWriter writer, ConfigurationManifest manifest, User user, string field,
+                PermissionSection section, Func<string[]> readCurrent, bool export)
+            {
+                JsonElement declaration = default;
+                bool declared = manifest is not null && manifest.Settings.TryGetProperty(field, out declaration);
+                if (!declared && !export)
+                    return;
+                if (!_dnsWebService._authManager.IsPermitted(section, user, PermissionFlag.View))
+                {
+                    if (declared)
+                        throw new DnsWebServiceException("Access was denied.");
+                    return;
+                }
+                string[] current = readCurrent();
+                if (declared)
+                {
+                    string[] desired = ConfigurationDomainLists.Read(declaration, "/" + field);
+                    if (!_dnsWebService._authManager.IsPermitted(section, user, PermissionFlag.Modify) ||
+                        (current.Except(desired, StringComparer.Ordinal).Any() &&
+                         !_dnsWebService._authManager.IsPermitted(section, user, PermissionFlag.Delete)))
+                        throw new DnsWebServiceException("Access was denied.");
+                }
+
+                writer.WriteStartArray(field);
+                foreach (string name in current)
+                    writer.WriteStringValue(name);
+                writer.WriteEndArray();
             }
 
             private void WriteManifestZoneSnapshot(Utf8JsonWriter writer, JsonElement zones, User sessionUser)
@@ -2085,10 +2139,14 @@ namespace DnsServerCore
                             bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings || _dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._managedWebListeners != 0);
                             bool checkBlockList = blockLists && ownsBlockListSettings;
                             bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors || _dnsWebService._manifestOwnsReverseProxyAcl || _dnsWebService._managedWebListeners != 0);
-                            if (checkLog || checkDns || checkBlockList || checkWeb)
+                            bool checkDomainLists = allowedZones && _dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList ||
+                                blockedZones && _dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList;
+                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
+                                    if (checkDomainLists)
+                                        _dnsWebService.CheckManagedDomainLists(archive, allowedZones, blockedZones);
                                     if (checkLog && archive.GetEntry("log.config") is ZipArchiveEntry logEntry)
                                     {
                                         using Stream logConfiguration = logEntry.Open();

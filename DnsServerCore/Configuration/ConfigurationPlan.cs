@@ -264,6 +264,11 @@ namespace DnsServerCore.Configuration
                     ownership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     zones.WriteTo(writer);
+                foreach (string field in new[] { "allowZones", "blockZones" })
+                {
+                    if (currentSettings.TryGetProperty(field, out JsonElement domains))
+                        domains.WriteTo(writer);
+                }
                 if (currentSettings.TryGetProperty("manifestTsigKeys", out JsonElement tsigKeys))
                     tsigKeys.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
@@ -290,13 +295,15 @@ namespace DnsServerCore.Configuration
 
             return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, tsig, alreadyActive, listenerTuningStaged, dnsBindingsStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
+                    dns.AllowedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "allowZones"), writeAllowed =>
+                    dns.BlockedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "blockZones"), writeBlocked =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
-                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig))));
+                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked))))));
         }
 
         internal static DnsServer.DnsBindings GetDnsBindings(ConfigurationManifest manifest)
@@ -773,6 +780,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (manifest.Settings.TryGetProperty("allowZones", out _) || manifest.Settings.TryGetProperty("blockZones", out _))
+                throw new InvalidDataException("Applying explicit allow and block lists to a cluster is not implemented.");
             if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             if (ConfigurationWebCertificate.IsDeclared(manifest))
@@ -850,7 +859,7 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (path is ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
@@ -953,6 +962,13 @@ namespace DnsServerCore.Configuration
                 }
 
                 section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
+            }
+
+            foreach (string field in new[] { "allowZones", "blockZones" })
+            {
+                if (currentSettings.TryGetProperty(field, out JsonElement domains))
+                    manifest.Add(field, JsonSerializer.SerializeToNode(domains.EnumerateArray().Select(item =>
+                        item.GetString() is { Length: > 0 } name ? name : ".")));
             }
 
             if (currentSettings.TryGetProperty("tsigKeys", out JsonElement keys) && keys.GetArrayLength() > 0)
@@ -1161,6 +1177,12 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path is "/allowZones" or "/blockZones")
+            {
+                ConfigurationDomainLists.Compare(desired, path, currentSettings, changes);
+                return;
+            }
+
             if (path == ConfigurationTsig.Path)
             {
                 ConfigurationTsig.Compare(currentSettings, changes);

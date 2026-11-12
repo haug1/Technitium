@@ -778,7 +778,10 @@ namespace DnsServerCore.Tests
                 entry => Assert.Equal("/dns/tsigKeys/migration-key.test/secret", entry.GetString()));
             JsonElement manifest = response.GetProperty("manifest");
             Assert.Equal(ConfigurationManifest.CurrentSchemaVersion, manifest.GetProperty("schemaVersion").GetInt32());
-            Assert.Equal(ConfigurationPlan.Export(legacy, includePreviewOnly: false).ToJsonString(), manifest.GetRawText());
+            JsonObject expectedExport = ConfigurationPlan.Export(legacy, includePreviewOnly: false);
+            expectedExport["allowZones"] = new JsonArray();
+            expectedExport["blockZones"] = new JsonArray();
+            Assert.True(JsonNode.DeepEquals(expectedExport, JsonNode.Parse(manifest.GetRawText())));
             Assert.Equal("Http", manifest.GetProperty("dns").GetProperty("proxy").GetProperty("type").GetString());
 
             JsonElement inspection = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
@@ -1293,6 +1296,69 @@ namespace DnsServerCore.Tests
 
             Assert.Null(exported["dns"]!["forwarding"]!["servers"]);
             Assert.DoesNotContain("fixture-secret", exported.ToJsonString());
+        }
+
+        [Fact]
+        public async Task ManifestDomainListsChangeDnsResponsesAndRecoverTogether()
+        {
+            await using var upstream = new LoopbackDnsServer();
+            upstream.AddPrimaryZone("fixture.net", "allowed.fixture.net", IPAddress.Parse("192.0.2.99"));
+            await upstream.StartAsync();
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?recursion=AllowOnlyForPrivateNetworks&enableBlocking=true&blockingType=NxDomain&dnssecValidation=false&forwarders=" + Uri.EscapeDataString(upstream.EndPoint.ToString()), server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"allowZones":["ALLOWED.fixture.net.","allowed.fixture.net"],
+                  "blockZones":["fixture.net","192.0.2.1"]}
+                """;
+            JsonElement initial = await PreviewAsync(server, manifest);
+            LoopbackWebService.AssertOk(await server.CallAsync("blocked/add?domain=allowed.fixture.net", server.AdminToken));
+            JsonElement stale = await ApplyAsync(server, manifest, initial.GetProperty("revision").GetString()!);
+            Assert.Equal("error", stale.GetProperty("status").GetString());
+            Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+
+            await server.RestartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?allowedZones=true&blockedZones=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(4, preview.GetProperty("changes").GetArrayLength());
+            string revision = preview.GetProperty("revision").GetString()!;
+            string blockedFile = Path.Combine(server.ConfigurationDirectory, "blocked.tmp");
+            Directory.CreateDirectory(blockedFile);
+            JsonElement failed = await ApplyAsync(server, manifest, revision);
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Directory.Delete(blockedFile);
+            Assert.Equal(DnsResponseCode.NxDomain, (await server.QueryAsync("allowed.fixture.net", DnsResourceRecordType.A)).RCODE);
+            await server.RestartAsync();
+            Assert.Equal(DnsResponseCode.NxDomain, (await server.QueryAsync("allowed.fixture.net", DnsResourceRecordType.A)).RCODE);
+
+            preview = await PreviewAsync(server, manifest);
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            DnsResourceRecord answer = Assert.Single((await server.QueryAsync("allowed.fixture.net", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.99"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
+            Assert.Equal(DnsResponseCode.NxDomain, (await server.QueryAsync("other.fixture.net", DnsResourceRecordType.A)).RCODE);
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement exported = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(exported);
+            JsonElement settings = exported.GetProperty("response").GetProperty("manifest");
+            Assert.Equal("allowed.fixture.net", Assert.Single(settings.GetProperty("allowZones").EnumerateArray()).GetString());
+            Assert.Contains(settings.GetProperty("blockZones").EnumerateArray(), domain => domain.GetString() == "1.2.0.192.in-addr.arpa");
+
+            JsonElement conflict = await server.CallAsync("allowed/delete?domain=allowed.fixture.net", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/allowZones", conflict.GetProperty("errorMessage").GetString());
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?allowedZones=true&blockedZones=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/allowZones", restored.GetProperty("errorMessage").GetString());
         }
 
         [Fact]

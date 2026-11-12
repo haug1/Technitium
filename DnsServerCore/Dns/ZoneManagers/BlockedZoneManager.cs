@@ -17,12 +17,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns.ResourceRecords;
 using DnsServerCore.Dns.Zones;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text;
+using System.Linq;
 using System.Threading;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net.Dns;
@@ -43,6 +44,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
+        internal bool ManifestOwnsList { get; private set; }
         readonly Timer _saveTimer;
         const int SAVE_TIMER_INITIAL_INTERVAL = 5000;
 
@@ -142,7 +144,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             {
                 using (FileStream fS = new FileStream(blockedZoneFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS);
+                    ReadConfigFrom(fS, readOwnership: true);
                 }
 
                 _dnsServer.LogManager.Write("DNS Server blocked zone file was loaded: " + blockedZoneFile);
@@ -168,14 +170,15 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void SaveZoneFileInternal()
+        private void SaveZoneFileInternal(IReadOnlyList<string> names = null, bool? managed = null)
         {
             string tmpBlockedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "blocked.tmp");
             string blockedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "blocked.config");
 
             using (FileStream fS = new FileStream(tmpBlockedZoneFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS);
+                ConfigurationDomainLists.WriteStore(fS, "BZ", names ?? GetManifestNames(), managed ?? ManifestOwnsList);
+                fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpBlockedZoneFile, blockedZoneFile, true);
@@ -195,50 +198,62 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void ReadConfigFrom(Stream s)
+        private void ReadConfigFrom(Stream s, bool readOwnership = false)
         {
-            if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "BZ") //format
-                throw new InvalidDataException("DnsServer blocked zone file format is invalid.");
+            var (names, managed) = ConfigurationDomainLists.ReadStore(s, "BZ");
+            if (!readOwnership && ManifestOwnsList && !GetManifestNames().SequenceEqual(names.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)))
+                ConfigurationDomainLists.RejectManagedChange("/blockZones");
 
-            BinaryReader bR = new BinaryReader(s);
-
-            byte version = bR.ReadByte();
-            switch (version)
-            {
-                case 1:
-                    int length = bR.ReadInt32();
-                    int i = 0;
-
-                    AuthZoneManager zoneManager = new AuthZoneManager(_dnsServer);
-
-                    zoneManager.LoadSpecialPrimaryZones(delegate ()
-                    {
-                        if (i++ < length)
-                            return s.ReadShortString();
-
-                        return null;
-                    }, _soaRecord, _nsRecord);
-
-                    _zoneManager = zoneManager;
-                    break;
-
-                default:
-                    throw new InvalidDataException("DnsServer blocked zone file version not supported.");
-            }
+            _zoneManager = BuildList(names);
+            if (readOwnership)
+                ManifestOwnsList = managed;
         }
 
-        private void WriteConfigTo(Stream s)
+        internal string[] GetManifestNames() =>
+            _zoneManager.GetAllZones().Select(zone => zone.Name).Order(StringComparer.Ordinal).ToArray();
+
+        internal void CheckRestoreManifestList(Stream stream)
         {
-            IReadOnlyList<AuthZoneInfo> blockedZones = _zoneManager.GetAllZones();
-            BinaryWriter bW = new BinaryWriter(s);
+            var (names, _) = ConfigurationDomainLists.ReadStore(stream, "BZ");
+            if (ManifestOwnsList && !GetManifestNames().SequenceEqual(names.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)))
+                ConfigurationDomainLists.RejectManagedChange("/blockZones");
+        }
 
-            bW.Write(Encoding.ASCII.GetBytes("BZ")); //format
-            bW.Write((byte)1); //version
+        private AuthZoneManager BuildList(IReadOnlyList<string> names)
+        {
+            var manager = new AuthZoneManager(_dnsServer);
+            manager.LoadSpecialPrimaryZones(names, _soaRecord, _nsRecord);
+            return manager;
+        }
 
-            bW.Write(blockedZones.Count);
+        internal void ApplyManifestList(string[] names, Action<Action> persist)
+        {
+            lock (_saveLock)
+            {
+                string[] current = GetManifestNames();
+                bool managed = names is not null;
+                bool changed = managed && !current.SequenceEqual(names);
+                if (!changed && managed == ManifestOwnsList)
+                {
+                    persist(null);
+                    return;
+                }
 
-            foreach (AuthZoneInfo zone in blockedZones)
-                s.WriteShortString(zone.Name);
+                AuthZoneManager candidate = changed ? BuildList(names) : null;
+                try
+                {
+                    persist(() => SaveZoneFileInternal(names ?? current, managed));
+                }
+                catch
+                {
+                    candidate?.Dispose();
+                    throw;
+                }
+                if (candidate is not null)
+                    _zoneManager = candidate;
+                ManifestOwnsList = managed;
+                _pendingSave = false;
+            }
         }
 
         #endregion
@@ -257,11 +272,24 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void ImportZones(string[] domains)
         {
+            if (ManifestOwnsList)
+            {
+                var current = GetManifestNames().ToHashSet(StringComparer.Ordinal);
+                if (domains.Any(domain => !current.Contains(ConfigurationDomainLists.Normalize(domain, "/blockZones"))))
+                    ConfigurationDomainLists.RejectManagedChange("/blockZones");
+                return;
+            }
             _zoneManager.LoadSpecialPrimaryZones(domains, _soaRecord, _nsRecord);
         }
 
         public bool BlockZone(string domain)
         {
+            if (ManifestOwnsList)
+            {
+                if (!GetManifestNames().Contains(ConfigurationDomainLists.Normalize(domain, "/blockZones"), StringComparer.Ordinal))
+                    ConfigurationDomainLists.RejectManagedChange("/blockZones");
+                return false;
+            }
             if (_zoneManager.CreateSpecialPrimaryZone(domain, _soaRecord, _nsRecord) != null)
                 return true;
 
@@ -270,6 +298,12 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public bool DeleteZone(string domain)
         {
+            if (ManifestOwnsList)
+            {
+                if (GetManifestNames().Contains(ConfigurationDomainLists.Normalize(domain, "/blockZones"), StringComparer.Ordinal))
+                    ConfigurationDomainLists.RejectManagedChange("/blockZones");
+                return false;
+            }
             if (_zoneManager.DeleteZone(domain))
                 return true;
 
@@ -278,6 +312,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void Flush()
         {
+            if (ManifestOwnsList && GetManifestNames().Length != 0)
+                ConfigurationDomainLists.RejectManagedChange("/blockZones");
             _zoneManager.Flush();
         }
 

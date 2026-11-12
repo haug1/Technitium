@@ -955,10 +955,29 @@ namespace DnsServerCore
             }
         }
 
+        private void CheckManagedDomainLists(ZipArchive backupZip, bool allowedZones, bool blockedZones)
+        {
+            if (allowedZones && _dnsServer.AllowedZoneManager.ManifestOwnsList &&
+                backupZip.GetEntry("allowed.config") is ZipArchiveEntry allowedEntry)
+            {
+                using Stream stream = allowedEntry.Open();
+                _dnsServer.AllowedZoneManager.CheckRestoreManifestList(stream);
+            }
+            if (blockedZones && _dnsServer.BlockedZoneManager.ManifestOwnsList &&
+                backupZip.GetEntry("blocked.config") is ZipArchiveEntry blockedEntry)
+            {
+                using Stream stream = blockedEntry.Open();
+                _dnsServer.BlockedZoneManager.CheckRestoreManifestList(stream);
+            }
+        }
+
         internal async Task RestoreConfigAsync(Stream zipStream, bool authConfig, bool clusterConfig, bool webServiceSettings, bool dnsSettings, bool logSettings, bool zones, bool allowedZones, bool blockedZones, bool blockLists, bool apps, bool scopes, bool stats, bool logs, bool deleteExistingFiles, UserSession implantSession = null, bool isConfigTransfer = false)
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
+                if (isConfigTransfer)
+                    CheckManagedDomainLists(backupZip, allowedZones, blockedZones);
+
                 if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsCertificate || _dnsServer.HasManagedTsigKeys) &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                 {
@@ -2250,18 +2269,18 @@ namespace DnsServerCore
 
             //allowed
             _webService.MapGetAndPost("/api/allowed/list", _otherZonesApi.ListAllowedZones);
-            _webService.MapGetAndPost("/api/allowed/add", _otherZonesApi.AllowZone);
-            _webService.MapGetAndPost("/api/allowed/delete", _otherZonesApi.DeleteAllowedZone);
-            _webService.MapGetAndPost("/api/allowed/flush", _otherZonesApi.FlushAllowedZone);
-            _webService.MapGetAndPost("/api/allowed/import", _otherZonesApi.ImportAllowedZones);
+            _webService.MapGetAndPost("/api/allowed/add", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.AllowZone));
+            _webService.MapGetAndPost("/api/allowed/delete", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.DeleteAllowedZone));
+            _webService.MapGetAndPost("/api/allowed/flush", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.FlushAllowedZone));
+            _webService.MapGetAndPost("/api/allowed/import", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.ImportAllowedZones));
             _webService.MapGetAndPost("/api/allowed/export", _otherZonesApi.ExportAllowedZonesAsync);
 
             //blocked
             _webService.MapGetAndPost("/api/blocked/list", _otherZonesApi.ListBlockedZones);
-            _webService.MapGetAndPost("/api/blocked/add", _otherZonesApi.BlockZone);
-            _webService.MapGetAndPost("/api/blocked/delete", _otherZonesApi.DeleteBlockedZone);
-            _webService.MapGetAndPost("/api/blocked/flush", _otherZonesApi.FlushBlockedZone);
-            _webService.MapGetAndPost("/api/blocked/import", _otherZonesApi.ImportBlockedZones);
+            _webService.MapGetAndPost("/api/blocked/add", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.BlockZone));
+            _webService.MapGetAndPost("/api/blocked/delete", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.DeleteBlockedZone));
+            _webService.MapGetAndPost("/api/blocked/flush", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.FlushBlockedZone));
+            _webService.MapGetAndPost("/api/blocked/import", context => _settingsApi.WithConfigurationLockAsync(context, _otherZonesApi.ImportBlockedZones));
             _webService.MapGetAndPost("/api/blocked/export", _otherZonesApi.ExportBlockedZonesAsync);
 
             //apps
