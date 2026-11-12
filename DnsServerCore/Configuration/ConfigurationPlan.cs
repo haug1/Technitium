@@ -41,6 +41,7 @@ namespace DnsServerCore.Configuration
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true),
             ["/logging/destination"] = Field("loggingType", "File"),
+            ["/logging/folder"] = Field("logFolder", "logs"),
             ["/logging/noStackTrace"] = Field("noStackTrace", false),
             ["/logging/useLocalTime"] = Field("useLocalTime", false),
             ["/logging/retentionDays"] = Field("maxLogFileDays", 365),
@@ -56,6 +57,11 @@ namespace DnsServerCore.Configuration
 
         public static IReadOnlyList<ConfigurationChange> Create(ConfigurationManifest manifest, JsonElement currentSettings)
         {
+            return Create(manifest, currentSettings, null);
+        }
+
+        internal static IReadOnlyList<ConfigurationChange> Create(ConfigurationManifest manifest, JsonElement currentSettings, LogManager log)
+        {
             RequireSettingsObject(currentSettings);
 
             var changes = new List<ConfigurationChange>();
@@ -64,7 +70,7 @@ namespace DnsServerCore.Configuration
                 if (section.Name is "schemaVersion" or "$schema")
                     continue;
 
-                Compare(section.Value, AppendPath("", section.Name), currentSettings, changes);
+                Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log);
             }
 
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
@@ -103,12 +109,15 @@ namespace DnsServerCore.Configuration
             JsonElement? noStackTrace = GetLoggingValue(logging, "noStackTrace");
             JsonElement? retention = GetLoggingValue(logging, "retentionDays");
             JsonElement? localTime = GetLoggingValue(logging, "useLocalTime");
+            string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
+                ? GetManifestLogFolder(folderValue, log) : null;
 
             log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
-                localTime?.GetBoolean());
+                localTime?.GetBoolean(),
+                folder);
         }
 
         internal static void CheckLoggingSupport(ConfigurationManifest manifest)
@@ -122,7 +131,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in section.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("destination" or "noStackTrace" or "retentionDays" or "useLocalTime"))
+                    if (field.Name is not ("destination" or "folder" or "noStackTrace" or "retentionDays" or "useLocalTime"))
                         throw new InvalidDataException($"/logging/{JsonEncodedText.Encode(field.Name)}: Applying this setting is not implemented.");
                 }
             }
@@ -179,7 +188,7 @@ namespace DnsServerCore.Configuration
             return value;
         }
 
-        private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes)
+        private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log)
         {
             if (_settings.TryGetValue(path, out Setting setting))
             {
@@ -188,7 +197,15 @@ namespace DnsServerCore.Configuration
                 JsonElement candidate;
                 try
                 {
-                    candidate = desired.ValueKind == JsonValueKind.Null ? setting.Default : (setting.Normalize?.Invoke(desired) ?? desired);
+                    if ((path == "/logging/folder") && (log is not null))
+                    {
+                        candidate = JsonSerializer.SerializeToElement(GetManifestLogFolder(desired, log));
+                        current = JsonSerializer.SerializeToElement(log.NormalizeLogFolder(current.GetString()));
+                    }
+                    else
+                    {
+                        candidate = desired.ValueKind == JsonValueKind.Null ? setting.Default : (setting.Normalize?.Invoke(desired) ?? desired);
+                    }
                 }
                 catch (Exception ex) when (ex is ArgumentException or FormatException)
                 {
@@ -208,12 +225,24 @@ namespace DnsServerCore.Configuration
             if ((desired.ValueKind == JsonValueKind.Object) && _settings.Keys.Any(field => field.StartsWith(path + "/", StringComparison.Ordinal)))
             {
                 foreach (JsonProperty property in desired.EnumerateObject())
-                    Compare(property.Value, AppendPath(path, property.Name), currentSettings, changes);
+                    Compare(property.Value, AppendPath(path, property.Name), currentSettings, changes, log);
 
                 return;
             }
 
             throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Planning for this setting is not implemented.");
+        }
+
+        private static string GetManifestLogFolder(JsonElement value, LogManager log)
+        {
+            try
+            {
+                return log.NormalizeLogFolder(value.ValueKind == JsonValueKind.Null ? log.DefaultLogFolder : value.GetString());
+            }
+            catch (ArgumentException)
+            {
+                throw new InvalidDataException("/logging/folder: Invalid log directory.");
+            }
         }
 
         private static JsonElement NormalizeResponsiblePerson(JsonElement value)

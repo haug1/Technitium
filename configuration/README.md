@@ -54,7 +54,7 @@ Secret references select one environment variable or one file. Resolve relative 
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config plan path/to/technitium.json https://dns.example.test` against a running instance. Set `TECHNITIUM_CONFIG_API_TOKEN` to a token with Settings view permission. The command accepts HTTP for loopback development instances.
 
-The current preview covers authoritative DNS defaults, selected DNS options, web ports, logging settings other than the log folder, statistics, blocklist sources and scheduling, and the app auto-update flag. It reports changed field paths, web restarts, and a revision for the manifest and server snapshot. Values stay out of the response. A service restart invalidates earlier revisions. A declaration outside this set returns an error before producing a preview.
+The current preview covers authoritative DNS defaults, selected DNS options, web ports, logging settings, statistics, blocklist sources and scheduling, and the app auto-update flag. It reports changed field paths, web restarts, and a revision for the manifest and server snapshot. Values stay out of the response. A service restart invalidates earlier revisions. A declaration outside this set returns an error before producing a preview.
 
 ## Exporting supported settings
 
@@ -64,7 +64,7 @@ Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config export http
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config apply path/to/technitium.json https://dns.example.test <revision>` with the revision printed by `config plan` and a token with Settings modify permission. Generate a new preview if the revision becomes stale.
 
-This implementation applies `logging.destination`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Other declarations are rejected before mutation. The server persists the values and their ownership together in `log.config`. Applying a manifest that omits a previously managed field releases ownership and keeps the current value. The settings API lists owned paths in `managedSettings`. Settings edits and backup restores that would change an owned value are rejected before other settings in the request are changed.
+This implementation applies `logging.destination`, `logging.folder`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Other declarations are rejected before mutation. The server persists the values and their ownership together in `log.config`. Applying a manifest that omits a previously managed field releases ownership and keeps the current value. The settings API lists owned paths in `managedSettings`. Settings edits and backup restores that would change an owned value are rejected before other settings in the request are changed.
 
 ### Startup
 

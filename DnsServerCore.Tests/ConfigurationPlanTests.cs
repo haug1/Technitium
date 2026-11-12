@@ -103,6 +103,33 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LogFolderPreviewAndOwnershipUseTheNormalizedServerPath()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            string destination = Path.Combine(server.ConfigurationDirectory, "manifest-logs");
+            string manifest = JsonSerializer.Serialize(new { schemaVersion = 1, logging = new { folder = destination } });
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal("/logging/folder", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("path").GetString());
+
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            Assert.True(Directory.Exists(destination));
+            Assert.Equal("manifest-logs", (await server.GetSettingsAsync()).GetProperty("logFolder").GetString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement rejected = await server.CallAsync("settings/set?logFolder=other-logs", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/logging/folder", rejected.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"logging":{"folder":null}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            await server.RestartAsync();
+            JsonElement restored = await server.GetSettingsAsync();
+            Assert.Equal("logs", restored.GetProperty("logFolder").GetString());
+            Assert.Equal("/logging/folder", Assert.Single(restored.GetProperty("managedSettings").EnumerateArray()).GetString());
+        }
+
+        [Fact]
         public async Task StartupReconcilesTheLoggingManifestAndReleasesOmittedFields()
         {
             await using var server = await LoopbackWebService.StartAsync(

@@ -68,7 +68,8 @@ namespace DnsServerCore
             Destination = 1,
             NoStackTrace = 2,
             RetentionDays = 4,
-            UseLocalTime = 8
+            UseLocalTime = 8,
+            Folder = 16
         }
 
         private readonly record struct LoggingConfiguration(LoggingType Destination, string Folder,
@@ -250,27 +251,7 @@ namespace DnsServerCore
                 }
                 else
                 {
-                    if (_isPortableApp)
-                    {
-                        _logFolder = "logs";
-                    }
-                    else
-                    {
-                        switch (Environment.OSVersion.Platform)
-                        {
-                            case PlatformID.Win32NT:
-                                _logFolder = Path.Combine(Environment.GetEnvironmentVariable("ProgramData"), "Technitium DNS Server", "logs");
-                                break;
-
-                            case PlatformID.Unix:
-                                _logFolder = "/var/log/technitium/dns";
-                                break;
-
-                            default:
-                                _logFolder = "logs";
-                                break;
-                        }
-                    }
+                    _logFolder = DefaultLogFolder;
                 }
 
                 string strMaxLogFileDays = Environment.GetEnvironmentVariable("DNS_SERVER_LOG_MAX_LOG_FILE_DAYS");
@@ -324,7 +305,24 @@ namespace DnsServerCore
             }
         }
 
-        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime)
+        internal string DefaultLogFolder => _isPortableApp ? "logs" : Environment.OSVersion.Platform switch
+        {
+            PlatformID.Win32NT => Path.Combine(Environment.GetEnvironmentVariable("ProgramData"), "Technitium DNS Server", "logs"),
+            PlatformID.Unix => "/var/log/technitium/dns",
+            _ => "logs"
+        };
+
+        internal string NormalizeLogFolder(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                path = "logs";
+            if (path.Length > 255)
+                throw new ArgumentException("Log folder path length cannot exceed 255 characters.", nameof(LogFolder));
+
+            return ConvertToRelativePath(ConvertToAbsolutePath(path));
+        }
+
+        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder)
         {
             lock (_saveLock)
             {
@@ -332,6 +330,7 @@ namespace DnsServerCore
                 bool previousNoStackTrace = _noStackTrace;
                 int previousRetentionDays = _maxLogFileDays;
                 bool previousUseLocalTime = _useLocalTime;
+                string previousFolder = _logFolder;
                 ManagedLoggingSettings previousManagedSettings = _managedSettings;
                 ManagedLoggingSettings managedSettings = 0;
                 if (destination.HasValue)
@@ -342,20 +341,33 @@ namespace DnsServerCore
                     managedSettings |= ManagedLoggingSettings.RetentionDays;
                 if (useLocalTime.HasValue)
                     managedSettings |= ManagedLoggingSettings.UseLocalTime;
+                if (folder is not null)
+                    managedSettings |= ManagedLoggingSettings.Folder;
 
                 if ((managedSettings == previousManagedSettings) &&
                     ((destination ?? previousDestination) == previousDestination) &&
                     ((noStackTrace ?? previousNoStackTrace) == previousNoStackTrace) &&
                     ((retentionDays ?? previousRetentionDays) == previousRetentionDays) &&
-                    ((useLocalTime ?? previousUseLocalTime) == previousUseLocalTime))
+                    ((useLocalTime ?? previousUseLocalTime) == previousUseLocalTime) &&
+                    string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal))
                     return;
 
+                bool activate = ((destination ?? previousDestination) != previousDestination) ||
+                    !string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal);
                 try
                 {
                     NoStackTrace = noStackTrace ?? previousNoStackTrace;
                     UseLocalTime = useLocalTime ?? previousUseLocalTime;
                     MaxLogFileDays = retentionDays ?? previousRetentionDays;
-                    LoggingType = destination ?? previousDestination;
+                    if ((folder is not null) && !folder.Equals(previousFolder, StringComparison.Ordinal))
+                    {
+                        Directory.CreateDirectory(ConvertToAbsolutePath(folder));
+                        _logFolder = folder;
+                    }
+
+                    _loggingType = destination ?? previousDestination;
+                    if (activate)
+                        ApplyLoggingType();
                     _managedSettings = managedSettings;
                     SaveConfigFileInternal();
                     _pendingSave = false;
@@ -366,7 +378,10 @@ namespace DnsServerCore
                     NoStackTrace = previousNoStackTrace;
                     UseLocalTime = previousUseLocalTime;
                     MaxLogFileDays = previousRetentionDays;
-                    LoggingType = previousDestination;
+                    _logFolder = previousFolder;
+                    _loggingType = previousDestination;
+                    if (activate)
+                        ApplyLoggingType();
                     throw;
                 }
             }
@@ -384,9 +399,11 @@ namespace DnsServerCore
                 yield return "/logging/retentionDays";
             if (_managedSettings.HasFlag(ManagedLoggingSettings.UseLocalTime))
                 yield return "/logging/useLocalTime";
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.Folder))
+                yield return "/logging/folder";
         }
 
-        internal void CheckManifestOwnership(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime)
+        internal void CheckManifestOwnership(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder)
         {
             if (_managedSettings.HasFlag(ManagedLoggingSettings.Destination) && destination.HasValue && (destination.Value != _loggingType))
                 throw new DnsWebServiceException("/logging/destination: Setting is managed by the configuration manifest.");
@@ -396,6 +413,9 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/logging/retentionDays: Setting is managed by the configuration manifest.");
             if (_managedSettings.HasFlag(ManagedLoggingSettings.UseLocalTime) && useLocalTime.HasValue && (useLocalTime.Value != _useLocalTime))
                 throw new DnsWebServiceException("/logging/useLocalTime: Setting is managed by the configuration manifest.");
+            if (_managedSettings.HasFlag(ManagedLoggingSettings.Folder) && (folder is not null)
+                && !string.Equals(NormalizeLogFolder(folder), NormalizeLogFolder(_logFolder), StringComparison.Ordinal))
+                throw new DnsWebServiceException("/logging/folder: Setting is managed by the configuration manifest.");
         }
 
         internal void CheckRestoreManifestOwnership(Stream stream)
@@ -404,7 +424,7 @@ namespace DnsServerCore
                 return;
 
             LoggingConfiguration configuration = ReadLoggingConfiguration(stream);
-            CheckManifestOwnership(configuration.Destination, configuration.NoStackTrace, configuration.RetentionDays, configuration.UseLocalTime);
+            CheckManifestOwnership(configuration.Destination, configuration.NoStackTrace, configuration.RetentionDays, configuration.UseLocalTime, configuration.Folder);
         }
 
         private void SaveConfigFileInternal()
@@ -466,7 +486,7 @@ namespace DnsServerCore
                     // Existing version 2 readers stop after useLocalTime.
                     int ownership = version == 2 ? s.ReadByte() : -1;
                     return new LoggingConfiguration(destination, folder, noStackTrace, retentionDays, useLocalTime,
-                        ownership is >= 0 and <= 15 ? (ManagedLoggingSettings)ownership : 0);
+                        ownership is >= 0 and <= 31 ? (ManagedLoggingSettings)ownership : 0);
 
                 default:
                     throw new InvalidDataException("DnsServer log config version not supported.");
@@ -1046,16 +1066,7 @@ namespace DnsServerCore
             get { return _logFolder; }
             set
             {
-                string logFolder;
-
-                if (string.IsNullOrEmpty(value))
-                    logFolder = "logs";
-                else if (value.Length > 255)
-                    throw new ArgumentException("Log folder path length cannot exceed 255 characters.", nameof(LogFolder));
-                else
-                    logFolder = value;
-
-                string relativeLogFolder = ConvertToRelativePath(logFolder);
+                string relativeLogFolder = NormalizeLogFolder(value);
 
                 if (!relativeLogFolder.Equals(_logFolder, StringComparison.Ordinal))
                 {

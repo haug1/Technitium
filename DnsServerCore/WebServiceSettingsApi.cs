@@ -500,7 +500,7 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     using JsonDocument current = CaptureConfigurationSnapshot();
-                    var changes = ConfigurationPlan.Create(manifest, current.RootElement);
+                    var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
                     Utf8JsonWriter response = context.GetCurrentJsonWriter();
@@ -636,7 +636,8 @@ namespace DnsServerCore
                     context.Items["jsonContent"] = jsonDocument;
 
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
-                _dnsWebService._log.CheckManifestOwnership(destination, noStackTrace, retentionDays, useLocalTime);
+                request.TryGetQueryOrForm("logFolder", out string logFolder);
+                _dnsWebService._log.CheckManifestOwnership(destination, noStackTrace, retentionDays, useLocalTime, logFolder);
 
                 try
                 {
@@ -1836,7 +1837,7 @@ namespace DnsServerCore
                         if (useLocalTime.HasValue)
                             _dnsWebService._log.UseLocalTime = useLocalTime.Value;
 
-                        if (request.TryGetQueryOrForm("logFolder", out string logFolder))
+                        if (logFolder is not null)
                             _dnsWebService._log.LogFolder = logFolder;
 
                         if (retentionDays.HasValue)
