@@ -1321,7 +1321,7 @@ namespace DnsServerCore.Dns.Zones
 
                     bW.Write((byte)_notify);
                     WriteIPAddressesTo(_notifyNameServers, bW);
-                    WriteIPAddressesTo(_notifySecondaryCatalogNameServers, bW);
+                    WriteIPAddressesTo(policies.NotifySecondaryServers ?? _notifySecondaryCatalogNameServers, bW);
                     break;
 
                 case AuthZoneType.SecondaryCatalog:
@@ -1332,9 +1332,9 @@ namespace DnsServerCore.Dns.Zones
                     WriteNetworkACLTo(_zoneTransferNetworkACL, bW);
                     WriteZoneTransferTsigKeyNamesTo(_zoneTransferTsigKeyNames, bW);
 
-                    WriteNameServerAddressesTo(_primaryNameServerAddresses, bW);
-                    bW.Write((byte)_primaryZoneTransferProtocol);
-                    bW.Write(_primaryZoneTransferTsigKeyName ?? "");
+                    WriteNameServerAddressesTo(primary.Servers ?? _primaryNameServerAddresses, bW);
+                    bW.Write((byte)(primary.Protocol ?? _primaryZoneTransferProtocol));
+                    bW.Write(primary.TsigKey ?? _primaryZoneTransferTsigKeyName ?? "");
 
                     bW.BaseStream.WriteDateTime(_expiry);
                     break;

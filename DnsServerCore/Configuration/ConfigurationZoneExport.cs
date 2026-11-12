@@ -55,7 +55,13 @@ namespace DnsServerCore.Configuration
                     declaration["transfer"].AsObject().Remove("tsigKeys");
                     missingInputs.Add(path + "/transfer/tsigKeys");
                 }
-                if (ConfigurationZonePrimary.IsReplicated(zone.Type))
+                if (zone.Type == AuthZoneType.Catalog)
+                {
+                    declaration.Remove("updates");
+                    declaration["notify"].AsObject()["secondaryCatalogNameServers"] =
+                        JsonSerializer.SerializeToNode((zone.NotifySecondaryCatalogNameServers ?? []).Select(address => address.ToString()));
+                }
+                else if (ConfigurationZonePrimary.IsReplicated(zone.Type))
                 {
                     var primary = ConfigurationZonePrimary.Export(zone);
                     if (zone.Type != AuthZoneType.Stub && zone.PrimaryZoneTransferTsigKeyName is { Length: > 0 } key &&
@@ -87,7 +93,7 @@ namespace DnsServerCore.Configuration
                 if (getPermission?.Invoke(zone.Name) is Permission permission)
                     declaration["permissions"] = ConfigurationPermissions.ExportGrants(permission);
 
-                if (!ConfigurationZonePrimary.IsReplicated(zone.Type))
+                if (!ConfigurationZonePrimary.IsReplicated(zone.Type) && zone.Type != AuthZoneType.Catalog)
                 {
                     var records = new List<DnsResourceRecord>();
                     dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);

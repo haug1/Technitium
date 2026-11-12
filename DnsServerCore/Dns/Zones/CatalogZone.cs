@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns.ResourceRecords;
 using System;
 using System.Collections.Generic;
@@ -36,17 +37,18 @@ namespace DnsServerCore.Dns.Zones
 
         readonly Dictionary<string, string> _membersIndex = new Dictionary<string, string>();
         readonly ReaderWriterLockSlim _membersIndexLock = new ReaderWriterLockSlim();
+        Action<string, DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> _manifestPropertyWriter;
 
         #endregion
 
         #region constructor
 
-        public CatalogZone(DnsServer dnsServer, AuthZoneInfo zoneInfo)
-            : base(dnsServer, zoneInfo)
+        public CatalogZone(DnsServer dnsServer, AuthZoneInfo zoneInfo, bool initializeTimers = true)
+            : base(dnsServer, zoneInfo, initializeTimers)
         { }
 
-        public CatalogZone(DnsServer dnsServer, string name)
-            : base(dnsServer, name)
+        public CatalogZone(DnsServer dnsServer, string name, bool initializeTimers = true)
+            : base(dnsServer, name, initializeTimers)
         { }
 
         #endregion
@@ -83,11 +85,43 @@ namespace DnsServerCore.Dns.Zones
         internal void InitZoneProperties()
         {
             //set catalog zone version record
-            _dnsServer.AuthZoneManager.SetRecord(_name, new DnsResourceRecord("version." + _name, DnsResourceRecordType.TXT, DnsClass.IN, 0, new DnsTXTRecordData("2")));
+            string version = "version." + _name;
+            WritePropertyRecords(version, DnsResourceRecordType.TXT, [new DnsResourceRecord(version, DnsResourceRecordType.TXT, DnsClass.IN, 0, new DnsTXTRecordData("2"))]);
 
             //init catalog global properties
             QueryAccess = AuthZoneQueryAccess.Allow;
             ZoneTransfer = AuthZoneTransfer.Deny;
+        }
+
+        internal void ApplyManifestPolicies(ConfigurationZonePolicies.Changes policies, bool initialize,
+            Action<string, DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> write)
+        {
+            // The manifest transaction journals generated RRsets with the zone metadata.
+            _manifestPropertyWriter = write;
+            try
+            {
+                if (initialize)
+                    InitZoneProperties();
+                policies.Apply(new AuthZoneInfo(this));
+                if (policies.QueryAcl is not null && !policies.QueryAccess.HasValue)
+                    QueryAccess = QueryAccess;
+                if (policies.TransferAcl is not null && !policies.Transfer.HasValue)
+                    ZoneTransfer = ZoneTransfer;
+            }
+            finally
+            {
+                _manifestPropertyWriter = null;
+            }
+        }
+
+        private void WritePropertyRecords(string name, DnsResourceRecordType type, IReadOnlyList<DnsResourceRecord> records)
+        {
+            if (_manifestPropertyWriter is not null)
+                _manifestPropertyWriter(name, type, records);
+            else if (records.Count == 0)
+                _dnsServer.AuthZoneManager.DeleteRecords(_name, name, type);
+            else
+                _dnsServer.AuthZoneManager.SetRecords(_name, records);
         }
 
         internal void BuildMembersIndex()
@@ -214,14 +248,14 @@ namespace DnsServerCore.Dns.Zones
 
             if (acl is null)
             {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.APL);
+                WritePropertyRecords(domain, DnsResourceRecordType.APL, []);
             }
             else
             {
                 DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.APL, DnsClass.IN, 0, NetworkAccessControl.ConvertToAPLRecordData(acl));
                 record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
 
-                _dnsServer.AuthZoneManager.SetRecord(_name, record);
+                WritePropertyRecords(domain, DnsResourceRecordType.APL, [record]);
             }
         }
 
@@ -231,14 +265,14 @@ namespace DnsServerCore.Dns.Zones
 
             if (acl is null)
             {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.APL);
+                WritePropertyRecords(domain, DnsResourceRecordType.APL, []);
             }
             else
             {
                 DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.APL, DnsClass.IN, 0, NetworkAccessControl.ConvertToAPLRecordData(acl));
                 record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
 
-                _dnsServer.AuthZoneManager.SetRecord(_name, record);
+                WritePropertyRecords(domain, DnsResourceRecordType.APL, [record]);
             }
         }
 
@@ -248,7 +282,7 @@ namespace DnsServerCore.Dns.Zones
 
             if (tsigKeyNames is null)
             {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.PTR);
+                WritePropertyRecords(domain, DnsResourceRecordType.PTR, []);
             }
             else
             {
@@ -263,7 +297,7 @@ namespace DnsServerCore.Dns.Zones
                     records[i++] = record;
                 }
 
-                _dnsServer.AuthZoneManager.SetRecords(_name, records);
+                WritePropertyRecords(domain, DnsResourceRecordType.PTR, records);
             }
         }
 

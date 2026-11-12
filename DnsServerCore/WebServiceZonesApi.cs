@@ -3420,7 +3420,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 AuthZoneManager manager = _dnsWebService._dnsServer.AuthZoneManager;
-                if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder || ConfigurationZonePrimary.IsReplicated(zoneInfo.Type))
+                if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog || ConfigurationZonePrimary.IsReplicated(zoneInfo.Type))
                 {
                     CheckMode("queryAccess", "query/mode", zoneInfo.QueryAccess);
                     CheckList("queryAccessNetworkACL", "query/networkAcl", zoneInfo.QueryAccessNetworkACL, NetworkAccessControl.Parse);
@@ -3428,6 +3428,8 @@ namespace DnsServerCore
                     CheckList("zoneTransferNetworkACL", "transfer/networkAcl", zoneInfo.ZoneTransferNetworkACL, NetworkAccessControl.Parse);
                     CheckMode("notify", "notify/mode", zoneInfo.Notify);
                     CheckList("notifyNameServers", "notify/nameServers", zoneInfo.NotifyNameServers, IPAddress.Parse);
+                    if (zoneInfo.Type == AuthZoneType.Catalog)
+                        CheckList("notifySecondaryCatalogsNameServers", "notify/secondaryCatalogNameServers", zoneInfo.NotifySecondaryCatalogNameServers, IPAddress.Parse);
                     CheckMode("update", "updates/mode", zoneInfo.Update);
                     CheckList("updateNetworkACL", "updates/networkAcl", zoneInfo.UpdateNetworkACL, NetworkAccessControl.Parse);
                 }
@@ -3751,7 +3753,7 @@ namespace DnsServerCore
                         if (zoneInfo.Type == AuthZoneType.Catalog)
                         {
                             string strNotifySecondaryCatalogNameServers = request.QueryOrForm("notifySecondaryCatalogsNameServers");
-                            if (strNotifySecondaryCatalogNameServers is not null)
+                            if (!Owns("notify/secondaryCatalogNameServers") && strNotifySecondaryCatalogNameServers is not null)
                             {
                                 if ((strNotifySecondaryCatalogNameServers.Length == 0) || strNotifySecondaryCatalogNameServers.Equals("false", StringComparison.OrdinalIgnoreCase))
                                     zoneInfo.NotifySecondaryCatalogNameServers = null;

@@ -4406,11 +4406,32 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task SecondaryCatalogManifestProvisionsMembersAndExportsItsSource()
+        public async Task CatalogManifestsPersistTheSourceAndProvisionSecondaryMembers()
         {
             await using var primary = await LoopbackWebService.StartAsync();
-            LoopbackWebService.AssertOk(await primary.CallAsync("zones/create?zone=catalog.test&type=Catalog", primary.AdminToken));
-            LoopbackWebService.AssertOk(await primary.CallAsync("zones/options/set?zone=catalog.test&zoneTransfer=Allow", primary.AdminToken));
+            const string source = """
+                {"schemaVersion":1,"zones":{"catalog.test":{"type":"Catalog","transfer":{"mode":"Allow"},
+                  "notify":{"mode":"None","secondaryCatalogNameServers":["127.0.0.1"]}
+                }}}
+                """;
+            string revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(primary, source, revision));
+            string updatedSource = source.Replace("\"mode\":\"Allow\"", "\"mode\":\"UseSpecifiedNetworkACL\",\"networkAcl\":[\"127.0.0.1/32\"]", StringComparison.Ordinal);
+            JsonElement sourcePlan = await PreviewAsync(primary, updatedSource);
+            Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/catalog.test/transfer/mode"));
+            LoopbackWebService.AssertOk(await ApplyAsync(primary, updatedSource, sourcePlan.GetProperty("revision").GetString()!));
+            await primary.RestartAsync();
+            Assert.Empty((await PreviewAsync(primary, updatedSource)).GetProperty("changes").EnumerateArray());
+            JsonElement denied = await primary.CallAsync("zones/options/set?zone=catalog.test&zoneTransfer=Deny", primary.AdminToken);
+            Assert.Equal("error", denied.GetProperty("status").GetString());
+            Assert.Contains("/zones/catalog.test/transfer/mode", denied.GetProperty("errorMessage").GetString());
+            JsonElement sourceExport = await primary.CallAsync("settings/config/export", primary.AdminToken);
+            LoopbackWebService.AssertOk(sourceExport);
+            JsonElement sourceZone = sourceExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("catalog.test");
+            Assert.Equal("Catalog", sourceZone.GetProperty("type").GetString());
+            Assert.False(sourceZone.TryGetProperty("records", out _));
+            Assert.Equal("127.0.0.1", Assert.Single(sourceZone.GetProperty("notify").GetProperty("secondaryCatalogNameServers").EnumerateArray()).GetString());
             LoopbackWebService.AssertOk(await primary.CallAsync("zones/create?zone=member.test&type=Primary&catalog=catalog.test", primary.AdminToken));
 
             await using var replica = await LoopbackWebService.StartAsync();
@@ -4420,7 +4441,7 @@ namespace DnsServerCore.Tests
                   "primary":{"servers":[{"address":"{{{{{address}}}}}"}],"transferProtocol":"Tcp"}
                 }}}
                 """;
-            string revision = (await PreviewAsync(replica, manifest)).GetProperty("revision").GetString()!;
+            revision = (await PreviewAsync(replica, manifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(replica, manifest, revision));
 
             DateTime deadline = DateTime.UtcNow.AddSeconds(20);

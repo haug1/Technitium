@@ -44,6 +44,8 @@ namespace DnsServerCore.Configuration
             bool declared = declaration.TryGetProperty("primary", out JsonElement options);
             if (!IsReplicated(type))
             {
+                if (type == AuthZoneType.Catalog && declaration.TryGetProperty("records", out _))
+                    throw new InvalidDataException($"{path}/records: Catalog records are generated from catalog settings and membership.");
                 if (declared)
                     throw new InvalidDataException($"{path}/primary: Primary server settings require a secondary or stub zone.");
                 return default;

@@ -1365,10 +1365,10 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Access was denied.");
 
                     ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
-                    if (zone is not null && ((zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) && !ConfigurationZonePrimary.IsReplicated(zone.Type)) || zone.CatalogZoneName is not null))
+                    if (zone is not null && ((zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) && !ConfigurationZonePrimary.IsReplicated(zone.Type)) || zone.CatalogZoneName is not null))
                         throw new InvalidDataException($"{zonePath}: Apply requires a supported zone outside catalogs.");
                     if (zone is not null && declaration.Value.ValueKind == JsonValueKind.Null)
-                        AuthZoneManager.CheckManifestZoneRemoval(zone, zonePath);
+                        _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRemoval(zone, zonePath);
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                         ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, zonePath, zone, keys);
                     writer.WriteStartObject(name);
@@ -1386,6 +1386,8 @@ namespace DnsServerCore
 
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                     {
+                        if (type == AuthZoneType.Catalog)
+                            ConfigurationZonePolicies.Prepare(declaration.Value, name, zonePath, zone);
                         var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, keys, zonePath);
                         if (primary != default)
                         {

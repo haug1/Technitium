@@ -16,7 +16,7 @@ namespace DnsServerCore.Configuration
             AuthZoneQueryAccess? QueryAccess, NetworkAccessControl[] QueryAcl,
             AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl, IReadOnlySet<string> TransferKeys,
             AuthZoneNotify? Notify, IPAddress[] NotifyServers,
-            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl, PolicyMap UpdatePolicies)
+            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl, PolicyMap UpdatePolicies, IPAddress[] NotifySecondaryServers)
         {
             internal void Apply(AuthZoneInfo zone)
             {
@@ -32,6 +32,8 @@ namespace DnsServerCore.Configuration
                     zone.ZoneTransferTsigKeyNames = TransferKeys;
                 if (NotifyServers is not null)
                     zone.NotifyNameServers = NotifyServers;
+                if (NotifySecondaryServers is not null)
+                    zone.NotifySecondaryCatalogNameServers = NotifySecondaryServers;
                 if (Notify.HasValue)
                     zone.Notify = Notify.Value;
                 if (UpdateAcl is not null)
@@ -51,8 +53,12 @@ namespace DnsServerCore.Configuration
             declaration.TryGetProperty("updates", out JsonElement updates);
             bool usesBaseDefaults = current is not null ? current.Type != AuthZoneType.Primary :
                 declaration.TryGetProperty("type", out JsonElement zoneType) && !zoneType.ValueEquals(nameof(AuthZoneType.Primary));
+            bool catalog = current?.Type == AuthZoneType.Catalog ||
+                declaration.TryGetProperty("type", out JsonElement requestedType) && requestedType.ValueEquals(nameof(AuthZoneType.Catalog));
+            if (catalog && updates.ValueKind != JsonValueKind.Undefined)
+                throw new InvalidDataException($"{path}/updates: Catalog zones do not support update policies.");
             AuthZoneNotify? notifyMode = ReadMode(notify, "notify", current?.Notify);
-            if (notifyMode == AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones)
+            if (!catalog && notifyMode == AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones)
                 throw new InvalidDataException($"{path}/notify/mode: This notification mode requires a catalog zone.");
 
             IPAddress[] notifyServers = null;
@@ -62,6 +68,17 @@ namespace DnsServerCore.Configuration
                     names.EnumerateArray().Select(value => IPAddress.Parse(value.GetString())).ToArray();
                 if (!(current?.NotifyNameServers ?? []).SequenceEqual(addresses))
                     notifyServers = addresses;
+            }
+
+            IPAddress[] notifySecondaryServers = null;
+            if (notify.ValueKind == JsonValueKind.Object && notify.TryGetProperty("secondaryCatalogNameServers", out JsonElement secondary))
+            {
+                if (!catalog)
+                    throw new InvalidDataException($"{path}/notify/secondaryCatalogNameServers: This setting requires a catalog zone.");
+                IPAddress[] addresses = secondary.ValueKind == JsonValueKind.Null ? [] :
+                    secondary.EnumerateArray().Select(value => IPAddress.Parse(value.GetString())).ToArray();
+                if (!(current?.NotifySecondaryCatalogNameServers ?? []).SequenceEqual(addresses))
+                    notifySecondaryServers = addresses;
             }
 
             IReadOnlySet<string> transferKeys = ReadTransferKeys(declaration, path);
@@ -76,7 +93,7 @@ namespace DnsServerCore.Configuration
                 ReadMode(query, "query", current?.QueryAccess), ReadAcl(query, "query", current?.QueryAccessNetworkACL),
                 ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL), transferKeys,
                 notifyMode, notifyServers,
-                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies);
+                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies, notifySecondaryServers);
 
             T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
             {
@@ -112,6 +129,7 @@ namespace DnsServerCore.Configuration
                         .SetEquals(candidate.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>()),
                     "notify/mode" => current.Notify != candidate.Notify,
                     "notify/nameServers" => !Equal(current.NotifyNameServers, candidate.NotifyNameServers),
+                    "notify/secondaryCatalogNameServers" => !Equal(current.NotifySecondaryCatalogNameServers, candidate.NotifySecondaryCatalogNameServers),
                     "updates/mode" => current.Update != candidate.Update,
                     "updates/networkAcl" => !Equal(current.UpdateNetworkACL, candidate.UpdateNetworkACL),
                     _ => ConfigurationZoneUpdatePolicies.OwnedValueChanged(field, current.UpdateSecurityPolicies, candidate.UpdateSecurityPolicies)
@@ -199,6 +217,13 @@ namespace DnsServerCore.Configuration
                         foreach (IPAddress address in zone.NotifyNameServers ?? [])
                             writer.WriteStringValue(address.ToString());
                         writer.WriteEndArray();
+                        if (zone.Type == AuthZoneType.Catalog)
+                        {
+                            writer.WriteStartArray("secondaryCatalogNameServers");
+                            foreach (IPAddress address in zone.NotifySecondaryCatalogNameServers ?? [])
+                                writer.WriteStringValue(address.ToString());
+                            writer.WriteEndArray();
+                        }
                         writer.WriteEndObject();
                         break;
                 }
@@ -234,6 +259,8 @@ namespace DnsServerCore.Configuration
             bool exists = current.ValueKind == JsonValueKind.Object && current.TryGetProperty("type", out _);
             bool usesBaseDefaults = exists ? !current.GetProperty("type").ValueEquals(nameof(AuthZoneType.Primary)) :
                 declared.TryGetProperty("type", out JsonElement zoneType) && !zoneType.ValueEquals(nameof(AuthZoneType.Primary));
+            bool catalog = exists ? current.GetProperty("type").ValueEquals(nameof(AuthZoneType.Catalog)) :
+                declared.TryGetProperty("type", out JsonElement declaredType) && declaredType.ValueEquals(nameof(AuthZoneType.Catalog));
             foreach (JsonProperty policy in declared.EnumerateObject())
             {
                 if (!IsPolicy(policy.Name))
@@ -256,7 +283,7 @@ namespace DnsServerCore.Configuration
                     if (field.Name == "mode")
                     {
                         string mode = field.Value.GetString() ?? GetDefaultMode(policy.Name, usesBaseDefaults);
-                        if (policy.Name == "notify" && mode == nameof(AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones))
+                        if (!catalog && policy.Name == "notify" && mode == nameof(AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones))
                             throw new InvalidDataException($"{fieldPath}: This notification mode requires a catalog zone.");
                         changed = exists && !currentPolicy.GetProperty("mode").ValueEquals(mode);
                     }
@@ -275,7 +302,7 @@ namespace DnsServerCore.Configuration
                         PolicyMap candidate = ConfigurationZoneUpdatePolicies.Prepare(declared, zoneName, zonePath, previous);
                         changed = exists && !ConfigurationZoneUpdatePolicies.Same(previous, candidate);
                     }
-                    else if (field.Name == "nameServers" && policy.Name == "notify")
+                    else if (policy.Name == "notify" && (field.Name == "nameServers" || catalog && field.Name == "secondaryCatalogNameServers"))
                     {
                         IEnumerable<string> addresses = field.Value.ValueKind == JsonValueKind.Null ? [] :
                             field.Value.EnumerateArray().Select(value => IPAddress.Parse(value.GetString()).ToString());
