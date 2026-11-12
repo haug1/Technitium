@@ -58,3 +58,35 @@ Sources and scheduling are cluster-wide and apply live. The blocklist manager pe
 | `blocklists.updateIntervalHours` | `blockListUpdateIntervalHours` | Integer hours, 24 | Range 0–168. Zero disables automatic updates. A positive interval needs at least one source to schedule downloads. |
 
 Downloaded lists, update timestamps, the next scheduled refresh, and temporary blocking pauses are runtime state. DNS blocking policy and individually allowed and blocked names have separate configuration paths.
+
+## DNS identity, authoritative defaults, and basic transport
+
+These fields are read and written by the settings API and stored in `dns.config`. The reader accepts versions 1–7. Versions before 2 supply default NS and SOA TTLs, versions before 3 translate the stored IPv6 preference flag, and versions before 4 default server update checks to enabled. In the table, **local** means the DNS config reader preserves the destination value during cluster transfer. [DNS config reader](DnsServerCore/Dns/DnsServer.cs#L652) · [DNS config writer](DnsServerCore/Dns/DnsServer.cs#L1226) · [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L516) · [Zone defaults](DnsServerCore/Dns/ZoneManagers/AuthZoneManager.cs#L57)
+
+| Proposed manifest path | API field or alias | Environment input | Type and default | Scope, validation, and activation |
+| --- | --- | --- | --- | --- |
+| `dns.serverDomain` | `dnsServerDomain` | `DNS_SERVER_DOMAIN` | DNS name, lowercase hostname or `dns-server-1` when unusable | Local. Reject IP literals, normalize IDNs, and require a cluster-domain suffix for a cluster node. Updates zone metadata and may regenerate a self-signed web certificate. |
+| `dns.localEndpoints` | `dnsServerLocalEndPoints` | | Endpoint array, `0.0.0.0:53` and `[::]:53` | Local. Accept interface-aware endpoints. Empty selects defaults and port 0 in API input selects 53. Port 853 is reserved for DNS-over-TLS. Changes restart DNS listeners. |
+| `dns.sourceNetworks.ipv4` | `dnsServerIPv4SourceAddresses` | | IPv4 network array, empty | Local. Up to 255 entries of the correct family. Changes outbound address selection live. |
+| `dns.sourceNetworks.ipv6` | `dnsServerIPv6SourceAddresses` | | IPv6 network array, empty | Local. Up to 255 entries of the correct family. Changes outbound address selection live. |
+| `dns.authoritative.defaultRecordTtl` | `defaultRecordTtl` | | Unsigned seconds, 3600 | Cluster-wide. Use the DNS TTL parser for legacy API input. Applies live. |
+| `dns.authoritative.defaultNsRecordTtl` | `defaultNsRecordTtl` | | Unsigned seconds, 14400 | Cluster-wide. Use the DNS TTL parser for legacy API input. Applies live. |
+| `dns.authoritative.defaultSoaRecordTtl` | `defaultSoaRecordTtl` | | Unsigned seconds, 900 | Cluster-wide. Use the DNS TTL parser for legacy API input. Applies live. |
+| `dns.authoritative.defaultResponsiblePerson` | `defaultResponsiblePerson` | | Optional email address, unset | Cluster-wide. Up to 255 characters and parsed as a mail address. Empty clears the override. Effective fallback uses `hostadmin@` and the server domain. Applies live. |
+| `dns.authoritative.useSoaSerialDateScheme` | `useSoaSerialDateScheme` | | Boolean, false | Cluster-wide. Default used when creating a primary zone. Applies live. |
+| `dns.authoritative.minSoaRefresh` | `minSoaRefresh` | | Unsigned seconds, 300 | Cluster-wide. Use the DNS TTL parser for legacy API input. Applies live. |
+| `dns.authoritative.minSoaRetry` | `minSoaRetry` | | Unsigned seconds, 300 | Cluster-wide. Use the DNS TTL parser for legacy API input. Applies live. |
+| `dns.authoritative.zoneTransferAllowedNetworks` | `zoneTransferAllowedNetworks` | | Network array, empty | Cluster-wide. Up to 255 network entries. Empty clears the list. Applies live. |
+| `dns.authoritative.notifyAllowedNetworks` | `notifyAllowedNetworks` | | Network array, empty | Cluster-wide. Up to 255 network entries. Empty clears the list. Applies live. |
+| `dns.checkForUpdates` | `dnsServerEnableCheckForUpdate` | | Boolean, true | Cluster-wide. Applies live. |
+| `apps.autoUpdate` | `dnsAppsEnableAutomaticUpdate` | | Boolean, true | Cluster-wide. Applies live through the app manager. |
+| `dns.ipv6Mode` | `ipv6Mode`, legacy `preferIPv6` | `DNS_SERVER_IPV6_MODE`, legacy `DNS_SERVER_PREFER_IPV6` | Enum, `Disabled` | Local. `Disabled`, `Enabled`, or `Preferred`. Explicit mode takes precedence over the legacy flag, which maps true to `Preferred` and false to `Disabled`. May rebuild the UDP socket pool asynchronously. |
+| `dns.udpSocketPool.enabled` | `enableUdpSocketPool` | | Boolean, true on Windows and false elsewhere | Local. Creates or disposes outbound UDP socket pools asynchronously. |
+| `dns.udpSocketPool.excludedPorts` | `socketPoolExcludedPorts` | | Unsigned 16-bit port array, seeded with web TLS port on fresh web config | Local. Empty clears exclusions. The client connection library applies the settings to pooled outbound sockets. |
+| `dns.udpPayloadSize` | `udpPayloadSize` | | Integer bytes, 1232 | Cluster-wide. Range 512–4096. Applies live. |
+| `dns.dnssecValidation` | `dnssecValidation` | | Boolean, true | Cluster-wide. Enabling flushes cached unvalidated responses. Applies live. |
+| `dns.clientSubnet.enabled` | `eDnsClientSubnet` | | Boolean, false | Cluster-wide. Disabling schedules deletion of cached client-subnet data. Applies live. |
+| `dns.clientSubnet.ipv4PrefixLength` | `eDnsClientSubnetIPv4PrefixLength` | | Integer bits, 24 | Cluster-wide. Range 0–32. Applies live. |
+| `dns.clientSubnet.ipv6PrefixLength` | `eDnsClientSubnetIPv6PrefixLength` | | Integer bits, 56 | Cluster-wide. Range 0–64. Applies live. |
+| `dns.clientSubnet.ipv4Override` | `eDnsClientSubnetIpv4Override` | | Optional IPv4 network, unset | Cluster-wide. Must be IPv4. A host address uses the configured IPv4 prefix length. Empty clears the override. Applies live. |
+| `dns.clientSubnet.ipv6Override` | `eDnsClientSubnetIpv6Override` | | Optional IPv6 network, unset | Cluster-wide. Must be IPv6. A host address uses the configured IPv6 prefix length. Empty clears the override. Applies live. |
