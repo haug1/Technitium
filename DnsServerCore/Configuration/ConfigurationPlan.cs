@@ -49,7 +49,7 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/useSoaSerialDateScheme"] = Field("useSoaSerialDateScheme", false, canApply: true),
             ["/dns/authoritative/zoneTransferAllowedNetworks"] = Field("zoneTransferAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/authoritative/notifyAllowedNetworks"] = Field("notifyAllowedNetworks", Array.Empty<string>(), canApply: true),
-            ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true),
+            ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232),
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true),
@@ -127,7 +127,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetUpdateChecks(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
@@ -184,10 +184,22 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        private static bool? GetUpdateChecks(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("checkForUpdates", out JsonElement value))
+                return null;
+
+            return (value.ValueKind == JsonValueKind.Null ? _settings["/dns/checkForUpdates"].Default : value).GetBoolean();
+        }
+
         internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)
         {
-            if (clusterInitialized && GetAuthoritativeDefaults(manifest).HasValues)
+            if (!clusterInitialized)
+                return;
+            if (GetAuthoritativeDefaults(manifest).HasValues)
                 throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
+            if (GetUpdateChecks(manifest).HasValue)
+                throw new InvalidDataException("/dns/checkForUpdates: Applying update checks to a cluster is not implemented.");
         }
 
         internal static void CheckApplySupport(ConfigurationManifest manifest)

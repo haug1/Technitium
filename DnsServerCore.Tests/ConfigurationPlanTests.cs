@@ -390,6 +390,38 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManagedUpdateChecksResetToDefaultAndRejectConflictingRestore()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"dns":{"checkForUpdates":null}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.True(current.GetProperty("dnsServerEnableCheckForUpdate").GetBoolean());
+            Assert.Equal("/dns/checkForUpdates", Assert.Single(current.GetProperty("managedSettings").EnumerateArray()).GetString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement edit = await server.CallAsync("settings/set?dnsServerEnableCheckForUpdate=false&maxLogFileDays=180", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/dns/checkForUpdates", edit.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/dns/checkForUpdates", restore.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

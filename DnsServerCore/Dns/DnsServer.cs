@@ -139,7 +139,8 @@ namespace DnsServerCore.Dns
             ZoneTransferNetworks = 256,
             NotifyNetworks = 512,
             Ipv4SourceNetworks = 1024,
-            Ipv6SourceNetworks = 2048
+            Ipv6SourceNetworks = 2048,
+            CheckForUpdates = 4096
         }
 
         internal readonly record struct SourceNetworks(IReadOnlyList<NetworkAddress> Ipv4, IReadOnlyList<NetworkAddress> Ipv6);
@@ -713,7 +714,10 @@ namespace DnsServerCore.Dns
             (ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh | ManagedDnsSettings.MinRetry)) != 0;
         private const ManagedDnsSettings SourceOwnership = ManagedDnsSettings.Ipv4SourceNetworks | ManagedDnsSettings.Ipv6SourceNetworks;
         internal bool HasManagedSourceNetworks => (_managedDnsSettings & SourceOwnership) != 0;
-        internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | SourceOwnership)) != 0;
+        internal bool ManifestOwnsUpdateChecks => _managedDnsSettings.HasFlag(ManagedDnsSettings.CheckForUpdates);
+        internal bool HasManagedAuthoritativeDefaults =>
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | SourceOwnership | ManagedDnsSettings.CheckForUpdates)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || ManifestOwnsUpdateChecks;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -723,6 +727,8 @@ namespace DnsServerCore.Dns
                 yield return "/dns/sourceNetworks/ipv4";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv6SourceNetworks))
                 yield return "/dns/sourceNetworks/ipv6";
+            if (ManifestOwnsUpdateChecks)
+                yield return "/dns/checkForUpdates";
             if (ManifestOwnsDefaultRecordTtl)
                 yield return "/dns/authoritative/defaultRecordTtl";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl))
@@ -877,6 +883,17 @@ namespace DnsServerCore.Dns
                 DnsClientConnection.IPv6SourceAddresses = ipv6;
         }
 
+        internal void CheckManifestUpdateChecks(bool? value)
+        {
+            if (ManifestOwnsUpdateChecks && value.HasValue && value.Value != _enableCheckForUpdate)
+                throw new DnsWebServiceException("/dns/checkForUpdates: Setting is managed by the configuration manifest.");
+        }
+
+        private static bool ReadUpdateChecks(BinaryReader reader, int version)
+        {
+            return version < 4 || reader.ReadBoolean();
+        }
+
         internal void CheckRestoreManifestDnsSettings(BinaryReader reader, bool isConfigTransfer)
         {
             int version = ReadConfigVersion(reader);
@@ -884,26 +901,28 @@ namespace DnsServerCore.Dns
             IReadOnlyList<IPEndPoint> endpoints = ReadLocalEndPoints(reader);
             if (!isConfigTransfer)
                 CheckManifestLocalEndPoints(endpoints);
-            if (HasManagedAuthoritativeDefaults || (!isConfigTransfer && HasManagedSourceNetworks))
+            if (HasManagedClusterDnsSettings || (!isConfigTransfer && HasManagedSourceNetworks))
             {
                 SourceNetworks source = ReadSourceNetworks(reader);
                 if (!isConfigTransfer && HasManagedSourceNetworks)
                     CheckManifestSourceNetworks(source);
-                if (!HasManagedAuthoritativeDefaults)
+                if (!HasManagedClusterDnsSettings)
                     return;
 
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
-                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks)
+                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks)
                 {
                     string responsiblePerson = reader.BaseStream.ReadShortString();
                     defaults = defaults with { ResponsiblePerson = NormalizeDefaultResponsiblePerson(responsiblePerson) };
-                    if (HasManagedSoaTiming || HasManagedAuthoritativeNetworks)
+                    if (HasManagedSoaTiming || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks)
                         defaults = ReadSoaTiming(reader, defaults);
-                    if (HasManagedAuthoritativeNetworks)
+                    if (HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks)
                         defaults = ReadAuthoritativeNetworks(reader, defaults);
                 }
 
                 CheckManifestAuthoritativeDefaults(defaults);
+                if (ManifestOwnsUpdateChecks)
+                    CheckManifestUpdateChecks(ReadUpdateChecks(reader, version));
             }
         }
 
@@ -949,10 +968,7 @@ namespace DnsServerCore.Dns
             defaults = ReadSoaTiming(bR, defaults);
             SetAuthoritativeDefaults(ReadAuthoritativeNetworks(bR, defaults));
 
-            if (version >= 4)
-                _enableCheckForUpdate = bR.ReadBoolean();
-            else
-                _enableCheckForUpdate = true;
+            _enableCheckForUpdate = ReadUpdateChecks(bR, version);
 
             _dnsApplicationManager.EnableAutomaticUpdate = bR.ReadBoolean();
 
@@ -7216,7 +7232,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, bool? checkForUpdates, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7257,6 +7273,11 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.Ipv4SourceNetworks;
                     if (sourceNetworks.Ipv6 is not null)
                         ownership |= ManagedDnsSettings.Ipv6SourceNetworks;
+                    if (checkForUpdates.HasValue)
+                        ownership |= ManagedDnsSettings.CheckForUpdates;
+
+                    bool previousUpdateChecks = _enableCheckForUpdate;
+                    bool effectiveUpdateChecks = checkForUpdates ?? previousUpdateChecks;
 
                     SourceNetworks previousSourceNetworks = GetSourceNetworks();
                     var effectiveSourceNetworks = new SourceNetworks(
@@ -7271,7 +7292,8 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) && (effectiveSourceNetworks == previousSourceNetworks))
+                    if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                        (effectiveSourceNetworks == previousSourceNetworks) && (effectiveUpdateChecks == previousUpdateChecks))
                     {
                         persist(null);
                         return;
@@ -7281,6 +7303,7 @@ namespace DnsServerCore.Dns
                     _managedDnsSettings = ownership;
                     try
                     {
+                        _enableCheckForUpdate = effectiveUpdateChecks;
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
                         persist(SaveConfigFileInternal);
@@ -7290,6 +7313,7 @@ namespace DnsServerCore.Dns
                     {
                         _localEndPoints = previous;
                         _managedDnsSettings = previousOwnership;
+                        _enableCheckForUpdate = previousUpdateChecks;
                         SetAuthoritativeDefaults(previousDefaults);
                         SetSourceNetworks(previousSourceNetworks);
                         throw;

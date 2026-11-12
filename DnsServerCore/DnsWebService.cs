@@ -914,7 +914,7 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                if (isConfigTransfer && dnsSettings && _dnsServer.HasManagedAuthoritativeDefaults &&
+                if (isConfigTransfer && dnsSettings && _dnsServer.HasManagedClusterDnsSettings &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                 {
                     using Stream dnsConfiguration = dnsEntry.Open();

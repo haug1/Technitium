@@ -665,6 +665,8 @@ namespace DnsServerCore
                     defaultResponsiblePerson is null ? null : DnsServer.NormalizeDefaultResponsiblePerson(defaultResponsiblePerson),
                     zoneTransferAllowedNetworks, notifyAllowedNetworks);
                 _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
+                bool hasUpdateChecks = request.TryGetQueryOrForm("dnsServerEnableCheckForUpdate", bool.Parse, out bool dnsServerEnableCheckForUpdate);
+                _dnsWebService._dnsServer.CheckManifestUpdateChecks(hasUpdateChecks ? dnsServerEnableCheckForUpdate : null);
 
                 try
                 {
@@ -722,7 +724,7 @@ namespace DnsServerCore
                         if (notifyAllowedNetworks is not null)
                             clusterParameters.Add("notifyAllowedNetworks", notifyAllowedNetworks.Join());
 
-                        if (request.TryGetQueryOrForm("dnsServerEnableCheckForUpdate", bool.Parse, out bool dnsServerEnableCheckForUpdate))
+                        if (hasUpdateChecks)
                         {
                             _dnsWebService._dnsServer.EnableCheckForUpdate = dnsServerEnableCheckForUpdate;
 
