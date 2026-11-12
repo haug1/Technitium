@@ -128,6 +128,8 @@ namespace DnsServerCore.Configuration
                     fields.Add(field.Name);
                 }
             }
+            if (fields.Count > ushort.MaxValue)
+                throw new InvalidDataException($"{Path}: Too many LDAP ownership declarations.");
             fields.Sort(StringComparer.Ordinal);
             return fields.ToArray();
         }

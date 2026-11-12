@@ -811,13 +811,13 @@ namespace DnsServerCore.Dns.ZoneManagers
             _manifestOwnedZones.TryGetValue(name, out string[] fields) && fields.Contains(field, StringComparer.Ordinal);
 
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneAndAuthChanges(ConfigurationManifest manifest, AuthManager auth, User creator,
-            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions, ConfigurationSso.Settings sso)
+            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions, ConfigurationSso.Settings sso, bool isClusterSecondary)
         {
             if (ldap is not null && ConfigurationLdap.Same(ldap, auth.GetManifestLdapSettings()))
                 ldap = null;
 
             string[] ldapOwnership = ConfigurationLdap.GetOwnedFields(manifest);
-            if (auth.ManagedLdapFields.SequenceEqual(ldapOwnership))
+            if (auth.LdapOwnershipFromPrimary ? isClusterSecondary : auth.ManagedLdapFields.SequenceEqual(ldapOwnership))
                 ldapOwnership = null;
 
             string[] ssoOwnership = ConfigurationSso.GetOwnedFields(manifest);
@@ -906,7 +906,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
-            if (membership.Count > 0 || ldap is not null || groupChanges.Count > 0 || userChanges.Count > 0 || grants.Count > 0 || sso is not null)
+            if (membership.Count > 0 || ldap is not null || ldapOwnership is not null || groupChanges.Count > 0 || userChanges.Count > 0 || grants.Count > 0 || sso is not null)
                 files.Add("auth.config");
             if (ownershipChanged)
                 files.Add(ManifestOwnershipFile);

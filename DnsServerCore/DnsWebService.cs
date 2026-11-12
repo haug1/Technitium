@@ -980,7 +980,7 @@ namespace DnsServerCore
                     backupZip.GetEntry("auth.config") is ZipArchiveEntry managedAuth)
                 {
                     using Stream authConfiguration = managedAuth.Open();
-                    _authManager.CheckManifestRestoreOwnership(authConfiguration);
+                    _authManager.CheckManifestRestoreOwnership(authConfiguration, isConfigTransfer: true);
                 }
 
                 if (isConfigTransfer)
@@ -3254,6 +3254,8 @@ namespace DnsServerCore
             bool clustered = _clusterManager.ClusterInitialized;
             bool secondary = clustered && _clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
             var blockLists = _dnsServer.BlockListZoneManager;
+            ldap ??= ConfigurationLdap.Prepare(manifest, _authManager);
+            int[] ldapPeers = ConfigurationPlan.CheckClusterLdapSupport(manifest, _clusterManager, ldap);
             var domainListChange = ConfigurationPlan.CheckClusterDomainListSupport(manifest, _clusterManager);
             var dnsPolicyChange = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager, proxy, tsig);
             var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
@@ -3277,8 +3279,8 @@ namespace DnsServerCore
             try
             {
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
-                    ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users, staticSessions,
-                    sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
+                    ldap, users, staticSessions,
+                    sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso, secondary);
                 var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager,
                     webCertificate is { Changed: true }, previousClusterCertificate, WebServiceTlsCertificate);
                 Action writeCluster = null;
@@ -3298,6 +3300,11 @@ namespace DnsServerCore
                     if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy, dnsPolicy.RequiresDnsTuning, dnsPolicy.RequiresTsig).SequenceEqual(dnsPolicy.Peers))
                         throw new InvalidDataException("/dns: Cluster membership changed during apply. Create a new preview.");
                 } : null;
+                Action checkLdapPeers = ldapPeers is null ? null : () =>
+                {
+                    if (!_clusterManager.CheckDeclarativeLdapPeers().SequenceEqual(ldapPeers))
+                        throw new InvalidDataException("/auth/ldap: Cluster membership changed during apply. Create a new preview.");
+                };
                 var clusterFiles = new List<string>(2);
                 if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
                     clusterFiles.Add("cluster.config");
@@ -3311,7 +3318,7 @@ namespace DnsServerCore
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + checkDnsPolicyPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + checkDnsPolicyPeers + checkLdapPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
                         persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
                         {
                             writeCluster = write;
@@ -3330,7 +3337,7 @@ namespace DnsServerCore
                 throw;
             }
 
-            if (clustered && !secondary && (dnsPolicyChange.HasValue || domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
+            if (clustered && !secondary && (ldapPeers is not null || dnsPolicyChange.HasValue || domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
                 blockLists.BlockListUpdateIntervalHours, blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval)))
                 _clusterManager.TriggerNotifyAllSecondaryNodesIfPrimarySelfNode();
 

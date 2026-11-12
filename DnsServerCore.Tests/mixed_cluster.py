@@ -123,6 +123,8 @@ def wait_for(check, description, timeout=45):
 def verify(current, previous, folder, propagation, graceful):
     ports = allocate_ports()
     password = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_LDAP_SECRET"] = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_LDAP_ROTATED_SECRET"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_TSIG_SECRET"] = base64.b64encode(secrets.token_bytes(32)).decode()
     os.environ["TECHNITIUM_TEST_CLUSTER_TSIG_ROTATED_SECRET"] = base64.b64encode(secrets.token_bytes(32)).decode()
     os.environ["TECHNITIUM_TEST_CLUSTER_PROXY_PASSWORD"] = secrets.token_hex(16)
@@ -153,6 +155,8 @@ def verify(current, previous, folder, propagation, graceful):
         tuning_revision = ok(primary.call("settings/config/plan", manifest=tuning_policy))["revision"]
         tsig_policy = {"schemaVersion": 1, "dns": {"tsigKeys": {"managed.fixture.net": None}}}
         tsig_revision = ok(primary.call("settings/config/plan", manifest=tsig_policy))["revision"]
+        ldap_policy = {"schemaVersion": 1, "auth": {"ldap": {"port": 1389}}}
+        ldap_revision = ok(primary.call("settings/config/plan", manifest=ldap_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -166,12 +170,27 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeProxy"] is True
             assert joined["supportsDeclarativeDnsTuning"] is True
             assert joined["supportsDeclarativeTsig"] is True
+            assert joined["supportsDeclarativeLdap"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeTsig"), joined
+        assert not joined.get("supportsDeclarativeLdap"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=ldap_policy),
+            primary.call("settings/config/apply", manifest=ldap_policy, revision=ldap_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative LDAP" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            ldap = ok(node.call("admin/ldap/get"))
+            assert ldap["ldapPort"] == 389 and "/auth/ldap/port" not in ldap["managedSettings"]
+        if joined.get("supportsDeclarativeTsig"):
+            plan = ok(primary.call("settings/config/plan", manifest=tsig_policy))
+            ok(primary.call("settings/config/apply", manifest=tsig_policy, revision=plan["revision"]))
+            assert "/dns/tsigKeys/managed.fixture.net" in ok(primary.call("settings/get"))["managedSettings"]
+            print("Mixed-build check passed. Existing TSIG support allowed ownership and rejected LDAP changes.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=tsig_policy),
             primary.call("settings/config/apply", manifest=tsig_policy, revision=tsig_revision),
@@ -508,6 +527,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_proxy_policy(primary, secondary, release, local_web)
     verify_dns_tuning(primary, secondary, release, local_web)
     verify_tsig_policy(primary, secondary, release, local_web)
+    verify_ldap_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -872,6 +892,56 @@ def verify_tsig_policy(primary, secondary, cluster_manifest, local_web):
     wait_for(lambda: matches(None, {"/dns/tsigKeys"}), "the Secondary to clear operator keys and retain the catalog key")
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(None, set()), "the Secondary to release TSIG ownership")
+
+
+def verify_ldap_policy(primary, secondary, cluster_manifest, local_web):
+    first = "TECHNITIUM_TEST_CLUSTER_LDAP_SECRET"
+    rotated = "TECHNITIUM_TEST_CLUSTER_LDAP_ROTATED_SECRET"
+    ldap = {"enabled": False, "server": "ldap.fixture.test", "port": 1389,
+            "bindUsername": "cn=fixture", "bindPassword": {"environment": first}}
+    desired = {**cluster_manifest, "auth": {"ldap": ldap}}
+    paths = {f"/auth/ldap/{field}" for field in ldap}
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "auth": {"ldap": ldap}})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, manifest):
+        def preview():
+            result = node.call("settings/config/plan", manifest=manifest)
+            if result["status"] == "error" and "has not advertised support for declarative LDAP" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm LDAP support")
+        assert all(os.environ[var] not in json.dumps(plan) for var in (first, rotated))
+        ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
+        return plan
+
+    def matches(port, secret, owned):
+        config = ok(secondary.call("admin/ldap/get"))
+        return (config["ldapPort"] == port and config["ldapServer"] == ldap["server"]
+                and config["ldapEnabled"] is False and set(config["managedSettings"]) == owned
+                and config["ldapBindPassword"] == "************"
+                and os.environ[secret].encode() in (secondary.folder / "auth.config").read_bytes())
+
+    apply(primary, desired)
+    wait_for(lambda: matches(1389, first, paths), "the Secondary to inherit LDAP settings and ownership")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(1389, first, paths)
+    apply(secondary, local_web)
+    assert matches(1389, first, paths)
+    denied = secondary.call("admin/ldap/set?ldapPort=2389")
+    assert denied["status"] == "error" and "/auth/ldap/port" in denied["errorMessage"], denied
+    exported = ok(primary.call("settings/config/export"))
+    assert exported["manifest"]["auth"]["ldap"]["server"] == ldap["server"]
+    assert "/auth/ldap/bindPassword" in exported["missingInputs"]
+    assert os.environ[first] not in json.dumps(exported)
+
+    ldap.update(port=2389, bindPassword={"environment": rotated})
+    apply(primary, desired)
+    wait_for(lambda: matches(2389, rotated, paths), "the Secondary to apply the LDAP update and rotated credential")
+    assert not apply(primary, desired)["changes"]
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(2389, rotated, set()), "the Secondary to release LDAP ownership")
 
 
 def assert_promoted_policy(state):

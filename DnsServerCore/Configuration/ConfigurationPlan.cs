@@ -300,6 +300,8 @@ namespace DnsServerCore.Configuration
                     domainListPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("dnsPolicyPeers", out JsonElement dnsPolicyPeers))
                     dnsPolicyPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("ldapPeers", out JsonElement ldapPeers))
+                    ldapPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -886,8 +888,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/apps/packages: Applying app packages to a cluster is not implemented.");
             if (ConfigurationSso.IsDeclared(manifest))
                 throw new InvalidDataException("/auth/sso: Applying SSO settings to a cluster is not implemented.");
-            if (ConfigurationLdap.IsDeclared(manifest))
-                throw new InvalidDataException("/auth/ldap: Applying LDAP settings to a cluster is not implemented.");
+            CheckClusterLdapRole(manifest, cluster);
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
                 throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
             CheckClusterDomainListSupport(manifest, cluster);
@@ -896,6 +897,28 @@ namespace DnsServerCore.Configuration
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        private static void CheckClusterLdapRole(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (ConfigurationLdap.IsDeclared(manifest) && cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new InvalidDataException("/auth/ldap: Only the Primary can apply cluster LDAP settings.");
+        }
+
+        internal static int[] CheckClusterLdapSupport(ConfigurationManifest manifest, ClusterManager cluster, ConfigurationLdap.Settings ldap)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            CheckClusterLdapRole(manifest, cluster);
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                return null;
+
+            var auth = cluster.DnsWebService.AuthManager;
+            if (!auth.LdapOwnershipFromPrimary && auth.ManagedLdapFields.SequenceEqual(ConfigurationLdap.GetOwnedFields(manifest)) &&
+                (ldap is null || ConfigurationLdap.Same(auth.GetManifestLdapSettings(), ldap)))
+                return null;
+            return cluster.CheckDeclarativeLdapPeers();
         }
 
         internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits, bool RequiresProxy, bool RequiresDnsTuning, bool RequiresTsig)? CheckClusterDnsPolicySupport(

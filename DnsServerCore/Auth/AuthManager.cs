@@ -91,6 +91,7 @@ namespace DnsServerCore.Auth
 
         internal const string LdapOwnershipFile = "ldap-ownership.config";
         private string[] _managedLdapFields = [];
+        internal bool LdapOwnershipFromPrimary { get; private set; }
         internal IReadOnlyList<string> ManagedLdapFields => _managedLdapFields;
 
         internal const string SsoOwnershipFile = "sso-ownership.config";
@@ -106,8 +107,10 @@ namespace DnsServerCore.Auth
         internal const string PermissionOwnershipFile = "permission-ownership.config";
         private string[] _managedPermissionPaths = [];
         internal IReadOnlyList<string> ManagedPermissionPaths => _managedPermissionPaths;
-        internal bool HasManagedAuthOwnership => _managedSsoFields.Length > 0 || _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 ||
-            _managedUserPaths.Length > 0 || _managedPermissionPaths.Length > 0;
+        internal bool HasManagedAuthOwnership => HasManifestAuthChangesOnOmission(preserveInheritedLdap: false);
+        internal bool HasManifestAuthChangesOnOmission(bool preserveInheritedLdap) =>
+            _managedSsoFields.Length > 0 || _managedLdapFields.Length > 0 && (!preserveInheritedLdap || !LdapOwnershipFromPrimary) ||
+            _managedGroupPaths.Length > 0 || _managedUserPaths.Length > 0 || _managedPermissionPaths.Length > 0;
         internal bool HasManagedAuthSettings => HasManagedAuthOwnership || _manifestStaticSessionDefinitions.Count > 0;
 
         readonly Lock _saveLock = new Lock();
@@ -223,7 +226,7 @@ namespace DnsServerCore.Auth
 
                 using (FileStream fS = new FileStream(configFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS, false, out bool _);
+                    ReadConfigFrom(fS, false, out bool _, readOwnership: true);
                 }
 
                 _log.Write("DNS Server auth config file was loaded: " + configFile);
@@ -480,6 +483,9 @@ namespace DnsServerCore.Auth
         {
             lock (_saveLock)
             {
+                var previousLdap = GetManifestLdapSettings();
+                string[] previousLdapOwnership = _managedLdapFields;
+                bool previousLdapInherited = LdapOwnershipFromPrimary;
                 ReadConfigFrom(s, isConfigTransfer, out restartWebService);
 
                 if (!isConfigTransfer)
@@ -509,21 +515,31 @@ namespace DnsServerCore.Auth
                 }
 
                 //save config file
-                SaveConfigFileInternal();
+                try
+                {
+                    SaveConfigFileInternal();
+                }
+                catch
+                {
+                    SetLdapSettings(previousLdap);
+                    _managedLdapFields = previousLdapOwnership;
+                    LdapOwnershipFromPrimary = previousLdapInherited;
+                    throw;
+                }
                 _pendingSave = false;
                 _pendingLazySave = false;
             }
         }
 
-        private void SaveConfigFileInternal(IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null, ConfigurationSso.Settings sso = null)
+        private void SaveConfigFileInternal(IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null, ConfigurationSso.Settings sso = null, string[] ldapOwnership = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, stagedPermissions, ldap, groupChanges, stagedUsers, sso);
-                if (stagedPermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null || sso is not null)
+                WriteConfigTo(fS, stagedPermissions, ldap, groupChanges, stagedUsers, sso, ldapOwnership);
+                if (stagedPermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null || sso is not null || ldapOwnership is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -651,8 +667,8 @@ namespace DnsServerCore.Auth
                 {
                     if (staticSessions is not null)
                         WriteStaticSessions(staticSessions);
-                    if (permissions.Count > 0 || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null || sso is not null)
-                        SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers, sso);
+                    if (permissions.Count > 0 || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null || sso is not null || ldapOwnership is not null)
+                        SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers, sso, ldapOwnership);
                     if (ldapOwnership is not null)
                         WriteOwnership(LdapOwnershipFile, ldapOwnership);
                     if (ssoOwnership is not null)
@@ -697,7 +713,10 @@ namespace DnsServerCore.Auth
                 if (staticSessions is not null)
                     PublishStaticSessions(staticSessions, configuredSessions);
                 if (ldapOwnership is not null)
+                {
                     _managedLdapFields = ldapOwnership;
+                    LdapOwnershipFromPrimary = false;
+                }
                 if (ssoOwnership is not null)
                     _managedSsoFields = ssoOwnership;
                 if (groupOwnership is not null)
@@ -796,8 +815,8 @@ namespace DnsServerCore.Auth
             File.Move(temporary, file, true);
         }
 
-        internal void CheckManifestRestoreOwnership(Stream stream) =>
-            ReadConfigFrom(stream, false, out _, (ldap, sso, groups, users, permissions, sessions) =>
+        internal void CheckManifestRestoreOwnership(Stream stream, bool isConfigTransfer = false) =>
+            ReadConfigFrom(stream, isConfigTransfer, out _, (ldap, sso, groups, users, permissions, sessions, hasLdapMetadata) =>
             {
                 ConfigurationSso.CheckOwnership(GetManifestSsoSettings(), sso, _managedSsoFields);
                 if (_managedSsoFields.Length > 0 && sso.GroupMap is not null)
@@ -808,7 +827,8 @@ namespace DnsServerCore.Auth
                             ConfigurationSso.CheckGroupReference(sso, _managedSsoFields, group);
                     }
                 }
-                ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
+                if (!isConfigTransfer || !hasLdapMetadata || !LdapOwnershipFromPrimary)
+                    ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
                 if (_managedGroupPaths.Length > 0)
                     ConfigurationGroups.CheckRestore(this, groups);
                 if (_managedUserPaths.Length > 0)
@@ -856,7 +876,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, ConfigurationSso.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>, IReadOnlyDictionary<string, UserSession>> inspect = null)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, ConfigurationSso.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>, IReadOnlyDictionary<string, UserSession>, bool> inspect = null, bool readOwnership = false)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -921,9 +941,23 @@ namespace DnsServerCore.Auth
                     ConfigurationSso.Settings currentSso = GetManifestSsoSettings();
                     ConfigurationSso.Settings sso = version >= 2 ? ReadSsoSettings(bR, version, currentSso.Scopes) : currentSso;
                     ConfigurationLdap.Settings ldap = version >= 4 ? ReadLdapSettings(bR) : GetManifestLdapSettings();
+                    int ldapOwnershipMarker = version >= 4 && (isConfigTransfer || readOwnership) ? s.ReadByte() : -1;
+                    string[] ldapOwnership = null;
+                    if (ldapOwnershipMarker >= 0)
+                    {
+                        if (ldapOwnershipMarker > 1)
+                            throw new InvalidDataException("/auth/ldap: Invalid LDAP ownership data.");
+                        int count = bR.ReadUInt16();
+                        ldapOwnership = new string[count];
+                        for (int i = 0; i < count; i++)
+                            ldapOwnership[i] = bR.ReadString();
+
+                        if (isConfigTransfer && ldapOwnership.Length > 0 && _managedLdapFields.Length > 0 && !LdapOwnershipFromPrimary)
+                            throw new InvalidDataException("/auth/ldap: Release local LDAP ownership before inheriting the Primary policy.");
+                    }
                     if (inspect is not null)
                     {
-                        inspect(ldap, sso, groups, users, permissions, sessions);
+                        inspect(ldap, sso, groups, users, permissions, sessions, ldapOwnership is not null);
                         return;
                     }
                     if (version >= 2)
@@ -933,6 +967,12 @@ namespace DnsServerCore.Auth
                     }
                     if (version >= 4)
                         SetLdapSettings(ldap);
+                    if (ldapOwnership is not null &&
+                        (readOwnership && ldapOwnershipMarker == 1 || isConfigTransfer && (_managedLdapFields.Length == 0 || LdapOwnershipFromPrimary)))
+                    {
+                        _managedLdapFields = ldapOwnership;
+                        LdapOwnershipFromPrimary = ldapOwnership.Length != 0;
+                    }
 
                     break;
 
@@ -1099,7 +1139,7 @@ namespace DnsServerCore.Auth
             _ldapEnabled = ldap.Enabled;
         }
 
-        private void WriteConfigTo(Stream s, IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null, ConfigurationSso.Settings sso = null)
+        private void WriteConfigTo(Stream s, IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null, ConfigurationSso.Settings sso = null, string[] ldapOwnership = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -1239,6 +1279,12 @@ namespace DnsServerCore.Auth
                     s.WriteShortString(entry.Value);
                 }
             }
+            // Version 4 readers stop after the LDAP settings.
+            bW.Write((byte)(ldapOwnership is null && LdapOwnershipFromPrimary ? 1 : 0));
+            string[] fields = ldapOwnership ?? _managedLdapFields;
+            bW.Write((ushort)fields.Length);
+            foreach (string field in fields)
+                bW.Write(field);
         }
 
         #endregion

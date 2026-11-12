@@ -620,10 +620,13 @@ namespace DnsServerCore
                     ConfigurationLdap.Settings ldap = _dnsWebService._authManager.GetManifestLdapSettings();
                     if (!ConfigurationLdap.Same(ldap, ConfigurationLdap.Default))
                     {
-                        if (_dnsWebService._clusterManager.ClusterInitialized)
+                        if (_dnsWebService._clusterManager.ClusterInitialized && _dnsWebService._clusterManager.GetSelfNode().Type != ClusterNodeType.Primary)
                             missingInputs.Add(ConfigurationLdap.Path);
                         else
+                        {
+                            manifest["auth"] ??= new System.Text.Json.Nodes.JsonObject();
                             manifest["auth"]["ldap"] = ConfigurationLdap.Export(ldap);
+                        }
                         if (ldap.BindPassword is not null)
                             missingInputs.Add(ConfigurationLdap.Path + "/bindPassword");
                     }
@@ -836,7 +839,7 @@ namespace DnsServerCore
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
-                if (_dnsWebService._authManager.HasManagedAuthOwnership &&
+                if (_dnsWebService._authManager.HasManifestAuthChangesOnOmission(isClusterSecondary) &&
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
                 ConfigurationLdap.Settings ldap = PrepareLdapForSession(manifest, sessionUser);
@@ -1188,6 +1191,11 @@ namespace DnsServerCore
                         writer.WriteStringValue(path);
                     writer.WriteEndArray();
                     ConfigurationLdap.Settings ldap = preparedLdap ?? PrepareLdapForSession(manifest, sessionUser);
+                    if (manifest is not null && ConfigurationPlan.CheckClusterLdapSupport(manifest, _dnsWebService._clusterManager, ldap) is { } ldapPeers)
+                    {
+                        writer.WritePropertyName("ldapPeers");
+                        JsonSerializer.Serialize(writer, ldapPeers);
+                    }
                     if (ldap is not null)
                         ConfigurationLdap.WriteSnapshot(writer, _dnsWebService._authManager.GetManifestLdapSettings(), ldap, _configurationRevisionKey);
                     var auth = _dnsWebService._authManager;
