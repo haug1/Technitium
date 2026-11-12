@@ -1165,7 +1165,20 @@ function updateDnsSettingsDataAndGui(responseJSON) {
     $("#lblDnsServerDomain").text(" - " + responseJSON.response.dnsServerDomain);
 }
 
+function loadManifestManagedSettings(paths) {
+    var list = $("#listManifestManagedSettings").empty();
+    if (Array.isArray(paths)) {
+        paths.forEach(function (path) {
+            $("<li>").append($("<code>").text(path)).appendTo(list);
+        });
+    }
+
+    $("#divManifestManagedSettings").toggle(list.children().length > 0);
+}
+
 function loadDnsSettings(responseJSON) {
+    loadManifestManagedSettings(responseJSON.response.managedSettings);
+
     //update cluster nodes
     sessionData.info.clusterNodes = responseJSON.response.clusterNodes;
     updateAllClusterNodeDropDowns();

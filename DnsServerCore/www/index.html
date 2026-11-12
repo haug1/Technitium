@@ -960,6 +960,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                                     <div id="divDnsSettings" style="display: none;">
                                         <form style="margin-top: 10px;" onsubmit="return false;">
 
+                                            <div id="divManifestManagedSettings" class="alert alert-info" role="status" style="display: none;">
+                                                <strong>Managed by the configuration manifest</strong>
+                                                <p>To change these settings, update and apply the manifest.</p>
+                                                <ul id="listManifestManagedSettings" class="list-inline"></ul>
+                                            </div>
+
                                             <ul class="nav nav-tabs" role="tablist">
                                                 <li id="settingsTabListGeneral" role="presentation" class="active"><a href="#settingsTabPaneGeneral" aria-controls="settingsTabPaneGeneral" role="tab" data-toggle="tab">General</a></li>
                                                 <li id="settingsTabListWebService" role="presentation"><a href="#settingsTabPaneWebService" aria-controls="settingsTabPaneWebService" role="tab" data-toggle="tab">Web Service</a></li>
