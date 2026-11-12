@@ -33,7 +33,7 @@ Build the sibling library first, then run the xUnit suite from the repository ro
 dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj
 ```
 
-To collect C# line and branch coverage by assembly, add `--settings DnsServerCore.Tests/coverage.runsettings --collect "XPlat Code Coverage"`. The test runner prints the path to the Cobertura report. The GitHub Actions regression workflow publishes the report and test results as an artifact.
+To collect C# line and branch coverage by assembly, add `--settings DnsServerCore.Tests/coverage.runsettings --collect "XPlat Code Coverage"`. The test runner prints the path to the Cobertura report. The GitHub Actions regression workflow publishes the Linux report and test results as an artifact. It also runs the manifest validation tests on Windows to check platform-specific rules.
 
 ### Mixed-build cluster check
 

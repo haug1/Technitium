@@ -26,7 +26,11 @@ permissions:
 
 jobs:
   regression:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -38,6 +42,7 @@ jobs:
           ref: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
           path: TechnitiumLibrary
       - name: Check out the cluster compatibility baseline
+        if: runner.os == 'Linux'
         uses: actions/checkout@v5
         with:
           ref: 281fcffd2defec08eeb6def870deb08726c4dc8e
@@ -47,27 +52,35 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build TechnitiumLibrary
         working-directory: TechnitiumLibrary
+        shell: bash
         run: |
           for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
             dotnet build "$project/$project.csproj" -c Release
           done
       - name: Run regression tests
+        if: runner.os == 'Linux'
         working-directory: DnsServer
         run: |
           dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj \
             --settings DnsServerCore.Tests/coverage.runsettings \
             --collect "XPlat Code Coverage" --logger trx \
             --results-directory "${{ runner.temp }}/technitium-test-results"
+      - name: Run manifest validation tests on Windows
+        if: runner.os == 'Windows'
+        working-directory: DnsServer
+        run: dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj --filter FullyQualifiedName~ConfigurationManifestTests
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer
         run: dotnet run --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json
       - name: Verify declarative settings propagate between cluster nodes
+        if: runner.os == 'Linux'
         working-directory: DnsServer
         timeout-minutes: 8
         run: |
           dotnet publish DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-build"
           python3 DnsServerCore.Tests/mixed_cluster.py "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" --propagation
       - name: Verify older nodes block unsupported declarative changes
+        if: runner.os == 'Linux'
         working-directory: DnsServer
         timeout-minutes: 4
         run: |
@@ -76,7 +89,7 @@ jobs:
             "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" \
             "$RUNNER_TEMP/technitium-cluster-baseline/DnsServerApp.dll"
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && runner.os == 'Linux'
         with:
           name: regression-test-results
           path: ${{ runner.temp }}/technitium-test-results/
