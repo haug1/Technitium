@@ -150,19 +150,35 @@ namespace DnsServerCore.Dns.Zones
                     }
                 }
 
-                string memberZoneDomain = GetDomainWithLabel("zones." + _name);
-                DateTime utcNow = DateTime.UtcNow;
-
-                DnsResourceRecord ptrRecord = new DnsResourceRecord(memberZoneDomain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(memberZoneName));
-                ptrRecord.GetAuthGenericRecordInfo().LastModified = utcNow;
-
-                DnsResourceRecord txtRecord = new DnsResourceRecord("zone-type.ext." + memberZoneDomain, DnsResourceRecordType.TXT, DnsClass.IN, 0, new DnsTXTRecordData(zoneType.ToString().ToLowerInvariant()));
-                txtRecord.GetAuthGenericRecordInfo().LastModified = utcNow;
-
-                _dnsServer.AuthZoneManager.AddRecord(_name, ptrRecord);
-                _dnsServer.AuthZoneManager.AddRecord(_name, txtRecord);
+                var (memberZoneDomain, records) = CreateMemberRecords(memberZoneName, zoneType);
+                foreach (var record in records)
+                    _dnsServer.AuthZoneManager.AddRecord(_name, record);
 
                 _membersIndex[memberZoneName] = memberZoneDomain;
+            }
+            finally
+            {
+                _membersIndexLock.ExitWriteLock();
+            }
+        }
+
+        internal (string Domain, DnsResourceRecord[] Records) CreateMemberRecords(string member, AuthZoneType type)
+        {
+            string domain = GetDomainWithLabel("zones." + _name);
+            var pointer = new DnsResourceRecord(domain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(member));
+            var kind = new DnsResourceRecord("zone-type.ext." + domain, DnsResourceRecordType.TXT, DnsClass.IN, 0,
+                new DnsTXTRecordData(type.ToString().ToLowerInvariant()));
+            pointer.GetAuthGenericRecordInfo().LastModified = kind.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
+            return (domain, [pointer, kind]);
+        }
+
+        internal void RebuildManifestMembersIndex()
+        {
+            _membersIndexLock.EnterWriteLock();
+            try
+            {
+                _membersIndex.Clear();
+                BuildMembersIndex();
             }
             finally
             {

@@ -902,6 +902,11 @@ namespace DnsServerCore.Configuration
                     string path = AppendPath("/zones", zone.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(zone.Name, path, allowRoot: true);
                     CheckClusterZoneTarget(cluster, name, path);
+                    if (cluster.DnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(name)?.CatalogZoneName is string currentCatalog)
+                        CheckClusterZoneTarget(cluster, currentCatalog, path + "/catalog/name");
+                    if (zone.Value.ValueKind == JsonValueKind.Object && zone.Value.TryGetProperty("catalog", out JsonElement catalog) &&
+                        catalog.TryGetProperty("name", out JsonElement target) && target.ValueKind == JsonValueKind.String)
+                        CheckClusterZoneTarget(cluster, ConfigurationManifest.CanonicalDnsName(target.GetString(), path + "/catalog/name", allowRoot: false), path + "/catalog/name");
                 }
             }
             CheckClusterDomainListSupport(manifest, cluster);
@@ -1240,7 +1245,7 @@ namespace DnsServerCore.Configuration
                             }
                             continue;
                         }
-                        if (field.Name is "enabled" or "records" or "permissions" or "primary" ||
+                        if (field.Name is "enabled" or "records" or "permissions" or "primary" or "catalog" ||
                             (field.Name == "type" && field.Value.GetString() is "Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "Catalog" or "SecondaryCatalog" or "Stub"))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
@@ -1425,7 +1430,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled" or "records" or "permissions" or "primary") && !ConfigurationZonePolicies.IsPolicy(field.Name))
+                    if (field.Name is not ("type" or "enabled" or "records" or "permissions" or "primary" or "catalog") && !ConfigurationZonePolicies.IsPolicy(field.Name))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 
@@ -1445,6 +1450,8 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
 
                 ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
+                if (current.TryGetProperty("catalogChanged", out JsonElement catalogChanged) && catalogChanged.GetBoolean())
+                    changes.Add(new ConfigurationChange(path + "/catalog/name", ConfigurationChangeKind.Update, false));
                 if (current.TryGetProperty("primaryChanges", out JsonElement primaryChanges))
                 {
                     foreach (JsonElement field in primaryChanges.EnumerateArray())

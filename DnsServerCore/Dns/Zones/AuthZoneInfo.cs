@@ -1190,7 +1190,7 @@ namespace DnsServerCore.Dns.Zones
         public void WriteTo(BinaryWriter bW) => WriteTo(bW, disabled: null);
 
         internal void WriteTo(BinaryWriter bW, bool? disabled, ConfigurationZonePolicies.Changes policies = default,
-            ConfigurationZonePrimary.Changes primary = default)
+            ConfigurationZonePrimary.Changes primary = default, string catalog = null)
         {
             if (_apexZone is null)
                 throw new InvalidOperationException();
@@ -1205,7 +1205,7 @@ namespace DnsServerCore.Dns.Zones
             switch (_type)
             {
                 case AuthZoneType.Primary:
-                    bW.Write(_catalogZoneName ?? "");
+                    bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
                     bW.Write(_overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogNotify);
@@ -1229,7 +1229,7 @@ namespace DnsServerCore.Dns.Zones
                     break;
 
                 case AuthZoneType.Secondary:
-                    bW.Write(_catalogZoneName ?? "");
+                    bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
                     bW.Write(_overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogPrimaryNameServers);
@@ -1260,7 +1260,7 @@ namespace DnsServerCore.Dns.Zones
                     break;
 
                 case AuthZoneType.Stub:
-                    bW.Write(_catalogZoneName ?? "");
+                    bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
@@ -1272,7 +1272,7 @@ namespace DnsServerCore.Dns.Zones
                     break;
 
                 case AuthZoneType.Forwarder:
-                    bW.Write(_catalogZoneName ?? "");
+                    bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
                     bW.Write(_overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogNotify);
@@ -1294,7 +1294,7 @@ namespace DnsServerCore.Dns.Zones
                     break;
 
                 case AuthZoneType.SecondaryForwarder:
-                    bW.Write(_catalogZoneName ?? "");
+                    bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));

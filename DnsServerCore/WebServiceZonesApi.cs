@@ -3420,6 +3420,9 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 AuthZoneManager manager = _dnsWebService._dnsServer.AuthZoneManager;
+                if (manager.OwnsManifestZoneField(zoneInfo.Name, "catalog/name") &&
+                    request.QueryOrForm("catalog") is string catalog && !string.Equals(catalog, zoneInfo.CatalogZoneName ?? "", StringComparison.OrdinalIgnoreCase))
+                    throw new DnsWebServiceException($"{AuthZoneManager.GetManifestZonePath(zoneInfo.Name)}/catalog/name: Catalog membership is managed by the configuration manifest.");
                 if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog || ConfigurationZonePrimary.IsReplicated(zoneInfo.Type))
                 {
                     CheckMode("queryAccess", "query/mode", zoneInfo.QueryAccess);

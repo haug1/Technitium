@@ -29,7 +29,9 @@ namespace DnsServerCore.Configuration
                 if (isClusterInfrastructure(zone.Name) ||
                     (zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
-                    zone.CatalogZoneName is not null)
+                    (zone.CatalogZoneName is string catalog && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
+                        isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog ||
+                        zone.OverrideCatalogQueryAccess || zone.OverrideCatalogZoneTransfer || zone.OverrideCatalogNotify)))
                 {
                     missingInputs.Add(path);
                     continue;
@@ -50,6 +52,8 @@ namespace DnsServerCore.Configuration
                     updates = new { mode = zone.Update.ToString(), networkAcl = zone.UpdateNetworkACL?.Select(rule => rule.ToString()) ?? [] }
                 }).AsObject();
 
+                if (zone.CatalogZoneName is string catalogName)
+                    declaration["catalog"] = new JsonObject { ["name"] = catalogName };
                 if (zone.ZoneTransferTsigKeyNames?.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                 {
                     declaration["transfer"].AsObject().Remove("tsigKeys");

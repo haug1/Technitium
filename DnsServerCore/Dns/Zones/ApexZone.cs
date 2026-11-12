@@ -830,6 +830,13 @@ namespace DnsServerCore.Dns.Zones
 
         internal void SetManifestStagingDisabled(bool disabled) => base.Disabled = disabled;
 
+        internal void SetManifestCatalogMemberDisabled(bool disabled)
+        {
+            SetManifestStagingDisabled(disabled);
+            if (disabled)
+                DisableNotifyTimer();
+        }
+
         internal void ApplyManifestRecordHistory(ApexZone staged)
         {
             lock (_zoneHistory)

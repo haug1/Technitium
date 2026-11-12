@@ -272,7 +272,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void SaveZoneFileInternal(string zoneName, bool? disabled = null, ConfigurationZonePolicies.Changes policies = default, ConfigurationZonePrimary.Changes primary = default)
+        private void SaveZoneFileInternal(string zoneName, bool? disabled = null, ConfigurationZonePolicies.Changes policies = default, ConfigurationZonePrimary.Changes primary = default, string catalog = null)
         {
             zoneName = zoneName.ToLowerInvariant();
 
@@ -281,7 +281,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             using (FileStream fS = new FileStream(tmpZoneFile, FileMode.Create, FileAccess.Write))
             {
-                WriteZoneTo(zoneName, fS, disabled, policies, primary);
+                WriteZoneTo(zoneName, fS, disabled, policies, primary, catalog);
 
                 if (fS.Position == 0)
                 {
@@ -300,7 +300,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     return;
                 }
 
-                if (disabled.HasValue || policies != default || primary != default)
+                if (disabled.HasValue || policies != default || primary != default || catalog is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -629,7 +629,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void WriteZoneTo(string zoneName, Stream s) => WriteZoneTo(zoneName, s, disabled: null);
 
-        private void WriteZoneTo(string zoneName, Stream s, bool? disabled, ConfigurationZonePolicies.Changes policies = default, ConfigurationZonePrimary.Changes primary = default)
+        private void WriteZoneTo(string zoneName, Stream s, bool? disabled, ConfigurationZonePolicies.Changes policies = default, ConfigurationZonePrimary.Changes primary = default, string catalog = null)
         {
             AuthZoneInfo zoneInfo = GetAuthZoneInfo(zoneName, true);
             if (zoneInfo is null)
@@ -637,10 +637,10 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             var records = new List<DnsResourceRecord>();
             ListAllZoneRecords(zoneInfo.Name, records);
-            WriteZoneTo(zoneInfo, records, s, disabled, policies, primary);
+            WriteZoneTo(zoneInfo, records, s, disabled, policies, primary, catalog);
         }
 
-        private static void WriteZoneTo(AuthZoneInfo zoneInfo, List<DnsResourceRecord> records, Stream s, bool? disabled, ConfigurationZonePolicies.Changes policies = default, ConfigurationZonePrimary.Changes primary = default)
+        private static void WriteZoneTo(AuthZoneInfo zoneInfo, List<DnsResourceRecord> records, Stream s, bool? disabled, ConfigurationZonePolicies.Changes policies = default, ConfigurationZonePrimary.Changes primary = default, string catalog = null)
         {
             //serialize zone
             BinaryWriter bW = new BinaryWriter(s);
@@ -649,7 +649,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             bW.Write((byte)4); //version
 
             //write zone info
-            zoneInfo.WriteTo(bW, disabled, policies, primary);
+            zoneInfo.WriteTo(bW, disabled, policies, primary, catalog);
 
             bW.Write(records.Count);
 
@@ -672,6 +672,14 @@ namespace DnsServerCore.Dns.ZoneManagers
             name = name.ToLowerInvariant();
             if (_manifestOwnedZones.ContainsKey(name))
                 throw new DnsWebServiceException($"{GetManifestZonePath(name)}: Zone membership is managed by the configuration manifest.");
+            if (GetAuthZoneInfo(name)?.Type == AuthZoneType.Catalog)
+            {
+                foreach (AuthZoneInfo member in _zoneIndexLock.IsWriteLockHeld ? _zoneIndex : GetAllZones())
+                {
+                    if (member.CatalogZoneName == name && OwnsManifestZoneField(member.Name, "catalog/name"))
+                        throw new DnsWebServiceException($"{GetManifestZonePath(member.Name)}/catalog/name: Catalog membership is managed by the configuration manifest.");
+                }
+            }
         }
 
         internal void CheckManifestZoneEnabled(AuthZoneInfo zone, bool disabled)
@@ -811,6 +819,46 @@ namespace DnsServerCore.Dns.ZoneManagers
         internal bool OwnsManifestZoneField(string name, string field) =>
             _manifestOwnedZones.TryGetValue(name, out string[] fields) && fields.Contains(field, StringComparer.Ordinal);
 
+        internal string PrepareManifestCatalogMembership(JsonElement zones, JsonElement declaration, AuthZoneInfo member, AuthZoneType type, string path)
+        {
+            if (!declaration.TryGetProperty("catalog", out JsonElement catalog))
+            {
+                if (member?.CatalogZoneName is not null)
+                    throw new InvalidDataException($"{path}: Declare catalog.name when applying a local catalog member.");
+                return null;
+            }
+            if (type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
+                !catalog.TryGetProperty("name", out JsonElement value) || catalog.EnumerateObject().Count() != 1)
+                throw new InvalidDataException($"{path}/catalog: Membership currently accepts a catalog name for a primary or forwarder zone.");
+            string before = member?.CatalogZoneName;
+            if (before is not null && GetAuthZoneInfo(before)?.Type != AuthZoneType.Catalog)
+                throw new InvalidDataException($"{path}/catalog/name: This membership is maintained by a secondary catalog.");
+            if (member is not null && (member.OverrideCatalogQueryAccess || member.OverrideCatalogZoneTransfer || member.OverrideCatalogNotify))
+                throw new InvalidDataException($"{path}/catalog: Catalog overrides must be cleared before managing membership.");
+
+            string after = value.ValueKind == JsonValueKind.Null ? "" :
+                ConfigurationManifest.CanonicalDnsName(value.GetString(), path + "/catalog/name", allowRoot: false);
+            if (before is not null && after.Length != 0 && before != after)
+                throw new InvalidDataException($"{path}/catalog/name: Detach the zone before assigning another catalog.");
+            if (after.Length != 0)
+            {
+                bool declaredCatalog = false;
+                foreach (JsonProperty target in zones.EnumerateObject())
+                {
+                    if (ConfigurationManifest.CanonicalDnsName(target.Name, "/zones", allowRoot: true) != after)
+                        continue;
+                    if (target.Value.ValueKind == JsonValueKind.Null)
+                        throw new InvalidDataException($"{path}/catalog/name: The target catalog is being removed.");
+                    declaredCatalog = target.Value.TryGetProperty("type", out JsonElement declaredType) && declaredType.ValueEquals("Catalog");
+                    break;
+                }
+                AuthZoneInfo targetZone = GetAuthZoneInfo(after);
+                if (targetZone is null ? !declaredCatalog : targetZone.Type != AuthZoneType.Catalog)
+                    throw new InvalidDataException($"{path}/catalog/name: The target must be a local primary catalog.");
+            }
+            return after;
+        }
+
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneAndAuthChanges(ConfigurationManifest manifest, AuthManager auth, User creator,
             IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions, ConfigurationSso.Settings sso, bool isClusterSecondary)
         {
@@ -843,6 +891,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 permissionOwnership = null;
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records, AuthZoneType Type, ConfigurationZonePrimary.Changes Primary)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
+            var desiredCatalogs = new Dictionary<string, string>(StringComparer.Ordinal);
+            var catalogEdits = new Dictionary<string, List<(string Member, AuthZoneType Type, bool Add)>>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
             var ownedZones = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
             string serverDomain = _dnsServer.ServerDomain;
@@ -854,13 +904,16 @@ namespace DnsServerCore.Dns.ZoneManagers
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
                     ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
-                    if (zone is not null && ((zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) && !ConfigurationZonePrimary.IsReplicated(zone.Type)) || zone.CatalogZoneName is not null))
+                    if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
+                        !ConfigurationZonePrimary.IsReplicated(zone.Type))
                         throw new InvalidDataException($"{path}: Apply requires a supported zone outside catalogs.");
 
                     if (declaration.Value.ValueKind == JsonValueKind.Null)
                     {
                         if (zone is not null)
                         {
+                            if (zone.CatalogZoneName is not null)
+                                throw new InvalidDataException($"{path}: Detach the zone before removing it.");
                             CheckManifestZoneRemoval(zone, path);
                             changed.Add((name, zone, true, null, default, default, zone.Type, default));
                             membership.Add(name, false);
@@ -882,6 +935,19 @@ namespace DnsServerCore.Dns.ZoneManagers
                     ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, path, zone, tsigKeys);
                     ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, name, path, zone);
                     var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, tsigKeys, path);
+                    string catalog = PrepareManifestCatalogMembership(zones, declaration.Value, zone, type, path);
+                    if (catalog is not null)
+                    {
+                        string before = zone?.CatalogZoneName ?? "";
+                        if (catalog != before)
+                            desiredCatalogs.Add(name, catalog);
+                        bool wasActive = before.Length != 0 && !zone.Disabled;
+                        bool isActive = catalog.Length != 0 && !(disabled ?? zone?.Disabled ?? false);
+                        if (wasActive && (!isActive || catalog != before))
+                            AddCatalogEdit(before, name, type, add: false);
+                        if (isActive && (!wasActive || catalog != before))
+                            AddCatalogEdit(catalog, name, type, add: true);
+                    }
                     bool editRecords = declaration.Value.TryGetProperty("records", out JsonElement records);
                     if (editRecords && zone is not null)
                     {
@@ -903,11 +969,26 @@ namespace DnsServerCore.Dns.ZoneManagers
                         changed.Add((name, null, false, disabled ?? false, policies, records, type, primary));
                         membership.Add(name, true);
                     }
-                    else if ((disabled.HasValue && zone.Disabled != disabled.Value) || policies != default || primary != default || editRecords)
+                    else if ((disabled.HasValue && zone.Disabled != disabled.Value) || policies != default || primary != default || editRecords || desiredCatalogs.ContainsKey(name))
                     {
                         changed.Add((name, zone, false, disabled, policies, records, type, primary));
                     }
                 }
+            }
+
+            foreach (string catalog in catalogEdits.Keys)
+            {
+                if (changed.Any(entry => entry.Name == catalog))
+                    continue;
+                AuthZoneInfo existing = GetAuthZoneInfo(catalog);
+                changed.Add((catalog, existing, false, null, default, default, AuthZoneType.Catalog, default));
+            }
+
+            void AddCatalogEdit(string catalog, string member, AuthZoneType type, bool add)
+            {
+                if (!catalogEdits.TryGetValue(catalog, out var edits))
+                    catalogEdits.Add(catalog, edits = []);
+                edits.Add((member, type, add));
             }
 
             ConfigurationGroups.ValidateRemovals(auth, groupChanges, ldap, userChanges, grants, sso,
@@ -951,7 +1032,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     }
                     else if (current is not null && records.ValueKind == JsonValueKind.Undefined && type != AuthZoneType.Catalog)
                     {
-                        SaveZoneFileInternal(name, disabled, policies, primary);
+                        SaveZoneFileInternal(name, disabled, policies, primary, desiredCatalogs.GetValueOrDefault(name));
                     }
                     else
                     {
@@ -996,7 +1077,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         if (zone is CatalogZone catalog)
                         {
-                            var changedSets = StageManifestCatalogRecords(catalog, allRecords, policies, current is null);
+                            var changedSets = StageManifestCatalogRecords(catalog, allRecords, policies, current is null, catalogEdits.GetValueOrDefault(name));
                             stagedRecords[name] = (catalog, allRecords, changedSets);
                         }
                         else if (records.ValueKind != JsonValueKind.Undefined)
@@ -1008,7 +1089,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                         string temporary = Path.ChangeExtension(path, ".tmp");
                         using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write))
                         {
-                            WriteZoneTo(new AuthZoneInfo(zone, loadHistory: true), allRecords, output, disabled, policies);
+                            WriteZoneTo(new AuthZoneInfo(zone, loadHistory: true), allRecords, output, disabled, policies,
+                                catalog: desiredCatalogs.GetValueOrDefault(name));
                             output.Flush(flushToDisk: true);
                         }
                         File.Move(temporary, path, true);
@@ -1030,7 +1112,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         foreach (var (name, current, remove, _, _, _, _, _) in changed)
                         {
                             AuthZoneInfo live = GetAuthZoneInfo(name);
-                            if (!ReferenceEquals(live?.ApexZone, current?.ApexZone) || live?.CatalogZoneName is not null ||
+                            if (!ReferenceEquals(live?.ApexZone, current?.ApexZone) || live?.CatalogZoneName != current?.CatalogZoneName ||
                                 (recordRevisions.TryGetValue(name, out DateTime revision) && live?.LastModified != revision))
                                 throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}: The zone changed during apply.");
                             if (remove)
@@ -1072,8 +1154,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                                 else
                                     policies.Apply(current);
                                 primary.Apply(current);
+                                if (desiredCatalogs.TryGetValue(name, out string catalog))
+                                    current.ApexZone.CatalogZoneName = catalog.Length == 0 ? null : catalog;
                                 if (disabled.HasValue)
-                                    current.Disabled = disabled.Value;
+                                {
+                                    if (current.ApexZone.CatalogZoneName is not null)
+                                        current.ApexZone.SetManifestCatalogMemberDisabled(disabled.Value);
+                                    else
+                                        current.Disabled = disabled.Value;
+                                }
                             }
                             else
                             {
@@ -1082,6 +1171,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     forwarder.InitializeManifestZoneExpiry();
                                 else if (zone is PrimaryZone primaryZone)
                                     primaryZone.InitializeManifestZoneExpiry();
+                                if (desiredCatalogs.TryGetValue(name, out string catalogName) && catalogName.Length != 0)
+                                    zone.CatalogZoneName = catalogName;
                                 if (!_root.TryAdd(zone))
                                     throw new InvalidOperationException("The zone already exists.");
                                 var info = new AuthZoneInfo(zone);
@@ -1147,6 +1238,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                             _dnsServer.CacheZoneManager.DeleteZone(name);
                         }
+                        foreach (string catalog in catalogEdits.Keys)
+                            ((CatalogZone)_root.GetApexZone(catalog)).RebuildManifestMembersIndex();
                         _zoneIndex.Sort();
                         _catalogZoneIndex.Sort();
                     }
@@ -1170,12 +1263,35 @@ namespace DnsServerCore.Dns.ZoneManagers
         }
 
         private static HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestCatalogRecords(
-            CatalogZone zone, List<DnsResourceRecord> records, ConfigurationZonePolicies.Changes policies, bool initialize)
+            CatalogZone zone, List<DnsResourceRecord> records, ConfigurationZonePolicies.Changes policies, bool initialize,
+            List<(string Member, AuthZoneType Type, bool Add)> membership)
         {
             var currentSoa = records.Single(record => record.Type == DnsResourceRecordType.SOA && record.Name == zone.Name);
             zone.LoadRecords(DnsResourceRecordType.SOA, [CopyRecord(currentSoa, currentSoa.OriginalTtlValue)]);
             var desired = new Dictionary<(string Owner, DnsResourceRecordType Type), IReadOnlyList<DnsResourceRecord>>();
             zone.ApplyManifestPolicies(policies, initialize, (name, type, rrset) => desired[(name, type)] = rrset);
+            if (membership is not null)
+            {
+                string suffix = ".zones." + zone.Name;
+                foreach (var (member, type, add) in membership)
+                {
+                    if (add)
+                    {
+                        foreach (DnsResourceRecord record in zone.CreateMemberRecords(member, type).Records)
+                            desired[(record.Name, record.Type)] = [record];
+                    }
+                    else
+                    {
+                        foreach (DnsResourceRecord pointer in records.Where(record => record.Name.EndsWith(suffix, StringComparison.Ordinal) &&
+                            record.RDATA is DnsPTRRecordData ptr && ptr.Domain.Equals(member, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            foreach (DnsResourceRecord record in records.Where(record => record.Name == pointer.Name ||
+                                record.Name.EndsWith("." + pointer.Name, StringComparison.Ordinal)))
+                                desired[(record.Name, record.Type)] = [];
+                        }
+                    }
+                }
+            }
             var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
             var deleted = new List<DnsResourceRecord>();
             var added = new List<DnsResourceRecord>();
@@ -1210,6 +1326,8 @@ namespace DnsServerCore.Dns.ZoneManagers
             {
                 if (field.Name is "enabled" or "records")
                     fields.Add(field.Name);
+                else if (field.Name == "catalog")
+                    fields.Add("catalog/name");
                 else if (field.Name == "primary")
                     fields.AddRange(field.Value.EnumerateObject().Select(option => "primary/" + option.Name));
                 else if (ConfigurationZonePolicies.IsPolicy(field.Name))

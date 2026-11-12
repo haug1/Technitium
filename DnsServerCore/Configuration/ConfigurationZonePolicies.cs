@@ -271,8 +271,6 @@ namespace DnsServerCore.Configuration
                 if (exists)
                 {
                     JsonElement policies = current.GetProperty("policies");
-                    if (policies.GetProperty("catalogMember").GetBoolean())
-                        throw new InvalidDataException($"{path}: Policy preview requires a zone outside catalogs.");
                     currentPolicy = policies.GetProperty(policy.Name);
                 }
 

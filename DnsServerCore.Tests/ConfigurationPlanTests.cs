@@ -4412,9 +4412,16 @@ namespace DnsServerCore.Tests
             const string source = """
                 {"schemaVersion":1,"zones":{"catalog.test":{"type":"Catalog","transfer":{"mode":"Allow"},
                   "notify":{"mode":"None","secondaryCatalogNameServers":["127.0.0.1"]}
-                }}}
+                },"member.test":{"type":"Primary","catalog":{"name":"catalog.test"}}}}
                 """;
             string revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
+            string blockedWrite = Path.Combine(primary.ConfigurationDirectory, "zones", "member.test.tmp");
+            Directory.CreateDirectory(blockedWrite);
+            JsonElement failed = await ApplyAsync(primary, source, revision);
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Assert.False(File.Exists(Path.Combine(primary.ConfigurationDirectory, "zones", "catalog.test.zone")));
+            Directory.Delete(blockedWrite);
+            revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(primary, source, revision));
             string updatedSource = source.Replace("\"mode\":\"Allow\"", "\"mode\":\"UseSpecifiedNetworkACL\",\"networkAcl\":[\"127.0.0.1/32\"]", StringComparison.Ordinal);
             JsonElement sourcePlan = await PreviewAsync(primary, updatedSource);
@@ -4432,7 +4439,12 @@ namespace DnsServerCore.Tests
             Assert.Equal("Catalog", sourceZone.GetProperty("type").GetString());
             Assert.False(sourceZone.TryGetProperty("records", out _));
             Assert.Equal("127.0.0.1", Assert.Single(sourceZone.GetProperty("notify").GetProperty("secondaryCatalogNameServers").EnumerateArray()).GetString());
-            LoopbackWebService.AssertOk(await primary.CallAsync("zones/create?zone=member.test&type=Primary&catalog=catalog.test", primary.AdminToken));
+            JsonElement memberExport = sourceExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
+            Assert.Equal("catalog.test", memberExport.GetProperty("catalog").GetProperty("name").GetString());
+            using var detach = new FormUrlEncodedContent([new("zone", "member.test"), new("catalog", "")]);
+            JsonElement blocked = await primary.CallAsync("zones/options/set", primary.AdminToken, detach);
+            Assert.Equal("error", blocked.GetProperty("status").GetString());
+            Assert.Contains("/zones/member.test/catalog/name", blocked.GetProperty("errorMessage").GetString());
 
             await using var replica = await LoopbackWebService.StartAsync();
             string address = $"127.0.0.1:{primary.DnsPort}";
@@ -4479,6 +4491,14 @@ namespace DnsServerCore.Tests
             await replica.RestartAsync();
             LoopbackWebService.AssertOk(await replica.CallAsync("zones/options/get?zone=member.test", replica.AdminToken));
             Assert.Empty((await PreviewAsync(replica, updated)).GetProperty("changes").EnumerateArray());
+
+            string detached = updatedSource.Replace("\"name\":\"catalog.test\"", "\"name\":null", StringComparison.Ordinal);
+            plan = await PreviewAsync(primary, detached);
+            Assert.Contains(plan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/member.test/catalog/name"));
+            LoopbackWebService.AssertOk(await ApplyAsync(primary, detached, plan.GetProperty("revision").GetString()!));
+            await primary.RestartAsync();
+            Assert.Empty((await PreviewAsync(primary, detached)).GetProperty("changes").EnumerateArray());
         }
 
         [Fact]

@@ -1365,10 +1365,15 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Access was denied.");
 
                     ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
-                    if (zone is not null && ((zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) && !ConfigurationZonePrimary.IsReplicated(zone.Type)) || zone.CatalogZoneName is not null))
+                    if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
+                        !ConfigurationZonePrimary.IsReplicated(zone.Type))
                         throw new InvalidDataException($"{zonePath}: Apply requires a supported zone outside catalogs.");
                     if (zone is not null && declaration.Value.ValueKind == JsonValueKind.Null)
+                    {
+                        if (zone.CatalogZoneName is not null)
+                            throw new InvalidDataException($"{zonePath}: Detach the zone before removing it.");
                         _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRemoval(zone, zonePath);
+                    }
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                         ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, zonePath, zone, keys);
                     writer.WriteStartObject(name);
@@ -1386,6 +1391,20 @@ namespace DnsServerCore
 
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                     {
+                        string catalog = _dnsWebService._dnsServer.AuthZoneManager.PrepareManifestCatalogMembership(zones, declaration.Value, zone, type, zonePath);
+                        if (catalog is not null)
+                        {
+                            string before = zone?.CatalogZoneName ?? "";
+                            foreach (string affected in new[] { before, catalog }.Where(value => value.Length != 0).Distinct(StringComparer.Ordinal))
+                            {
+                                ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, affected, zonePath + "/catalog/name");
+                                if (_dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(affected) is not null &&
+                                    !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, affected, sessionUser, PermissionFlag.Modify))
+                                    throw new DnsWebServiceException("Access was denied to use the catalog zone.");
+                            }
+                            writer.WriteString("currentCatalog", before);
+                            writer.WriteBoolean("catalogChanged", before != catalog);
+                        }
                         if (type == AuthZoneType.Catalog)
                             ConfigurationZonePolicies.Prepare(declaration.Value, name, zonePath, zone);
                         var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, keys, zonePath);
