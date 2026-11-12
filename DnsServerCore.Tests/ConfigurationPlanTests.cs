@@ -423,6 +423,50 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task AppAutoUpdateAppliesAndRejectsConflictingBackup()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?dnsAppsEnableAutomaticUpdate=true", server.AdminToken));
+            await server.RestartAsync();
+            Assert.True((await server.GetSettingsAsync()).GetProperty("dnsAppsEnableAutomaticUpdate").GetBoolean());
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"apps":{"autoUpdate":false}}""";
+            JsonElement preview = await PreviewAsync(server, manifest);
+            JsonElement change = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal("/apps/autoUpdate", change.GetProperty("path").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.False(settings.GetProperty("dnsAppsEnableAutomaticUpdate").GetBoolean());
+            Assert.Equal("/apps/autoUpdate", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            Assert.False(ConfigurationPlan.Export(settings, includePreviewOnly: false)["apps"]!["autoUpdate"]!.GetValue<bool>());
+
+            int ttl = settings.GetProperty("defaultRecordTtl").GetInt32();
+            JsonElement edit = await server.CallAsync("settings/set?dnsAppsEnableAutomaticUpdate=true&defaultRecordTtl=123", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/apps/autoUpdate", edit.GetProperty("errorMessage").GetString());
+            Assert.Equal(ttl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/apps/autoUpdate", restored.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"apps":{"autoUpdate":null}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            Assert.True((await server.GetSettingsAsync()).GetProperty("dnsAppsEnableAutomaticUpdate").GetBoolean());
+        }
+
+        [Fact]
         public async Task StatisticsApplyPersistsAndPreflightsLegacyEdits()
         {
             await using var server = await LoopbackWebService.StartAsync();

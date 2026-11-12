@@ -235,21 +235,22 @@ namespace DnsServerCore
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks || _dnsServer.HasManagedResolverProtocol)
+                    bool readAppAutoUpdate = _dnsServer.HasManagedResolverProtocol || _dnsServer.ManifestOwnsAppAutoUpdate;
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks || readAppAutoUpdate)
                     {
                         var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(reader, version);
                         if (_dnsServer.HasManagedSourceNetworks && !isConfigTransfer)
                             _dnsServer.CheckManifestSourceNetworks(new DnsServer.SourceNetworks(ipv4 ?? [], ipv6 ?? []));
                         var defaults = new DnsServer.AuthoritativeDefaults(recordTtl, null, null);
-                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedResolverProtocol)
+                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || readAppAutoUpdate)
                         {
                             string responsiblePerson = version >= 36 ? reader.BaseStream.ReadShortString() : "";
-                            if (_dnsServer.HasManagedSoaTiming || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedResolverProtocol)
+                            if (_dnsServer.HasManagedSoaTiming || _dnsServer.HasManagedAuthoritativeNetworks || readAppAutoUpdate)
                                 defaults = ReadLegacySoaTiming(reader, version) with { Record = recordTtl };
                             if (_dnsServer.ManifestOwnsResponsiblePerson)
                                 defaults = defaults with { ResponsiblePerson = DnsServer.NormalizeDefaultResponsiblePerson(responsiblePerson) };
                         }
-                        if (_dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedResolverProtocol)
+                        if (_dnsServer.HasManagedAuthoritativeNetworks || readAppAutoUpdate)
                         {
                             defaults = defaults with
                             {
@@ -258,9 +259,10 @@ namespace DnsServerCore
                             };
                         }
                         _dnsServer.CheckManifestAuthoritativeDefaults(defaults);
+                        if (readAppAutoUpdate)
+                            _dnsServer.CheckManifestAppAutoUpdate(reader.ReadBoolean());
                         if (_dnsServer.HasManagedResolverProtocol)
                         {
-                            reader.ReadBoolean(); // DNS app automatic updates
                             reader.ReadBoolean(); // IPv6 preference
                             if (version >= 42)
                             {
@@ -296,6 +298,7 @@ namespace DnsServerCore
                     if (version >= 26 && _dnsServer.ManifestOwnsDnssecValidation)
                         throw new InvalidDataException("/dns/dnssecValidation: Cannot verify DNSSEC validation in this backup format.");
 
+                    _dnsServer.CheckManifestAppAutoUpdate(true);
                     _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null,
                         version < 25 ? DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE : null, version < 26 ? true : null));
                     _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(

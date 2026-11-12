@@ -145,7 +145,8 @@ namespace DnsServerCore.Dns
             DnssecValidation = 16384,
             ServerDomain = 32768,
             StatsInMemory = 65536,
-            StatsRetention = 131072
+            StatsRetention = 131072,
+            AppAutoUpdate = 262144
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -663,14 +664,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -738,9 +739,11 @@ namespace DnsServerCore.Dns
         internal bool ManifestOwnsInMemoryStatistics => _managedDnsSettings.HasFlag(ManagedDnsSettings.StatsInMemory);
         internal bool ManifestOwnsStatisticsRetention => _managedDnsSettings.HasFlag(ManagedDnsSettings.StatsRetention);
 
+        internal bool ManifestOwnsAppAutoUpdate => _managedDnsSettings.HasFlag(ManagedDnsSettings.AppAutoUpdate);
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -758,6 +761,8 @@ namespace DnsServerCore.Dns
                 yield return "/dns/udpPayloadSize";
             if (ManifestOwnsDnssecValidation)
                 yield return "/dns/dnssecValidation";
+            if (ManifestOwnsAppAutoUpdate)
+                yield return "/apps/autoUpdate";
             if (ManifestOwnsInMemoryStatistics)
                 yield return "/statistics/inMemory";
             if (ManifestOwnsStatisticsRetention)
@@ -942,6 +947,12 @@ namespace DnsServerCore.Dns
                 DnssecValidation = settings.DnssecValidation.Value;
         }
 
+        internal void CheckManifestAppAutoUpdate(bool enabled)
+        {
+            if (ManifestOwnsAppAutoUpdate && enabled != _dnsApplicationManager.EnableAutomaticUpdate)
+                throw new DnsWebServiceException("/apps/autoUpdate: Setting is managed by the configuration manifest.");
+        }
+
         internal void CheckManifestStatistics(StatisticsSettings settings)
         {
             if (ManifestOwnsInMemoryStatistics && settings.InMemory.HasValue && settings.InMemory != _statsManager.EnableInMemoryStats)
@@ -984,26 +995,29 @@ namespace DnsServerCore.Dns
                 if (!HasManagedClusterDnsSettings)
                     return;
 
+                bool readUpdateChecks = ManifestOwnsUpdateChecks || HasManagedResolverProtocol || ManifestOwnsAppAutoUpdate;
+                bool readNetworks = HasManagedAuthoritativeNetworks || readUpdateChecks;
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
-                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
+                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || readNetworks)
                 {
                     string responsiblePerson = reader.BaseStream.ReadShortString();
                     defaults = defaults with { ResponsiblePerson = NormalizeDefaultResponsiblePerson(responsiblePerson) };
-                    if (HasManagedSoaTiming || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
+                    if (HasManagedSoaTiming || readNetworks)
                         defaults = ReadSoaTiming(reader, defaults);
-                    if (HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
+                    if (readNetworks)
                         defaults = ReadAuthoritativeNetworks(reader, defaults);
                 }
 
                 CheckManifestAuthoritativeDefaults(defaults);
-                if (ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
+                if (readUpdateChecks)
                 {
                     bool updateChecks = ReadUpdateChecks(reader, version);
                     ushort? payloadSize = null;
                     bool? dnssec = null;
+                    if (HasManagedResolverProtocol || ManifestOwnsAppAutoUpdate)
+                        CheckManifestAppAutoUpdate(reader.ReadBoolean());
                     if (HasManagedResolverProtocol)
                     {
-                        reader.ReadBoolean(); // DNS app automatic updates
                         reader.ReadByte(); // IPv6 mode or preference
                         reader.ReadBoolean(); // UDP socket pool enabled
                         ReadSocketPoolExcludedPorts(reader);
@@ -1551,14 +1565,14 @@ namespace DnsServerCore.Dns
                 else
                 {
                     int extendedOwnership = s.ReadByte();
-                    int statisticsOwnership = extendedOwnership < 0 ? -1 : s.ReadByte();
+                    int extraOwnership = extendedOwnership < 0 ? -1 : s.ReadByte();
                     _managedDnsSettings = (ManagedDnsSettings)(ownership | (Math.Max(0, extendedOwnership) << 8) |
-                        (Math.Max(0, statisticsOwnership) << 16));
+                        (Math.Max(0, extraOwnership) << 16));
                 }
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -1595,7 +1609,7 @@ namespace DnsServerCore.Dns
             AuthZoneInfo.WriteNetworkAddressesTo(_notifyAllowedNetworks, bW);
 
             bW.Write(_enableCheckForUpdate);
-            bW.Write(_dnsApplicationManager.EnableAutomaticUpdate);
+            bW.Write(appAutoUpdate ?? _dnsApplicationManager.EnableAutomaticUpdate);
 
             bW.Write((byte)_ipv6Mode);
             bW.Write(_enableUdpSocketPool);
@@ -7350,7 +7364,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7406,6 +7420,10 @@ namespace DnsServerCore.Dns
                     if (statistics.RetentionDays.HasValue)
                         ownership |= ManagedDnsSettings.StatsRetention;
 
+                    if (appAutoUpdate.HasValue)
+                        ownership |= ManagedDnsSettings.AppAutoUpdate;
+
+                    bool appAutoUpdateChanged = appAutoUpdate.HasValue && appAutoUpdate != _dnsApplicationManager.EnableAutomaticUpdate;
                     bool inMemoryChanged = statistics.InMemory.HasValue && statistics.InMemory != _statsManager.EnableInMemoryStats;
                     bool retentionChanged = statistics.RetentionDays.HasValue && statistics.RetentionDays != _statsManager.MaxStatFileDays;
 
@@ -7427,7 +7445,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !inMemoryChanged && !retentionChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7441,7 +7459,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate));
                         _pendingSave = false;
                     }
                     catch
@@ -7453,6 +7471,9 @@ namespace DnsServerCore.Dns
                         SetSourceNetworks(previousSourceNetworks);
                         throw;
                     }
+
+                    if (appAutoUpdateChanged)
+                        _dnsApplicationManager.EnableAutomaticUpdate = appAutoUpdate.Value;
 
                     // Changing statistics mode can discard the current cache. Wait until persistence succeeds.
                     if (inMemoryChanged)

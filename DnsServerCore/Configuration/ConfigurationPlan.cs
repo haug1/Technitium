@@ -82,7 +82,7 @@ namespace DnsServerCore.Configuration
             ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24, canApply: true),
             [BlockListSourcesPath] = new("blockListUrls", JsonSerializer.SerializeToElement<string>(null),
                 false, OmitFromExport: true, CanApply: true),
-            ["/apps/autoUpdate"] = Field("dnsAppsEnableAutomaticUpdate", true)
+            ["/apps/autoUpdate"] = Field("dnsAppsEnableAutomaticUpdate", true, canApply: true)
         };
 
         public static IReadOnlyList<ConfigurationChange> Create(ConfigurationManifest manifest, JsonElement currentSettings)
@@ -153,7 +153,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -267,6 +267,15 @@ namespace DnsServerCore.Configuration
             return new DnsServer.StatisticsSettings(inMemory, retention);
         }
 
+        private static bool? GetAppAutoUpdate(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("apps", out JsonElement apps) ||
+                !apps.TryGetProperty("autoUpdate", out JsonElement value))
+                return null;
+
+            return value.ValueKind == JsonValueKind.Null || value.GetBoolean();
+        }
+
         internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)
         {
             if (!clusterInitialized)
@@ -281,6 +290,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/sources: Applying blocklist sources to a cluster is not implemented.");
             if (GetBlockListInterval(manifest).HasValue)
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
+            if (GetAppAutoUpdate(manifest).HasValue)
+                throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }

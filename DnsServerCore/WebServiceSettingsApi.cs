@@ -915,6 +915,10 @@ namespace DnsServerCore
                     hasUpdateChecks ? dnsServerEnableCheckForUpdate : null, hasUdpPayload ? udpPayloadSize : null,
                     hasDnssecValidation ? dnssecValidation : null));
 
+                bool hasAppAutoUpdate = request.TryGetQueryOrForm("dnsAppsEnableAutomaticUpdate", bool.Parse, out bool dnsAppsEnableAutomaticUpdate);
+                if (hasAppAutoUpdate)
+                    _dnsWebService._dnsServer.CheckManifestAppAutoUpdate(dnsAppsEnableAutomaticUpdate);
+
                 bool hasInMemoryStats = request.TryGetQueryOrForm("enableInMemoryStats", bool.Parse, out bool enableInMemoryStats);
                 bool hasStatRetention = request.TryGetQueryOrForm("maxStatFileDays", int.Parse, out int maxStatFileDays);
                 _dnsWebService._dnsServer.CheckManifestStatistics(new DnsServer.StatisticsSettings(
@@ -976,7 +980,7 @@ namespace DnsServerCore
                             clusterParameters.Add("dnsServerEnableCheckForUpdate", dnsServerEnableCheckForUpdate.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("dnsAppsEnableAutomaticUpdate", bool.Parse, out bool dnsAppsEnableAutomaticUpdate))
+                        if (hasAppAutoUpdate && !_dnsWebService._dnsServer.ManifestOwnsAppAutoUpdate)
                         {
                             _dnsWebService._dnsServer.DnsApplicationManager.EnableAutomaticUpdate = dnsAppsEnableAutomaticUpdate;
 
