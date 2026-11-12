@@ -6,6 +6,8 @@ Technitium loads settings across several managers at startup. The DNS settings A
 
 ## 1. Establish an automated regression suite
 
+**Complete.** Eight baseline scenarios passed in a clean Nix checkout and in GitHub Actions. CI publishes C# line and branch coverage by assembly. The initial `DnsServerCore` baseline was 25.9% line coverage and 19.7% branch coverage. Use the report to identify gaps in changed code. [Local test instructions](build.md#regression-tests) · [Verified CI run](https://github.com/haug1/Technitium/actions/runs/43132416886)
+
 Capture existing behavior before changing how configuration is parsed, stored, or applied. Start with a .NET 10 test project, a documented `dotnet test` command that works in the Nix development shell, and a CI check that runs the suite on each pull request.
 
 - Exercise the server through its normal entry points. Cover authoritative DNS answers and negative responses, recursion and forwarding through a controlled upstream, DHCP scope and reservation behavior, API permissions, DNS app configuration, and cluster configuration transfer.
@@ -13,7 +15,7 @@ Capture existing behavior before changing how configuration is parsed, stored, o
 - Make each test protect an observable contract or reproduce a real regression. Use representative cases and meaningful boundaries, such as an unauthorized user attempting a settings change. Assert DNS responses, API outcomes, and durable state instead of private methods, exact log wording, or incidental serialization details. Use focused unit tests for stable rules where they give clearer coverage than an integration test.
 - Keep runs repeatable. Use temporary configuration directories, loopback listeners, local test fixtures, and bounded readiness checks. Exercise DHCP through a controlled harness and cluster transfer between isolated nodes. Keep external services and production data out of the test setup.
 
-Begin schema and implementation work once the baseline scenarios pass locally and in CI. Extend the suite alongside each delivery slice with observable guarantees for validation, migration, idempotence, and recovery.
+Proceed to the settings inventory and schema. Before changing an existing configuration path, add a regression test if its behavior is important and the baseline leaves it uncovered. Extend the suite alongside each delivery slice with observable guarantees for validation, migration, idempotence, and recovery. Prioritize recovery from a failed listener restart, migration from older DNS configuration, and conflicts between manifest ownership and existing UI or API writes.
 
 ## 2. Inventory every setting and define the schema
 
