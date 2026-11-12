@@ -921,9 +921,9 @@ namespace DnsServerCore.Dns.Zones
 
         #region catalog zone
 
-        private IReadOnlyCollection<NetworkAccessControl> GetQueryAccessACL()
+        internal static IReadOnlyCollection<NetworkAccessControl> GetQueryAccessACL(AuthZoneQueryAccess mode, IReadOnlyCollection<NetworkAccessControl> acl)
         {
-            switch (_queryAccess)
+            switch (mode)
             {
                 case AuthZoneQueryAccess.Allow:
                     return [
@@ -949,10 +949,10 @@ namespace DnsServerCore.Dns.Zones
                            ];
 
                 case AuthZoneQueryAccess.UseSpecifiedNetworkACL:
-                    return _queryAccessNetworkACL;
+                    return acl;
 
                 case AuthZoneQueryAccess.AllowZoneNameServersAndUseSpecifiedNetworkACL:
-                    if (_queryAccessNetworkACL is null)
+                    if (acl is null)
                     {
                         return [
                                     new NetworkAccessControl(IPAddress.Parse("224.0.0.0"), 32)
@@ -961,7 +961,7 @@ namespace DnsServerCore.Dns.Zones
 
                     return [
                                 new NetworkAccessControl(IPAddress.Parse("224.0.0.0"), 32),
-                                .._queryAccessNetworkACL
+                                ..acl
                            ];
 
                 case AuthZoneQueryAccess.Deny:
@@ -973,9 +973,9 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
-        private IReadOnlyCollection<NetworkAccessControl> GetZoneTranferACL()
+        internal static IReadOnlyCollection<NetworkAccessControl> GetZoneTranferACL(AuthZoneTransfer mode, IReadOnlyCollection<NetworkAccessControl> acl)
         {
-            switch (_zoneTransfer)
+            switch (mode)
             {
                 case AuthZoneTransfer.Allow:
                     return [
@@ -989,10 +989,10 @@ namespace DnsServerCore.Dns.Zones
                            ];
 
                 case AuthZoneTransfer.UseSpecifiedNetworkACL:
-                    return _zoneTransferNetworkACL;
+                    return acl;
 
                 case AuthZoneTransfer.AllowZoneNameServersAndUseSpecifiedNetworkACL:
-                    if (_zoneTransferNetworkACL is null)
+                    if (acl is null)
                     {
                         return [
                                     new NetworkAccessControl(IPAddress.Parse("224.0.0.0"), 32)
@@ -1001,7 +1001,7 @@ namespace DnsServerCore.Dns.Zones
 
                     return [
                                 new NetworkAccessControl(IPAddress.Parse("224.0.0.0"), 32),
-                                .._zoneTransferNetworkACL
+                                ..acl
                            ];
 
                 case AuthZoneTransfer.Deny:
@@ -1283,7 +1283,7 @@ namespace DnsServerCore.Dns.Zones
                 if (this is CatalogZone thisCatalogZone)
                 {
                     //update global custom property
-                    thisCatalogZone.SetAllowQueryProperty(GetQueryAccessACL());
+                    thisCatalogZone.SetAllowQueryProperty(GetQueryAccessACL(_queryAccess, _queryAccessNetworkACL));
                 }
                 else if (!Disabled && ((this is PrimaryZone) || (this is SecondaryZone && this is not SecondaryForwarderZone) || (this is StubZone) || (this is ForwarderZone)))
                 {
@@ -1291,7 +1291,7 @@ namespace DnsServerCore.Dns.Zones
                     if (catalogZone is not null)
                     {
                         if (_overrideCatalogQueryAccess)
-                            catalogZone.SetAllowQueryProperty(GetQueryAccessACL(), _name); //update member zone custom property
+                            catalogZone.SetAllowQueryProperty(GetQueryAccessACL(_queryAccess, _queryAccessNetworkACL), _name); //update member zone custom property
                         else
                             catalogZone.SetAllowQueryProperty(null, _name); //remove member zone custom property
                     }
@@ -1324,7 +1324,7 @@ namespace DnsServerCore.Dns.Zones
                 if (this is CatalogZone thisCatalogZone)
                 {
                     //update global custom property
-                    thisCatalogZone.SetAllowTransferProperty(GetZoneTranferACL());
+                    thisCatalogZone.SetAllowTransferProperty(GetZoneTranferACL(_zoneTransfer, _zoneTransferNetworkACL));
                 }
                 else if (!Disabled && ((this is PrimaryZone) || (this is SecondaryZone && this is not SecondaryForwarderZone)))
                 {
@@ -1332,7 +1332,7 @@ namespace DnsServerCore.Dns.Zones
                     if (catalogZone is not null)
                     {
                         if (_overrideCatalogZoneTransfer)
-                            catalogZone.SetAllowTransferProperty(GetZoneTranferACL(), _name); //update member zone custom property
+                            catalogZone.SetAllowTransferProperty(GetZoneTranferACL(_zoneTransfer, _zoneTransferNetworkACL), _name); //update member zone custom property
                         else
                             catalogZone.SetAllowTransferProperty(null, _name); //remove member zone custom property
                     }

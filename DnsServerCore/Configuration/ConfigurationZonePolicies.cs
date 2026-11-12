@@ -17,10 +17,14 @@ namespace DnsServerCore.Configuration
             AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl, IReadOnlySet<string> TransferKeys,
             AuthZoneNotify? Notify, IPAddress[] NotifyServers,
             AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl, PolicyMap UpdatePolicies, IPAddress[] NotifySecondaryServers,
-            bool? OverrideCatalogNotify)
+            bool? OverrideCatalogNotify, bool? OverrideCatalogQuery, bool? OverrideCatalogTransfer)
         {
             internal void Apply(AuthZoneInfo zone)
             {
+                if (OverrideCatalogQuery.HasValue)
+                    zone.OverrideCatalogQueryAccess = OverrideCatalogQuery.Value;
+                if (OverrideCatalogTransfer.HasValue)
+                    zone.OverrideCatalogZoneTransfer = OverrideCatalogTransfer.Value;
                 if (QueryAcl is not null)
                     zone.QueryAccessNetworkACL = QueryAcl;
                 if (QueryAccess.HasValue)
@@ -92,14 +96,20 @@ namespace DnsServerCore.Configuration
             if (ConfigurationZoneUpdatePolicies.Same(policies, current?.UpdateSecurityPolicies))
                 policies = null;
 
-            bool? overrideNotify = ReadCatalogNotifyOverride(declaration);
+            bool? overrideNotify = ReadCatalogOverride(declaration, "overrideNotify");
+            bool? overrideQuery = ReadCatalogOverride(declaration, "overrideQueryAccess");
+            bool? overrideTransfer = ReadCatalogOverride(declaration, "overrideZoneTransfer");
             if (overrideNotify.HasValue && overrideNotify.Value == (current?.OverrideCatalogNotify ?? false))
                 overrideNotify = null;
+            if (overrideQuery.HasValue && overrideQuery.Value == (current?.OverrideCatalogQueryAccess ?? false))
+                overrideQuery = null;
+            if (overrideTransfer.HasValue && overrideTransfer.Value == (current?.OverrideCatalogZoneTransfer ?? false))
+                overrideTransfer = null;
             return new Changes(
                 ReadMode(query, "query", current?.QueryAccess), ReadAcl(query, "query", current?.QueryAccessNetworkACL),
                 ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL), transferKeys,
                 notifyMode, notifyServers,
-                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies, notifySecondaryServers, overrideNotify);
+                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies, notifySecondaryServers, overrideNotify, overrideQuery, overrideTransfer);
 
             T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
             {
@@ -121,8 +131,8 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static bool? ReadCatalogNotifyOverride(JsonElement declaration) =>
-            declaration.TryGetProperty("catalog", out JsonElement catalog) && catalog.TryGetProperty("overrideNotify", out JsonElement value)
+        internal static bool? ReadCatalogOverride(JsonElement declaration, string field) =>
+            declaration.TryGetProperty("catalog", out JsonElement catalog) && catalog.TryGetProperty(field, out JsonElement value)
                 ? value.ValueKind == JsonValueKind.True : null;
 
         internal static void CheckRestoreOwnership(string path, IEnumerable<string> fields, AuthZoneInfo current, AuthZoneInfo candidate)
@@ -140,6 +150,8 @@ namespace DnsServerCore.Configuration
                     "notify/mode" => current.Notify != candidate.Notify,
                     "notify/nameServers" => !Equal(current.NotifyNameServers, candidate.NotifyNameServers),
                     "notify/secondaryCatalogNameServers" => !Equal(current.NotifySecondaryCatalogNameServers, candidate.NotifySecondaryCatalogNameServers),
+                    "catalog/overrideQueryAccess" => current.OverrideCatalogQueryAccess != candidate.OverrideCatalogQueryAccess,
+                    "catalog/overrideZoneTransfer" => current.OverrideCatalogZoneTransfer != candidate.OverrideCatalogZoneTransfer,
                     "catalog/overrideNotify" => current.OverrideCatalogNotify != candidate.OverrideCatalogNotify,
                     "updates/mode" => current.Update != candidate.Update,
                     "updates/networkAcl" => !Equal(current.UpdateNetworkACL, candidate.UpdateNetworkACL),

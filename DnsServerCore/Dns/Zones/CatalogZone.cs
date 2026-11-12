@@ -258,62 +258,52 @@ namespace DnsServerCore.Dns.Zones
             return AuthZoneType.Primary;
         }
 
-        public void SetAllowQueryProperty(IReadOnlyCollection<NetworkAccessControl> acl = null, string memberZoneName = null)
-        {
-            string domain = "allow-query.ext." + GetMemberZoneDomain(memberZoneName);
+        public void SetAllowQueryProperty(IReadOnlyCollection<NetworkAccessControl> acl = null, string memberZoneName = null) =>
+            WriteAccessProperty("allow-query.ext." + GetMemberZoneDomain(memberZoneName), acl);
 
-            if (acl is null)
+        public void SetAllowTransferProperty(IReadOnlyCollection<NetworkAccessControl> acl = null, string memberZoneName = null) =>
+            WriteAccessProperty("allow-transfer.ext." + GetMemberZoneDomain(memberZoneName), acl);
+
+        private void WriteAccessProperty(string domain, IReadOnlyCollection<NetworkAccessControl> acl)
+        {
+            if (acl is null || acl.Count == 0)
             {
                 WritePropertyRecords(domain, DnsResourceRecordType.APL, []);
+                return;
             }
-            else
-            {
-                DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.APL, DnsClass.IN, 0, NetworkAccessControl.ConvertToAPLRecordData(acl));
-                record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                WritePropertyRecords(domain, DnsResourceRecordType.APL, [record]);
-            }
+            var record = new DnsResourceRecord(domain, DnsResourceRecordType.APL, DnsClass.IN, 0, NetworkAccessControl.ConvertToAPLRecordData(acl));
+            record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
+            WritePropertyRecords(domain, DnsResourceRecordType.APL, [record]);
         }
 
-        public void SetAllowTransferProperty(IReadOnlyCollection<NetworkAccessControl> acl = null, string memberZoneName = null)
+        public void SetZoneTransferTsigKeyNamesProperty(IReadOnlySet<string> tsigKeyNames = null, string memberZoneName = null) =>
+            WriteTransferKeysProperty("transfer-tsig-key-names.ext." + GetMemberZoneDomain(memberZoneName), tsigKeyNames);
+
+        private void WriteTransferKeysProperty(string domain, IReadOnlySet<string> keys)
         {
-            string domain = "allow-transfer.ext." + GetMemberZoneDomain(memberZoneName);
-
-            if (acl is null)
+            DnsResourceRecord[] records = keys?.Select(key =>
             {
-                WritePropertyRecords(domain, DnsResourceRecordType.APL, []);
-            }
-            else
-            {
-                DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.APL, DnsClass.IN, 0, NetworkAccessControl.ConvertToAPLRecordData(acl));
+                var record = new DnsResourceRecord(domain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(key));
                 record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                WritePropertyRecords(domain, DnsResourceRecordType.APL, [record]);
-            }
+                return record;
+            }).ToArray() ?? [];
+            WritePropertyRecords(domain, DnsResourceRecordType.PTR, records);
         }
 
-        public void SetZoneTransferTsigKeyNamesProperty(IReadOnlySet<string> tsigKeyNames = null, string memberZoneName = null)
+        internal void StageManifestMemberPolicies(string domain, IReadOnlyCollection<NetworkAccessControl> query,
+            IReadOnlyCollection<NetworkAccessControl> transfer, IReadOnlySet<string> keys,
+            Action<string, DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> write)
         {
-            string domain = "transfer-tsig-key-names.ext." + GetMemberZoneDomain(memberZoneName);
-
-            if (tsigKeyNames is null)
+            _manifestPropertyWriter = write;
+            try
             {
-                WritePropertyRecords(domain, DnsResourceRecordType.PTR, []);
+                WriteAccessProperty("allow-query.ext." + domain, query);
+                WriteAccessProperty("allow-transfer.ext." + domain, transfer);
+                WriteTransferKeysProperty("transfer-tsig-key-names.ext." + domain, keys);
             }
-            else
+            finally
             {
-                DnsResourceRecord[] records = new DnsResourceRecord[tsigKeyNames.Count];
-                int i = 0;
-
-                foreach (string entry in tsigKeyNames)
-                {
-                    DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(entry));
-                    record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                    records[i++] = record;
-                }
-
-                WritePropertyRecords(domain, DnsResourceRecordType.PTR, records);
+                _manifestPropertyWriter = null;
             }
         }
 

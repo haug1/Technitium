@@ -30,8 +30,7 @@ namespace DnsServerCore.Configuration
                     (zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
                     (zone.CatalogZoneName is string catalog && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
-                        isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog ||
-                        zone.OverrideCatalogQueryAccess || zone.OverrideCatalogZoneTransfer)))
+                        isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog)))
                 {
                     missingInputs.Add(path);
                     continue;
@@ -53,8 +52,12 @@ namespace DnsServerCore.Configuration
                 }).AsObject();
 
                 if (zone.Type is AuthZoneType.Primary or AuthZoneType.Forwarder &&
-                    (zone.CatalogZoneName is not null || zone.OverrideCatalogNotify))
-                    declaration["catalog"] = new JsonObject { ["name"] = zone.CatalogZoneName, ["overrideNotify"] = zone.OverrideCatalogNotify };
+                    (zone.CatalogZoneName is not null || zone.OverrideCatalogNotify || zone.OverrideCatalogQueryAccess || zone.OverrideCatalogZoneTransfer))
+                    declaration["catalog"] = new JsonObject
+                    {
+                        ["name"] = zone.CatalogZoneName, ["overrideQueryAccess"] = zone.OverrideCatalogQueryAccess,
+                        ["overrideZoneTransfer"] = zone.OverrideCatalogZoneTransfer, ["overrideNotify"] = zone.OverrideCatalogNotify
+                    };
                 if (zone.ZoneTransferTsigKeyNames?.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                 {
                     declaration["transfer"].AsObject().Remove("tsigKeys");

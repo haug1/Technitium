@@ -4412,7 +4412,11 @@ namespace DnsServerCore.Tests
             const string source = """
                 {"schemaVersion":1,"zones":{"catalog.test":{"type":"Catalog","transfer":{"mode":"Allow"},
                   "notify":{"mode":"None","secondaryCatalogNameServers":["127.0.0.1"]}
-                },"member.test":{"type":"Primary","catalog":{"name":"catalog.test","overrideNotify":false}}}}
+                },"member.test":{"type":"Primary","catalog":{"name":"catalog.test","overrideNotify":false,
+                  "overrideQueryAccess":false,"overrideZoneTransfer":false},
+                  "query":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1/32"]},
+                  "transfer":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1/32"]}
+                }}}
                 """;
             string revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
             string blockedWrite = Path.Combine(primary.ConfigurationDirectory, "zones", "member.test.tmp");
@@ -4424,12 +4428,18 @@ namespace DnsServerCore.Tests
             revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(primary, source, revision));
             string updatedSource = source.Replace("\"mode\":\"Allow\"", "\"mode\":\"UseSpecifiedNetworkACL\",\"networkAcl\":[\"127.0.0.1/32\"]", StringComparison.Ordinal)
-                .Replace("\"overrideNotify\":false", "\"overrideNotify\":true", StringComparison.Ordinal);
+                .Replace("\"overrideNotify\":false", "\"overrideNotify\":true", StringComparison.Ordinal)
+                .Replace("\"overrideQueryAccess\":false", "\"overrideQueryAccess\":true", StringComparison.Ordinal)
+                .Replace("\"overrideZoneTransfer\":false", "\"overrideZoneTransfer\":true", StringComparison.Ordinal);
             JsonElement sourcePlan = await PreviewAsync(primary, updatedSource);
             Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
                 change => change.GetProperty("path").ValueEquals("/zones/catalog.test/transfer/mode"));
             Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
                 change => change.GetProperty("path").ValueEquals("/zones/member.test/catalog/overrideNotify"));
+            Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/member.test/catalog/overrideQueryAccess"));
+            Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/member.test/catalog/overrideZoneTransfer"));
             LoopbackWebService.AssertOk(await ApplyAsync(primary, updatedSource, sourcePlan.GetProperty("revision").GetString()!));
             await primary.RestartAsync();
             Assert.Empty((await PreviewAsync(primary, updatedSource)).GetProperty("changes").EnumerateArray());
@@ -4445,6 +4455,8 @@ namespace DnsServerCore.Tests
             JsonElement memberExport = sourceExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
             Assert.Equal("catalog.test", memberExport.GetProperty("catalog").GetProperty("name").GetString());
             Assert.True(memberExport.GetProperty("catalog").GetProperty("overrideNotify").GetBoolean());
+            Assert.True(memberExport.GetProperty("catalog").GetProperty("overrideQueryAccess").GetBoolean());
+            Assert.True(memberExport.GetProperty("catalog").GetProperty("overrideZoneTransfer").GetBoolean());
             JsonElement overrideDenied = await primary.CallAsync("zones/options/set?zone=member.test&overrideCatalogNotify=false", primary.AdminToken);
             Assert.Equal("error", overrideDenied.GetProperty("status").GetString());
             Assert.Contains("/zones/member.test/catalog/overrideNotify", overrideDenied.GetProperty("errorMessage").GetString());
@@ -4468,12 +4480,16 @@ namespace DnsServerCore.Tests
             do
             {
                 member = await replica.CallAsync("zones/options/get?zone=member.test", replica.AdminToken);
-                if (member.GetProperty("status").ValueEquals("ok"))
+                if (member.GetProperty("status").ValueEquals("ok") &&
+                    member.GetProperty("response").GetProperty("overrideCatalogQueryAccess").GetBoolean() &&
+                    member.GetProperty("response").GetProperty("overrideCatalogZoneTransfer").GetBoolean())
                     break;
                 await Task.Delay(250);
             }
             while (DateTime.UtcNow < deadline);
             LoopbackWebService.AssertOk(member);
+            Assert.True(member.GetProperty("response").GetProperty("overrideCatalogQueryAccess").GetBoolean());
+            Assert.True(member.GetProperty("response").GetProperty("overrideCatalogZoneTransfer").GetBoolean());
             Assert.Empty((await PreviewAsync(replica, manifest)).GetProperty("changes").EnumerateArray());
 
             JsonElement export = await replica.CallAsync("settings/config/export", replica.AdminToken);

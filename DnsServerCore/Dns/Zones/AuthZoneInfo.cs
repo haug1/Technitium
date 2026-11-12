@@ -1206,8 +1206,8 @@ namespace DnsServerCore.Dns.Zones
             {
                 case AuthZoneType.Primary:
                     bW.Write(catalog ?? _catalogZoneName ?? "");
-                    bW.Write(_overrideCatalogQueryAccess);
-                    bW.Write(_overrideCatalogZoneTransfer);
+                    bW.Write(policies.OverrideCatalogQuery ?? _overrideCatalogQueryAccess);
+                    bW.Write(policies.OverrideCatalogTransfer ?? _overrideCatalogZoneTransfer);
                     bW.Write(policies.OverrideCatalogNotify ?? _overrideCatalogNotify);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
@@ -1273,8 +1273,8 @@ namespace DnsServerCore.Dns.Zones
 
                 case AuthZoneType.Forwarder:
                     bW.Write(catalog ?? _catalogZoneName ?? "");
-                    bW.Write(_overrideCatalogQueryAccess);
-                    bW.Write(_overrideCatalogZoneTransfer);
+                    bW.Write(policies.OverrideCatalogQuery ?? _overrideCatalogQueryAccess);
+                    bW.Write(policies.OverrideCatalogTransfer ?? _overrideCatalogZoneTransfer);
                     bW.Write(policies.OverrideCatalogNotify ?? _overrideCatalogNotify);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));

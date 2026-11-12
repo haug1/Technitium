@@ -1452,9 +1452,14 @@ namespace DnsServerCore.Configuration
                 ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
                 if (current.TryGetProperty("catalogChanged", out JsonElement catalogChanged) && catalogChanged.GetBoolean())
                     changes.Add(new ConfigurationChange(path + "/catalog/name", ConfigurationChangeKind.Update, false));
-                if (current.TryGetProperty("currentCatalogNotifyOverride", out JsonElement notifyOverride) &&
-                    ConfigurationZonePolicies.ReadCatalogNotifyOverride(declaration.Value) != notifyOverride.GetBoolean())
-                    changes.Add(new ConfigurationChange(path + "/catalog/overrideNotify", ConfigurationChangeKind.Update, false));
+                if (current.TryGetProperty("catalogOverrides", out JsonElement overrides))
+                {
+                    foreach (JsonProperty field in overrides.EnumerateObject())
+                    {
+                        if (ConfigurationZonePolicies.ReadCatalogOverride(declaration.Value, field.Name) != field.Value.GetBoolean())
+                            changes.Add(new ConfigurationChange(path + "/catalog/" + field.Name, ConfigurationChangeKind.Update, false));
+                    }
+                }
                 if (current.TryGetProperty("primaryChanges", out JsonElement primaryChanges))
                 {
                     foreach (JsonElement field in primaryChanges.EnumerateArray())

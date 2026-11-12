@@ -3423,10 +3423,19 @@ namespace DnsServerCore
                 if (manager.OwnsManifestZoneField(zoneInfo.Name, "catalog/name") &&
                     request.QueryOrForm("catalog") is string catalog && !string.Equals(catalog, zoneInfo.CatalogZoneName ?? "", StringComparison.OrdinalIgnoreCase))
                     throw new DnsWebServiceException($"{AuthZoneManager.GetManifestZonePath(zoneInfo.Name)}/catalog/name: Catalog membership is managed by the configuration manifest.");
-                if (manager.OwnsManifestZoneField(zoneInfo.Name, "catalog/overrideNotify") &&
-                    request.TryGetQueryOrForm("overrideCatalogNotify", bool.Parse, out bool requestedNotifyOverride) &&
-                    requestedNotifyOverride != zoneInfo.OverrideCatalogNotify)
-                    throw new DnsWebServiceException($"{AuthZoneManager.GetManifestZonePath(zoneInfo.Name)}/catalog/overrideNotify: Catalog notification override is managed by the configuration manifest.");
+                if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder)
+                {
+                    CheckCatalogOverride("overrideCatalogQueryAccess", "catalog/overrideQueryAccess", zoneInfo.OverrideCatalogQueryAccess);
+                    CheckCatalogOverride("overrideCatalogZoneTransfer", "catalog/overrideZoneTransfer", zoneInfo.OverrideCatalogZoneTransfer);
+                    CheckCatalogOverride("overrideCatalogNotify", "catalog/overrideNotify", zoneInfo.OverrideCatalogNotify);
+                }
+
+                void CheckCatalogOverride(string parameter, string field, bool current)
+                {
+                    if (manager.OwnsManifestZoneField(zoneInfo.Name, field) &&
+                        request.TryGetQueryOrForm(parameter, bool.Parse, out bool requested) && requested != current)
+                        Reject(field);
+                }
                 if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog || ConfigurationZonePrimary.IsReplicated(zoneInfo.Type))
                 {
                     CheckMode("queryAccess", "query/mode", zoneInfo.QueryAccess);
