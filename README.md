@@ -1,3 +1,10 @@
+> [!NOTE]
+> **What's this?**
+>
+> This fork of Technitium DNS Server adds declarative configuration through a versioned `technitium.json` manifest. You can export settings from an existing server and use the manifest to configure another instance. The fork also adds a Nix flake with ARM64 packaging and a NixOS module, plus regression tests for configuration and migration.
+>
+> [Upstream project](https://github.com/TechnitiumSoftware/DnsServer) · [Configuration guide](configuration/README.md) · [NixOS deployment](nix/README.md)
+
 <p align="center">
 	<a href="https://technitium.com/dns/">
 		<img src="https://technitium.com/img/logo.png" alt="Technitium DNS Server" /><br />
@@ -10,10 +17,6 @@
 <p align="center">
 <img src="https://technitium.com/dns/ScreenShot1.png" alt="Technitium DNS Server" />
 </p>
-
-## What's this?
-
-This fork of Technitium DNS Server adds declarative configuration through a versioned `technitium.json` manifest. You can export settings from an existing server and use the manifest to configure another instance. The fork also adds a Nix flake with ARM64 packaging and a NixOS module, plus regression tests for configuration and migration. [Upstream project](https://github.com/TechnitiumSoftware/DnsServer) · [Configuration guide](configuration/README.md) · [NixOS deployment](nix/README.md)
 
 Technitium DNS Server is an open source authoritative as well as recursive DNS server that can be used for self hosting a DNS server for privacy & security. It works out-of-the-box with no or minimal configuration and provides a user friendly web console accessible using any modern web browser.
 
