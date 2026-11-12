@@ -140,6 +140,8 @@ When export lists `/blocklists/sources` in `missingInputs`, supply the original 
 
 When export lists `/web/rootPath`, copy the custom web assets to the destination and set `web.rootPath` in its local startup manifest. Use the destination path. A relative path resolves from the destination configuration directory.
 
+To migrate a custom TLS certificate, copy its PFX to the destination, set the exported certificate path to that copy, and supply a password reference if export lists one. Apply from a local startup manifest when using a password file.
+
 To reproduce the exported settings, validate the file, preview it against the destination, then apply using the destination revision. Check the declared DNS listener addresses and log directory against the destination host before applying.
 
 ## Applying DNS, web, logging, and blocklist settings

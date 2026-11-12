@@ -1010,6 +1010,44 @@ namespace DnsServerCore.Tests
                 await server.RestartAsync();
                 Assert.Equal(thumbprint, await ReadThumbprintAsync(tlsPort));
 
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain(password, export.GetRawText());
+                JsonElement exported = export.GetProperty("response");
+                Assert.Contains(exported.GetProperty("missingInputs").EnumerateArray(),
+                    input => input.ValueEquals("/web/certificate/password"));
+                JsonElement exportedWeb = exported.GetProperty("manifest").GetProperty("web");
+                Assert.True(exportedWeb.GetProperty("tlsEnabled").GetBoolean());
+                Assert.False(exportedWeb.GetProperty("certificate").TryGetProperty("password", out _));
+
+                await using (var destination = await LoopbackWebService.StartAsync())
+                {
+                    int destinationTlsPort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+                    var certificate = JsonNode.Parse(exportedWeb.GetProperty("certificate").GetRawText())!.AsObject();
+                    certificate["path"] = "migrated-console.pfx";
+                    certificate["password"] = new JsonObject { ["file"] = "console-pfx-password" };
+                    var migration = new JsonObject
+                    {
+                        ["schemaVersion"] = 1,
+                        ["web"] = new JsonObject
+                        {
+                            ["tlsEnabled"] = exportedWeb.GetProperty("tlsEnabled").GetBoolean(),
+                            ["tlsPort"] = destinationTlsPort,
+                            ["certificate"] = certificate
+                        }
+                    };
+                    string configDirectory = destination.ConfigurationDirectory;
+                    File.Copy(path, Path.Combine(configDirectory, "migrated-console.pfx"));
+                    await File.WriteAllTextAsync(Path.Combine(configDirectory, "console-pfx-password"), password);
+                    string migrationPath = Path.Combine(configDirectory, ConfigurationManifest.DefaultFileName);
+                    await File.WriteAllTextAsync(migrationPath, migration.ToJsonString());
+                    ConfigurationManifest.Load(migrationPath).ValidateReferences();
+                    await destination.RestartAsync();
+                    Assert.Equal(thumbprint, await ReadThumbprintAsync(destinationTlsPort));
+                    await destination.RestartAsync();
+                    Assert.Equal(thumbprint, await ReadThumbprintAsync(destinationTlsPort));
+                }
+
                 JsonElement conflict = await server.CallAsync("settings/set?webServiceTlsCertificatePath=replacement.pfx", server.AdminToken);
                 Assert.Equal("error", conflict.GetProperty("status").GetString());
                 Assert.Contains("/web/certificate/path", conflict.GetProperty("errorMessage").GetString());
