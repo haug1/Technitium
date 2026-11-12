@@ -191,6 +191,13 @@ namespace DnsServerCore
             return DnsServer.NormalizeLocalEndPoints(endpoints);
         }
 
+        private static (NetworkAddress[] Ipv4, NetworkAddress[] Ipv6, uint RecordTtl) ReadLegacyDnsDefaults(BinaryReader reader, int version)
+        {
+            NetworkAddress[] ipv4 = version >= 34 ? AuthZoneInfo.ReadNetworkAddressesFrom(reader) : null;
+            NetworkAddress[] ipv6 = version >= 34 ? AuthZoneInfo.ReadNetworkAddressesFrom(reader) : null;
+            return (ipv4, ipv6, reader.ReadUInt32());
+        }
+
         private void CheckRestoreManifestDnsSettings(Stream stream, bool isConfigTransfer = false)
         {
             var reader = new BinaryReader(stream);
@@ -203,21 +210,32 @@ namespace DnsServerCore
 
             if (format == "DS")
             {
-                if (_dnsServer.HasManagedRecordTtls)
-                    throw new InvalidDataException("/dns/authoritative: Cannot verify record TTL defaults in this combined backup format.");
-
                 int version = reader.ReadByte();
                 if (version is >= 28 and <= 42)
                 {
                     ReadLegacyWebConfiguration(reader, version);
                     stream.ReadShortString(); // server domain
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl)
+                    {
+                        var (_, _, recordTtl) = ReadLegacyDnsDefaults(reader, version);
+                        _dnsServer.CheckManifestRecordTtls(new DnsServer.RecordTtls(recordTtl, null, null));
+                    }
                     return;
                 }
 
-                if (version is >= 2 and <= 5)
+                if (version is >= 2 and <= 27)
                 {
-                    _dnsServer.CheckManifestLocalEndPoints(DnsServer.NormalizeLocalEndPoints(null));
+                    if (version < 6)
+                        _dnsServer.CheckManifestLocalEndPoints(DnsServer.NormalizeLocalEndPoints(null));
+                    else if (_dnsServer.ManifestOwnsLocalEndPoints)
+                        throw new InvalidDataException("/dns/localEndpoints: Cannot verify the DNS listeners in this backup format.");
+
+                    if (version < 23)
+                        _dnsServer.CheckManifestRecordTtls(new DnsServer.RecordTtls(3600, null, null));
+                    else if (_dnsServer.ManifestOwnsDefaultRecordTtl)
+                        throw new InvalidDataException("/dns/authoritative/defaultRecordTtl: Cannot verify the default record TTL in this backup format.");
+
                     return;
                 }
             }
@@ -269,18 +287,10 @@ namespace DnsServerCore
                 if (!_dnsServer.ManifestOwnsLocalEndPoints)
                     _dnsServer.LocalEndPoints = endpoints;
 
-                if (version >= 34)
-                {
-                    DnsClientConnection.IPv4SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
-                    DnsClientConnection.IPv6SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
-                }
-                else
-                {
-                    DnsClientConnection.IPv4SourceAddresses = null;
-                    DnsClientConnection.IPv6SourceAddresses = null;
-                }
-
-                _dnsServer.AuthZoneManager.DefaultRecordTtl = bR.ReadUInt32();
+                var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(bR, version);
+                DnsClientConnection.IPv4SourceAddresses = ipv4;
+                DnsClientConnection.IPv6SourceAddresses = ipv6;
+                _dnsServer.SetRecordTtls(new DnsServer.RecordTtls(recordTtl, null, null));
 
                 if (version >= 36)
                 {

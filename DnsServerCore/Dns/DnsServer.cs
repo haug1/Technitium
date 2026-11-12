@@ -688,13 +688,14 @@ namespace DnsServerCore.Dns
 
         internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
         internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
+        internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
         internal bool HasManagedRecordTtls => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
             if (ManifestOwnsLocalEndPoints)
                 yield return "/dns/localEndpoints";
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl))
+            if (ManifestOwnsDefaultRecordTtl)
                 yield return "/dns/authoritative/defaultRecordTtl";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl))
                 yield return "/dns/authoritative/defaultNsRecordTtl";
@@ -704,7 +705,7 @@ namespace DnsServerCore.Dns
 
         internal void CheckManifestRecordTtls(RecordTtls ttls)
         {
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl) && ttls.Record.HasValue && ttls.Record != _authZoneManager.DefaultRecordTtl)
+            if (ManifestOwnsDefaultRecordTtl && ttls.Record.HasValue && ttls.Record != _authZoneManager.DefaultRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultRecordTtl: Setting is managed by the configuration manifest.");
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl) && ttls.Ns.HasValue && ttls.Ns != _authZoneManager.DefaultNsRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultNsRecordTtl: Setting is managed by the configuration manifest.");

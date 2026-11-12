@@ -135,13 +135,19 @@ namespace DnsServerCore.Tests
             Assert.False(current.GetProperty("noStackTrace").GetBoolean());
         }
 
-        [Fact]
-        public async Task LegacyCombinedBackupChecksManagedDnsListenersBeforeChangingSettings()
+        [Theory]
+        [InlineData(false, "/dns/localEndpoints")]
+        [InlineData(true, "/dns/authoritative/defaultRecordTtl")]
+        public async Task LegacyCombinedBackupChecksManagedDnsSettingsBeforeChangingSettings(bool preserveListener, string conflictPath)
         {
             await using var server = await LoopbackWebService.StartAsync();
             JsonElement settings = await server.GetSettingsAsync();
             IPEndPoint current = IPEndPoint.Parse(settings.GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
-            string manifest = ListenerManifest(current);
+            string manifest = JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600 } }
+            });
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
 
@@ -163,7 +169,10 @@ namespace DnsServerCore.Tests
                 writer.Write("X-Real-IP");
                 writer.Write("legacy.test");
                 writer.Write((byte)1);
-                LoopbackDnsServer.GetLoopbackEndPoint().WriteTo(writer);
+                (preserveListener ? current : LoopbackDnsServer.GetLoopbackEndPoint()).WriteTo(writer);
+                writer.Write((byte)0); // IPv4 source networks
+                writer.Write((byte)0); // IPv6 source networks
+                writer.Write(3600u); // default record TTL
                 // The prefix is sufficient for ownership preflight.
             }
 
@@ -172,10 +181,11 @@ namespace DnsServerCore.Tests
             JsonElement rejected = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
 
             Assert.Equal("error", rejected.GetProperty("status").GetString());
-            Assert.Contains("/dns/localEndpoints", rejected.GetProperty("errorMessage").GetString());
+            Assert.Contains(conflictPath, rejected.GetProperty("errorMessage").GetString());
             JsonElement after = await server.GetSettingsAsync();
             Assert.Equal(settings.GetProperty("dnsServerDomain").GetString(), after.GetProperty("dnsServerDomain").GetString());
             Assert.Equal(settings.GetProperty("webServiceHttpPort").GetInt32(), after.GetProperty("webServiceHttpPort").GetInt32());
+            Assert.Equal(600u, after.GetProperty("defaultRecordTtl").GetUInt32());
             await AssertListenerAnswersAsync(current);
         }
 
