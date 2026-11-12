@@ -36,6 +36,22 @@ namespace DnsServerCore.Configuration
             return FromDocument(document, fullPath);
         }
 
+        internal static ConfigurationManifest LoadForStartup(string configFolder)
+        {
+            ConfigurationManifest manifest;
+            try
+            {
+                manifest = Load(Path.Combine(configFolder, DefaultFileName));
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+
+            ConfigurationPlan.CheckLoggingSupport(manifest);
+            return manifest;
+        }
+
         internal static async Task<ConfigurationManifest> ReadAsync(Stream stream, CancellationToken cancellationToken)
         {
             try

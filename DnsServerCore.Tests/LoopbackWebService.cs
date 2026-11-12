@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Threading.Tasks;
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
@@ -26,7 +27,7 @@ namespace DnsServerCore.Tests
         public string AdminToken { get; private set; } = null!;
         private IPEndPoint DnsEndPoint { get; set; } = null!;
 
-        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false)
+        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false, string? startupManifest = null)
         {
             var server = new LoopbackWebService();
             try
@@ -48,6 +49,8 @@ namespace DnsServerCore.Tests
 
                 await server.SeedDnsConfigurationAsync(serverDomain);
                 server.WriteLegacyWebConfiguration(httpPort, tlsPort, enableTls);
+                if (startupManifest is not null)
+                    await File.WriteAllTextAsync(Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName), startupManifest);
                 server.Client = new HttpClient(new SocketsHttpHandler { UseProxy = false })
                 {
                     BaseAddress = new Uri($"http://127.0.0.1:{httpPort}"),

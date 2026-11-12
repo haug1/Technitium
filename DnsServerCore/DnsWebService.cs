@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Auth;
+using DnsServerCore.Configuration;
 using DnsServerCore.Cluster;
 using DnsServerCore.Dhcp;
 using DnsServerCore.Dns;
@@ -2903,6 +2904,8 @@ namespace DnsServerCore
 
             try
             {
+                ConfigurationManifest startupManifest = ConfigurationManifest.LoadForStartup(_configFolder);
+
                 //init dns server
                 _dnsServer = new DnsServer(_configFolder, Path.Combine(_appFolder, "dohwww"), _log);
 
@@ -2971,8 +2974,21 @@ namespace DnsServerCore
                 await _dnsServer.StartAsync(throwIfBindFails);
                 _dhcpServer.Start();
 
-                _log.Write("DNS Server (v" + _currentVersion.ToString() + ") was started successfully.");
                 _isRunning = true;
+                if (startupManifest is not null)
+                {
+                    try
+                    {
+                        await _settingsApi.ReconcileStartupConfigurationAsync(startupManifest);
+                    }
+                    catch
+                    {
+                        await StopAsync();
+                        throw;
+                    }
+                }
+
+                _log.Write("DNS Server (v" + _currentVersion.ToString() + ") was started successfully.");
             }
             catch (Exception ex)
             {

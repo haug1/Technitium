@@ -96,6 +96,23 @@ namespace DnsServerCore.Configuration
 
         internal static void ApplyLogging(ConfigurationManifest manifest, LogManager log)
         {
+            CheckLoggingSupport(manifest);
+
+            manifest.Settings.TryGetProperty("logging", out JsonElement logging);
+            JsonElement? destination = GetLoggingValue(logging, "destination");
+            JsonElement? noStackTrace = GetLoggingValue(logging, "noStackTrace");
+            JsonElement? retention = GetLoggingValue(logging, "retentionDays");
+            JsonElement? localTime = GetLoggingValue(logging, "useLocalTime");
+
+            log.ApplyManifestSettings(
+                destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
+                noStackTrace?.GetBoolean(),
+                retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
+                localTime?.GetBoolean());
+        }
+
+        internal static void CheckLoggingSupport(ConfigurationManifest manifest)
+        {
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
             {
                 if (section.Name is "schemaVersion" or "$schema")
@@ -109,18 +126,6 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"/logging/{JsonEncodedText.Encode(field.Name)}: Applying this setting is not implemented.");
                 }
             }
-
-            manifest.Settings.TryGetProperty("logging", out JsonElement logging);
-            JsonElement? destination = GetLoggingValue(logging, "destination");
-            JsonElement? noStackTrace = GetLoggingValue(logging, "noStackTrace");
-            JsonElement? retention = GetLoggingValue(logging, "retentionDays");
-            JsonElement? localTime = GetLoggingValue(logging, "useLocalTime");
-
-            log.ApplyManifestSettings(
-                destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
-                noStackTrace?.GetBoolean(),
-                retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
-                localTime?.GetBoolean());
         }
 
         private static JsonElement? GetLoggingValue(JsonElement logging, string name)

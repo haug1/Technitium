@@ -103,6 +103,43 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupReconcilesTheLoggingManifestAndReleasesOmittedFields()
+        {
+            await using var server = await LoopbackWebService.StartAsync(
+                startupManifest: """{"schemaVersion":1,"logging":{"retentionDays":180,"noStackTrace":true}}""");
+            string manifest = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+
+            JsonElement first = await server.GetSettingsAsync();
+            Assert.Equal(180, first.GetProperty("maxLogFileDays").GetInt32());
+            Assert.True(first.GetProperty("noStackTrace").GetBoolean());
+            Assert.Equal(2, first.GetProperty("managedSettings").GetArrayLength());
+
+            await File.WriteAllTextAsync(manifest, """{"schemaVersion":1,"logging":{"retentionDays":null}}""");
+            await server.RestartAsync();
+            JsonElement updated = await server.GetSettingsAsync();
+            Assert.Equal(365, updated.GetProperty("maxLogFileDays").GetInt32());
+            Assert.True(updated.GetProperty("noStackTrace").GetBoolean());
+            Assert.Equal("/logging/retentionDays", Assert.Single(updated.GetProperty("managedSettings").EnumerateArray()).GetString());
+        }
+
+        [Fact]
+        public async Task UnsupportedStartupManifestLeavesThePreviousLoggingConfigurationIntact()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            string manifest = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            await File.WriteAllTextAsync(manifest, """{"schemaVersion":1,"logging":{"retentionDays":180},"web":{"httpPort":1}}""");
+
+            InvalidDataException error = await Assert.ThrowsAsync<InvalidDataException>(server.RestartAsync);
+            Assert.Contains("/web", error.Message);
+
+            File.Delete(manifest);
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(365, current.GetProperty("maxLogFileDays").GetInt32());
+            Assert.Empty(current.GetProperty("managedSettings").EnumerateArray());
+        }
+
+        [Fact]
         public async Task OwnershipSurvivesRestartAndRejectsMixedEditsUntilReleased()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -568,6 +568,19 @@ namespace DnsServerCore
                 }
             }
 
+            internal async Task ReconcileStartupConfigurationAsync(ConfigurationManifest manifest)
+            {
+                await _configurationLock.WaitAsync();
+                try
+                {
+                    ConfigurationPlan.ApplyLogging(manifest, _dnsWebService._log);
+                }
+                finally
+                {
+                    _configurationLock.Release();
+                }
+            }
+
             private JsonDocument CaptureConfigurationSnapshot()
             {
                 using var snapshot = new MemoryStream();
