@@ -7,10 +7,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 using DnsServerCore.Dns;
+using DnsServerCore.Dns.ResourceRecords;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using TechnitiumLibrary.Net;
+using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Configuration
 {
@@ -397,7 +400,7 @@ namespace DnsServerCore.Configuration
             {
                 string path = AppendPath("/zones", declaration.Name);
                 string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
-                bool exists = currentZones.TryGetProperty(name, out JsonElement current) && current.ValueKind == JsonValueKind.Object;
+                bool exists = currentZones.TryGetProperty(name, out JsonElement current) && current.ValueKind == JsonValueKind.Object && current.TryGetProperty("type", out _);
                 if (declaration.Value.ValueKind == JsonValueKind.Null)
                 {
                     if (exists)
@@ -411,7 +414,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled"))
+                    if (field.Name is not ("type" or "enabled" or "records"))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 
@@ -429,6 +432,17 @@ namespace DnsServerCore.Configuration
                 if (type is not null && !current.GetProperty("type").ValueEquals(type))
                     throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
 
+                if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
+                {
+                    int index = 0;
+                    foreach (JsonElement change in recordChanges.EnumerateArray())
+                    {
+                        if (change.ValueKind != JsonValueKind.Null)
+                            changes.Add(new ConfigurationChange($"{path}/records/{index}", (ConfigurationChangeKind)change.GetInt32(), false));
+                        index++;
+                    }
+                }
+
                 if (declaration.Value.TryGetProperty("enabled", out JsonElement enabled))
                 {
                     bool effectiveEnabled = enabled.ValueKind == JsonValueKind.Null || enabled.GetBoolean();
@@ -438,6 +452,99 @@ namespace DnsServerCore.Configuration
                         changes.Add(new ConfigurationChange(path + "/enabled", ConfigurationChangeKind.Update, false));
                 }
             }
+        }
+
+        internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
+            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords)
+        {
+            string path = AppendPath("/zones", declarationName) + "/records";
+            if (records.ValueKind == JsonValueKind.Null)
+                throw new InvalidDataException($"{path}: Planning a record collection reset is not implemented.");
+
+            var changes = new ConfigurationChangeKind?[records.GetArrayLength()];
+            var current = currentRecords.ToLookup(record => (record.Name.ToLowerInvariant(), record.Type));
+            var matched = new HashSet<DnsResourceRecord>(ReferenceEqualityComparer.Instance);
+            var declared = new HashSet<(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data)>();
+            int index = 0;
+            foreach (JsonElement record in records.EnumerateArray())
+            {
+                string recordPath = $"{path}/{index}";
+                foreach (JsonProperty field in record.EnumerateObject())
+                {
+                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments"))
+                        throw new InvalidDataException($"{AppendPath(recordPath, field.Name)}: Planning for this record setting is not implemented.");
+                }
+
+                (string owner, DnsResourceRecordType type) = ConfigurationManifest.ReadZoneRecordIdentity(zoneName, record, recordPath);
+                JsonElement data = record.GetProperty("data");
+                DnsResourceRecordData rdata;
+                if (data.TryGetProperty("zoneFile", out JsonElement zoneFile))
+                    rdata = ConfigurationManifest.ReadZoneFileRecordData(zoneName, owner, type, zoneFile.GetString(), recordPath + "/data/zoneFile").RDATA;
+                else if (data.TryGetProperty("rawHex", out JsonElement rawHex))
+                    rdata = ConfigurationManifest.ReadRawZoneRecordData(zoneName, owner, type, rawHex.GetString(), recordPath + "/data/rawHex").RDATA;
+                else if (data.TryGetProperty("txtBase64", out JsonElement txt))
+                {
+                    var segments = new List<ArraySegment<byte>>();
+                    foreach (JsonElement segment in txt.EnumerateArray())
+                        segments.Add(Convert.FromBase64String(segment.GetString()));
+                    rdata = new DnsTXTRecordData(segments);
+                }
+                else
+                    throw new InvalidDataException($"{recordPath}/data: Planning for this record data format is not implemented.");
+
+                if (IsGeneratedRecord(zoneName, serverDomain, owner, type, rdata))
+                    throw new InvalidDataException($"{recordPath}: This record is managed by the zone lifecycle.");
+                if (!declared.Add((owner, type, rdata)))
+                    throw new InvalidDataException($"{recordPath}: Duplicate record.");
+
+                DnsResourceRecord existing = current[(owner, type)].FirstOrDefault(candidate => candidate.Class == DnsClass.IN && candidate.RDATA.Equals(rdata));
+                if (existing is null)
+                {
+                    if (current[(owner, type)].Any(IsLeaseRecord))
+                        throw new InvalidDataException($"{recordPath}: This record conflicts with a DHCP-maintained record.");
+                    changes[index] = ConfigurationChangeKind.Add;
+                }
+                else
+                {
+                    if (IsLeaseRecord(existing))
+                        throw new InvalidDataException($"{recordPath}: This record is maintained by DHCP.");
+                    matched.Add(existing);
+                    var metadata = existing.Tag as GenericRecordInfo;
+                    if ((record.TryGetProperty("ttl", out JsonElement ttl) && ttl.GetDecimal() != existing.OriginalTtlValue) ||
+                        (record.TryGetProperty("disabled", out JsonElement disabled) && disabled.GetBoolean() != (metadata?.Disabled ?? false)) ||
+                        (record.TryGetProperty("comments", out JsonElement comments) && comments.GetString() != (metadata?.Comments ?? string.Empty)))
+                        changes[index] = ConfigurationChangeKind.Update;
+                }
+                index++;
+            }
+
+            foreach (DnsResourceRecord record in currentRecords)
+            {
+                if (!matched.Contains(record) && !IsLeaseRecord(record) &&
+                    !IsGeneratedRecord(zoneName, serverDomain, record.Name, record.Type, record.RDATA))
+                    throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
+            }
+
+            return changes;
+        }
+
+        private static bool IsGeneratedRecord(string zoneName, string serverDomain, string owner, DnsResourceRecordType type, DnsResourceRecordData data)
+        {
+            if (type is DnsResourceRecordType.DNSKEY or DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or
+                DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM)
+                return true;
+
+            return owner.Equals(zoneName, StringComparison.OrdinalIgnoreCase) &&
+                (type == DnsResourceRecordType.SOA ||
+                 (data is DnsNSRecordData ns && ns.NameServer.Equals(serverDomain, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        private static bool IsLeaseRecord(DnsResourceRecord record)
+        {
+            return record.Type is DnsResourceRecordType.A or DnsResourceRecordType.PTR &&
+                record.Tag is GenericRecordInfo { Comments: string comments } &&
+                comments.StartsWith("Via '", StringComparison.Ordinal) &&
+                comments.EndsWith("' DHCP scope", StringComparison.Ordinal);
         }
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log)
@@ -600,7 +707,7 @@ namespace DnsServerCore.Configuration
             return new Setting(apiField, JsonSerializer.SerializeToElement(defaultValue), restartWebService, CanApply: canApply);
         }
 
-        private static string AppendPath(string path, string name)
+        internal static string AppendPath(string path, string name)
         {
             return path + "/" + name.Replace("~", "~0", StringComparison.Ordinal).Replace("/", "~1", StringComparison.Ordinal);
         }

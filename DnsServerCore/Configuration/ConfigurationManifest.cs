@@ -485,31 +485,20 @@ namespace DnsServerCore.Configuration
                 foreach (JsonElement record in records.EnumerateArray())
                 {
                     string recordPath = $"{zonePath}/records/{index++}";
-                    string owner = record.GetProperty("owner").GetString();
-                    if (owner != "@")
-                        owner = CanonicalDnsName(owner, recordPath + "/owner", allowRoot: true);
-                    else
-                        owner = zoneName;
-
-                    if (!AuthZoneManager.DomainBelongsToZone(zoneName, owner))
-                        throw new InvalidDataException($"{DisplayPath(recordPath + "/owner")}: Record owner must belong to its zone.");
-
-                    JsonElement typeValue = record.GetProperty("type");
-                    DnsResourceRecordType type;
-                    if (typeValue.ValueKind == JsonValueKind.Number)
-                        type = (DnsResourceRecordType)decimal.ToUInt16(typeValue.GetDecimal());
-                    else if (!Enum.TryParse(typeValue.GetString(), out type))
-                        throw new InvalidDataException($"{DisplayPath(recordPath + "/type")}: Unknown record type. Use a numeric type code for unrecognized types.");
-
+                    (string owner, DnsResourceRecordType type) = ReadZoneRecordIdentity(zoneName, record, recordPath);
                     JsonElement data = record.GetProperty("data");
                     if (data.TryGetProperty("zoneFile", out JsonElement zoneFile))
-                        ValidateZoneFileRecordData(zoneName, owner, type, zoneFile.GetString(), recordPath + "/data/zoneFile");
+                        ReadZoneFileRecordData(zoneName, owner, type, zoneFile.GetString(), recordPath + "/data/zoneFile");
+                    if (data.TryGetProperty("rawHex", out JsonElement rawHex))
+                        ReadRawZoneRecordData(zoneName, owner, type, rawHex.GetString(), recordPath + "/data/rawHex");
                     if (data.TryGetProperty("forwarder", out _) && type != DnsResourceRecordType.FWD)
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/data/forwarder")}: Forwarder data requires an FWD record.");
                     if (data.TryGetProperty("app", out _) && type != DnsResourceRecordType.APP)
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/data/app")}: App data requires an APP record.");
                     if (data.TryGetProperty("txtBase64", out JsonElement segments))
                     {
+                        if (type != DnsResourceRecordType.TXT)
+                            throw new InvalidDataException($"{DisplayPath(recordPath + "/data/txtBase64")}: Base64 TXT data requires a TXT record.");
                         int segmentIndex = 0;
                         byte[] decoded = new byte[255];
                         foreach (JsonElement segment in segments.EnumerateArray())
@@ -523,7 +512,28 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        private static void ValidateZoneFileRecordData(string zoneName, string owner, DnsResourceRecordType type, string data, string path)
+        internal static (string Owner, DnsResourceRecordType Type) ReadZoneRecordIdentity(string zoneName, JsonElement record, string path)
+        {
+            string owner = record.GetProperty("owner").GetString();
+            owner = owner == "@" ? zoneName : CanonicalDnsName(owner, path + "/owner", allowRoot: true);
+            if (!AuthZoneManager.DomainBelongsToZone(zoneName, owner))
+                throw new InvalidDataException($"{DisplayPath(path + "/owner")}: Record owner must belong to its zone.");
+
+            JsonElement value = record.GetProperty("type");
+            if (value.ValueKind == JsonValueKind.Number)
+                return (owner, (DnsResourceRecordType)decimal.ToUInt16(value.GetDecimal()));
+            if (Enum.TryParse(value.GetString(), out DnsResourceRecordType type))
+                return (owner, type);
+            throw new InvalidDataException($"{DisplayPath(path + "/type")}: Unknown record type. Use a numeric type code for unrecognized types.");
+        }
+
+        internal static DnsResourceRecord ReadRawZoneRecordData(string zoneName, string owner, DnsResourceRecordType type, string hex, string path)
+        {
+            string genericData = FormattableString.Invariant($@"\# {hex.Length / 2} {hex}");
+            return ReadZoneFileRecordData(zoneName, owner, type, genericData, path);
+        }
+
+        internal static DnsResourceRecord ReadZoneFileRecordData(string zoneName, string owner, DnsResourceRecordType type, string data, string path)
         {
             // The parser only reads this in-memory record. Relative names in its RDATA use the enclosing zone as their origin.
             string typeCode = ((ushort)type).ToString(CultureInfo.InvariantCulture);
@@ -533,7 +543,7 @@ namespace DnsServerCore.Configuration
             {
                 records = ZoneFile.ReadZoneFileFromAsync(input, zoneName).GetAwaiter().GetResult();
             }
-            catch (Exception ex) when (ex is FormatException or ArgumentException or NotSupportedException or InvalidOperationException or DnsClientException)
+            catch (Exception ex) when (ex is FormatException or ArgumentException or OverflowException or IOException or NotSupportedException or InvalidOperationException or DnsClientException)
             {
                 throw new InvalidDataException($"{DisplayPath(path)}: Invalid zone-file record data.");
             }
@@ -541,6 +551,8 @@ namespace DnsServerCore.Configuration
             if (records.Count != 1 || records[0].Type != type || records[0].Class != DnsClass.IN ||
                 !records[0].Name.Equals(owner, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"{DisplayPath(path)}: Expected data for exactly one record.");
+
+            return records[0];
         }
 
         private static JsonDocument ParseDocument(Stream stream)

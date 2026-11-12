@@ -740,19 +740,43 @@ namespace DnsServerCore
                 {
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
                     AuthZoneInfo zone = _dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(name);
-                    if (zone is null)
-                    {
-                        writer.WriteNull(name);
-                        continue;
-                    }
-                    if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zone.Name, sessionUser, PermissionFlag.View))
+                    if (zone is not null && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zone.Name, sessionUser, PermissionFlag.View))
                         throw new DnsWebServiceException("Access was denied.");
 
                     writer.WriteStartObject(name);
-                    writer.WriteString("type", zone.Type.ToString());
-                    writer.WriteBoolean("enabled", !zone.Disabled);
-                    writer.WriteBoolean("clusterProtected", _dnsWebService._clusterManager.ClusterInitialized &&
-                        (_dnsWebService._clusterManager.IsClusterPrimaryZone(name) || _dnsWebService._clusterManager.IsClusterCatalogZone(name)));
+                    bool clusterProtected = _dnsWebService._clusterManager.ClusterInitialized &&
+                        (_dnsWebService._clusterManager.IsClusterPrimaryZone(name) || _dnsWebService._clusterManager.IsClusterCatalogZone(name));
+                    if (zone is not null)
+                    {
+                        writer.WriteString("type", zone.Type.ToString());
+                        writer.WriteBoolean("enabled", !zone.Disabled);
+                        writer.WriteBoolean("clusterProtected", clusterProtected);
+                    }
+
+                    if (declaration.Value.ValueKind == JsonValueKind.Object &&
+                        declaration.Value.TryGetProperty("records", out JsonElement records))
+                    {
+                        string path = ConfigurationPlan.AppendPath("/zones", declaration.Name) + "/records";
+                        if (clusterProtected || (zone is not null && zone.Type != AuthZoneType.Primary))
+                            throw new InvalidDataException($"{path}: Record preview requires a primary zone outside the cluster infrastructure.");
+
+                        var currentRecords = new List<DnsResourceRecord>();
+                        if (zone is not null)
+                        {
+                            writer.WriteString("recordRevision", zone.LastModified);
+                            _dnsWebService._dnsServer.AuthZoneManager.ListAllZoneRecords(name, currentRecords);
+                        }
+                        writer.WriteStartArray("recordChanges");
+                        foreach (ConfigurationChangeKind? change in ConfigurationPlan.CompareZoneRecords(
+                            name, declaration.Name, _dnsWebService._dnsServer.ServerDomain, records, currentRecords))
+                        {
+                            if (change.HasValue)
+                                writer.WriteNumberValue((int)change.Value);
+                            else
+                                writer.WriteNullValue();
+                        }
+                        writer.WriteEndArray();
+                    }
                     writer.WriteEndObject();
                 }
                 writer.WriteEndObject();

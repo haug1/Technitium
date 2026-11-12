@@ -970,6 +970,73 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneRecordPreviewTracksRecordChangesWithoutMutatingDns()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=records.test&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=records.test&domain=www.records.test&type=A&ipAddress=192.0.2.10&ttl=300", server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"records.test":{"records":[
+                  {"owner":"WWW.RECORDS.TEST.","type":"A","ttl":600,"data":{"zoneFile":"192.0.2.10"}},
+                  {"owner":"new.records.test","type":1,"data":{"rawHex":"c000020b"}}
+                ]}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change =>
+                {
+                    Assert.Equal("/zones/records.test/records/0", change.GetProperty("path").GetString());
+                    Assert.Equal("Update", change.GetProperty("kind").GetString());
+                },
+                change =>
+                {
+                    Assert.Equal("/zones/records.test/records/1", change.GetProperty("path").GetString());
+                    Assert.Equal("Add", change.GetProperty("kind").GetString());
+                });
+            Assert.DoesNotContain("192.0.2.", preview.GetRawText());
+            Assert.Equal(300u, Assert.Single((await server.QueryAsync("www.records.test", DnsResourceRecordType.A)).Answer).OriginalTtlValue);
+            Assert.Empty((await server.QueryAsync("new.records.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(preview.GetProperty("revision").GetString(),
+                (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=records.test&domain=new.records.test&type=A&ipAddress=192.0.2.11", server.AdminToken));
+            JsonElement after = await PreviewAsync(server, manifest);
+            Assert.NotEqual(preview.GetProperty("revision").GetString(), after.GetProperty("revision").GetString());
+            Assert.Equal("Update", Assert.Single(after.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+
+            const string emptyRecords = """{"schemaVersion":1,"zones":{"records.test":{"records":[]}}}""";
+            using var content = new StringContent(emptyRecords, Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/zones/records.test/records", rejected.GetProperty("errorMessage").GetString());
+            Assert.DoesNotContain("192.0.2.", rejected.GetRawText());
+        }
+
+        [Fact]
+        public async Task ZoneRecordPreviewPreservesGeneratedRecordsAndRecognizesWireData()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """{"schemaVersion":1,"zones":{"records.test":{"type":"Primary","records":[]}}}""";
+            JsonElement before = await PreviewAsync(server, manifest);
+            Assert.Equal("Add", Assert.Single(before.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=records.test&type=Primary", server.AdminToken));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            Assert.Single((await server.QueryAsync("records.test", DnsResourceRecordType.SOA)).Answer);
+            Assert.Single((await server.QueryAsync("records.test", DnsResourceRecordType.NS)).Answer);
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=records.test&domain=records.test&type=TXT&text=hello", server.AdminToken));
+            const string txtManifest = """
+                {"schemaVersion":1,"zones":{"records.test":{"records":[{"owner":"@","type":"TXT","data":{"txtBase64":["aGVsbG8="]}}]}}}
+                """;
+            Assert.Empty((await PreviewAsync(server, txtManifest)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();
