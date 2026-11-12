@@ -51,6 +51,28 @@ namespace DnsServerCore.Tests
         }
 
         [Theory]
+        [InlineData("""{"heartbeatRefreshSeconds":90,"configRefreshSeconds":60}""", "/cluster/configRefreshSeconds")]
+        [InlineData("""{"bootstrap":{"role":"Secondary","primaryUrl":"http://primary.example.test/"}}""", "/cluster/bootstrap/primaryUrl")]
+        [InlineData("""{"bootstrap":{"role":"Secondary","primaryUrl":"https://primary.example.test/join"}}""", "/cluster/bootstrap/primaryUrl")]
+        [InlineData("""{"bootstrap":{"role":"Secondary"},"configRefreshSeconds":120}""", "Only the Primary")]
+        [InlineData("""{"bootstrap":{"role":"Primary","username":"operator"}}""", "/cluster/bootstrap/username")]
+        public void RejectsInvalidClusterDeclarationsWithoutAServer(string cluster, string diagnostic)
+        {
+            string path = WriteManifest($$"""{"schemaVersion":1,"cluster":{{cluster}} }""");
+            var error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains(diagnostic, error.Message);
+        }
+
+        [Theory]
+        [InlineData("""{"configRefreshSeconds":30}""")]
+        [InlineData("""{"bootstrap":{"role":"Secondary"}}""")]
+        public void AcceptsClusterDeclarationsThatDependOnCurrentState(string cluster)
+        {
+            string path = WriteManifest($$"""{"schemaVersion":1,"cluster":{{cluster}} }""");
+            ConfigurationManifest.Load(path).ValidateReferences();
+        }
+
+        [Theory]
         [InlineData("""{"proof":{"type":"NSEC","iterations":1}}""", "/proof/iterations")]
         [InlineData("""{"enabled":false,"dnsKeyTtl":3600}""", "Enable DNSSEC")]
         [InlineData("""{"keys":{"next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"unknown"}}}""", "/keys/next/algorithm")]

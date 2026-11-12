@@ -51,6 +51,39 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal static void ValidateDeclaration(JsonElement root)
+        {
+            if (!root.TryGetProperty("cluster", out JsonElement section))
+                return;
+
+            CheckApplySupport(section);
+            if (section.TryGetProperty("domain", out JsonElement domain) && domain.ValueKind == JsonValueKind.String)
+                ConfigurationManifest.CanonicalDnsName(domain.GetString(), Path + "/domain", allowRoot: false);
+            ReadAddresses(section);
+
+            if (section.TryGetProperty("bootstrap", out JsonElement bootstrap) &&
+                bootstrap.TryGetProperty("role", out JsonElement role) && role.ValueEquals("Secondary"))
+            {
+                if (GetDeclaredIntervals(section).Length != 0)
+                    throw new InvalidDataException($"{Path}: Only the Primary can declare cluster intervals.");
+                if (bootstrap.TryGetProperty("primaryUrl", out JsonElement url) && url.ValueKind == JsonValueKind.String)
+                    ReadPrimaryUrl(url.GetString());
+            }
+
+            // A partial patch depends on the initialized node's current intervals.
+            if (section.TryGetProperty("heartbeatRefreshSeconds", out _) && section.TryGetProperty("configRefreshSeconds", out _))
+                ReadOptions(section, ClusterManager.DefaultManifestOptions);
+        }
+
+        private static Uri ReadPrimaryUrl(string value)
+        {
+            if (!Uri.TryCreate(value, UriKind.Absolute, out Uri url) ||
+                url.Scheme != Uri.UriSchemeHttps || url.HostNameType != UriHostNameType.Dns ||
+                url.UserInfo.Length != 0 || url.Query.Length != 0 || url.Fragment.Length != 0 || url.AbsolutePath != "/")
+                throw new InvalidDataException("/cluster/bootstrap/primaryUrl: Supply an HTTPS origin with a DNS hostname.");
+            return url;
+        }
+
         internal abstract record Bootstrap(string Domain, IPAddress[] Addresses);
         internal sealed record PrimaryBootstrap(string Domain, IPAddress[] Addresses, Settings Options, string[] Ownership) : Bootstrap(Domain, Addresses);
         internal sealed record SecondaryBootstrap(string Domain, IPAddress[] Addresses, Uri PrimaryUrl, IPAddress PrimaryAddress,
@@ -91,10 +124,7 @@ namespace DnsServerCore.Configuration
 
                 domain = ConfigurationManifest.CanonicalDnsName(domain, "/cluster/domain", allowRoot: false);
                 cluster.CheckSecondaryBootstrap(domain);
-                if (!Uri.TryCreate(ReadText("primaryUrl"), UriKind.Absolute, out Uri url) ||
-                    url.Scheme != Uri.UriSchemeHttps || url.HostNameType != UriHostNameType.Dns ||
-                    url.UserInfo.Length != 0 || url.Query.Length != 0 || url.Fragment.Length != 0 || url.AbsolutePath != "/")
-                    throw new InvalidDataException("/cluster/bootstrap/primaryUrl: Supply an HTTPS origin with a DNS hostname.");
+                Uri url = ReadPrimaryUrl(ReadText("primaryUrl"));
 
                 string username = ReadText("username");
                 if (string.IsNullOrWhiteSpace(username))

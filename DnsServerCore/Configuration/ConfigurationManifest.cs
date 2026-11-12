@@ -102,6 +102,7 @@ namespace DnsServerCore.Configuration
             ConfigurationZoneDnssec.ValidateDeclarations(root);
             ConfigurationZonePolicies.Validate(root);
             ConfigurationDhcp.Validate(root);
+            ConfigurationClusterOptions.ValidateDeclaration(root);
             if (root.TryGetProperty("dns", out JsonElement dns))
             {
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);

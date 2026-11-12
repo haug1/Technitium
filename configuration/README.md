@@ -37,6 +37,8 @@ An explicitly declared value takes precedence over the corresponding existing se
 
 Zone record owners use full DNS names with an optional trailing dot. Use `@` for the zone apex. Validation checks that each owner belongs to its enclosing zone and reports invalid record types or record data by field. The zone-file data form uses the enclosing zone as the origin for relative names and accepts data for one record per entry.
 
+Offline validation checks cluster bootstrap origins, role-specific inputs, and interval pairs declared together. Preview resolves partial interval changes against the initialized node’s current settings.
+
 ## Validation examples
 
 | Input | Expected result |
