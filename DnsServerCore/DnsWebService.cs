@@ -2235,7 +2235,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/zones/delete", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.DeleteZone));
             _webService.MapGetAndPost("/api/zones/resync", _zonesApi.ResyncZone);
             _webService.MapGetAndPost("/api/zones/options/get", _zonesApi.GetZoneOptions);
-            _webService.MapGetAndPost("/api/zones/options/set", _zonesApi.SetZoneOptions);
+            _webService.MapGetAndPost("/api/zones/options/set", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.SetZoneOptions));
             _webService.MapGetAndPost("/api/zones/permissions/get", delegate (HttpContext context) { _authApi.GetPermissionDetails(context, PermissionSection.Zones); });
             _webService.MapGetAndPost("/api/zones/permissions/set", delegate (HttpContext context) { _authApi.SetPermissionsDetails(context, PermissionSection.Zones); });
             _webService.MapGetAndPost("/api/zones/dnssec/sign", _zonesApi.SignPrimaryZone);

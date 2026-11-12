@@ -3100,6 +3100,42 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZonePoliciesApplyToNewAndExistingZonesAndSurviveRestart()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=existing.test&type=Primary", server.AdminToken));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{
+                  "existing.test":{
+                    "query":{"mode":"UseSpecifiedNetworkACL","networkAcl":["!127.0.0.1/32","127.0.0.0/8"]},
+                    "transfer":{"mode":"Deny","networkAcl":["192.0.2.0/24"]},
+                    "notify":{"mode":"None","nameServers":["2001:db8::10"]},
+                    "updates":{"mode":"UseSpecifiedNetworkACL","networkAcl":["192.0.2.32/27"]}
+                  },
+                  "new.test":{"type":"Primary","query":{"mode":"Deny"}}
+                }}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            const string reset = """
+                {"schemaVersion":1,"zones":{"existing.test":{
+                    "query":{"mode":null,"networkAcl":null},
+                    "transfer":{"mode":null,"networkAcl":null},
+                    "notify":{"mode":null,"nameServers":null},
+                    "updates":{"mode":null,"networkAcl":null}
+                }}}
+                """;
+            revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            Assert.Single((await server.QueryAsync("existing.test", DnsResourceRecordType.SOA)).Answer);
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task ZoneRecordPreviewTracksRecordChangesWithoutMutatingDns()
         {
             await using var server = await LoopbackWebService.StartAsync();

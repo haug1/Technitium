@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.ResourceRecords;
 using System;
@@ -1188,7 +1189,7 @@ namespace DnsServerCore.Dns.Zones
 
         public void WriteTo(BinaryWriter bW) => WriteTo(bW, disabled: null);
 
-        internal void WriteTo(BinaryWriter bW, bool? disabled)
+        internal void WriteTo(BinaryWriter bW, bool? disabled, ConfigurationZonePolicies.Changes policies = default)
         {
             if (_apexZone is null)
                 throw new InvalidOperationException();
@@ -1208,19 +1209,19 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(_overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogNotify);
 
-                    bW.Write((byte)_queryAccess);
-                    WriteNetworkACLTo(_queryAccessNetworkACL, bW);
+                    bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
+                    WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);
 
-                    bW.Write((byte)_zoneTransfer);
-                    WriteNetworkACLTo(_zoneTransferNetworkACL, bW);
+                    bW.Write((byte)(policies.Transfer ?? _zoneTransfer));
+                    WriteNetworkACLTo(policies.TransferAcl ?? _zoneTransferNetworkACL, bW);
                     WriteZoneTransferTsigKeyNamesTo(_zoneTransferTsigKeyNames, bW);
                     WriteZoneHistoryTo(_zoneHistory, bW);
 
-                    bW.Write((byte)_notify);
-                    WriteIPAddressesTo(_notifyNameServers, bW);
+                    bW.Write((byte)(policies.Notify ?? _notify));
+                    WriteIPAddressesTo(policies.NotifyServers ?? _notifyNameServers, bW);
 
-                    bW.Write((byte)_update);
-                    WriteNetworkACLTo(_updateNetworkACL, bW);
+                    bW.Write((byte)(policies.Update ?? _update));
+                    WriteNetworkACLTo(policies.UpdateAcl ?? _updateNetworkACL, bW);
                     WriteUpdateSecurityPoliciesTo(_updateSecurityPolicies, bW);
 
                     WriteDnssecPrivateKeysTo(_dnssecPrivateKeys, bW);

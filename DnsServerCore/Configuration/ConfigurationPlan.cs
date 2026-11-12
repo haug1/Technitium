@@ -872,7 +872,17 @@ namespace DnsServerCore.Configuration
                         continue;
                     foreach (JsonProperty field in zone.Value.EnumerateObject())
                     {
-                        if (field.Name == "enabled" || (field.Name == "type" && field.Value.ValueEquals("Primary")))
+                        if (ConfigurationZonePolicies.IsPolicy(field.Name))
+                        {
+                            foreach (JsonProperty option in field.Value.EnumerateObject())
+                            {
+                                if (option.Name != "mode" && option.Name != (field.Name == "notify" ? "nameServers" : "networkAcl"))
+                                    throw new InvalidDataException($"{AppendPath(AppendPath(zonePath, field.Name), option.Name)}: Applying this zone setting is not implemented.");
+                            }
+                            continue;
+                        }
+                        if (field.Name == "enabled" ||
+                            (field.Name == "type" && field.Value.ValueEquals("Primary")))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
                     }

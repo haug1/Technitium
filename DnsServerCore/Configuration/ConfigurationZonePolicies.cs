@@ -11,6 +11,78 @@ namespace DnsServerCore.Configuration
 {
     internal static class ConfigurationZonePolicies
     {
+        internal readonly record struct Changes(
+            AuthZoneQueryAccess? QueryAccess, NetworkAccessControl[] QueryAcl,
+            AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl,
+            AuthZoneNotify? Notify, IPAddress[] NotifyServers,
+            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl)
+        {
+            internal void Apply(AuthZoneInfo zone)
+            {
+                if (QueryAcl is not null)
+                    zone.QueryAccessNetworkACL = QueryAcl;
+                if (QueryAccess.HasValue)
+                    zone.QueryAccess = QueryAccess.Value;
+                if (TransferAcl is not null)
+                    zone.ZoneTransferNetworkACL = TransferAcl;
+                if (Transfer.HasValue)
+                    zone.ZoneTransfer = Transfer.Value;
+                if (NotifyServers is not null)
+                    zone.NotifyNameServers = NotifyServers;
+                if (Notify.HasValue)
+                    zone.Notify = Notify.Value;
+                if (UpdateAcl is not null)
+                    zone.UpdateNetworkACL = UpdateAcl;
+                if (Update.HasValue)
+                    zone.Update = Update.Value;
+            }
+        }
+
+        internal static Changes Prepare(JsonElement declaration, string path, AuthZoneInfo current)
+        {
+            declaration.TryGetProperty("query", out JsonElement query);
+            declaration.TryGetProperty("transfer", out JsonElement transfer);
+            declaration.TryGetProperty("notify", out JsonElement notify);
+            declaration.TryGetProperty("updates", out JsonElement updates);
+            AuthZoneNotify? notifyMode = ReadMode(notify, "notify", current?.Notify);
+            if (notifyMode == AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones)
+                throw new InvalidDataException($"{path}/notify/mode: This notification mode requires a catalog zone.");
+
+            IPAddress[] notifyServers = null;
+            if (notify.ValueKind == JsonValueKind.Object && notify.TryGetProperty("nameServers", out JsonElement names))
+            {
+                IPAddress[] addresses = names.ValueKind == JsonValueKind.Null ? [] :
+                    names.EnumerateArray().Select(value => IPAddress.Parse(value.GetString())).ToArray();
+                if (!(current?.NotifyNameServers ?? []).SequenceEqual(addresses))
+                    notifyServers = addresses;
+            }
+
+            return new Changes(
+                ReadMode(query, "query", current?.QueryAccess), ReadAcl(query, "query", current?.QueryAccessNetworkACL),
+                ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL),
+                notifyMode, notifyServers,
+                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL));
+
+            static T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
+            {
+                if (policy.ValueKind != JsonValueKind.Object || !policy.TryGetProperty("mode", out JsonElement value))
+                    return null;
+
+                T mode = Enum.Parse<T>(value.GetString() ?? GetDefaultMode(name));
+                return previous.HasValue && EqualityComparer<T>.Default.Equals(previous.Value, mode) ? null : mode;
+            }
+
+            NetworkAccessControl[] ReadAcl(JsonElement policy, string name, IReadOnlyCollection<NetworkAccessControl> previous)
+            {
+                if (policy.ValueKind != JsonValueKind.Object || !policy.TryGetProperty("networkAcl", out JsonElement value))
+                    return null;
+
+                NetworkAccessControl[] acl = ConfigurationManifest.ReadNetworkAcl(value, path + "/" + name + "/networkAcl");
+                return (previous ?? []).Select(rule => rule.ToString()).SequenceEqual(acl.Select(rule => rule.ToString()), StringComparer.Ordinal)
+                    ? null : acl;
+            }
+        }
+
         internal static bool IsPolicy(string name)
         {
             return name is "query" or "transfer" or "notify" or "updates";
