@@ -466,6 +466,56 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task CachePolicyAppliesAndProtectsManagedTtls()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"cache":{"saveToDisk":false,"maximumEntries":12345,"minimumRecordTtl":15,
+                    "maximumRecordTtl":86400,"negativeRecordTtl":180,"failureRecordTtl":20,
+                    "serveStale":{"enabled":false,"ttl":3600,"answerTtl":10,"resetTtl":20,"maxWaitMs":900}}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            string cachePath = Path.Combine(server.ConfigurationDirectory, "cache.bin");
+            await File.WriteAllBytesAsync(cachePath, []);
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            Assert.False(File.Exists(cachePath));
+
+            await server.RestartAsync();
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(11, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            JsonObject declared = JsonNode.Parse(manifest)!["dns"]!["cache"]!.AsObject();
+            JsonObject exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["cache"]!.AsObject();
+            foreach ((string key, JsonNode? value) in declared)
+                Assert.True(JsonNode.DeepEquals(value, exported[key]), key);
+
+            int ttl = settings.GetProperty("defaultRecordTtl").GetInt32();
+            JsonElement edit = await server.CallAsync("settings/set?cacheNegativeRecordTtl=300&defaultRecordTtl=123", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/dns/cache/negativeRecordTtl", edit.GetProperty("errorMessage").GetString());
+            Assert.Equal(ttl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/cache/", restored.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"dns":{"cache":{"negativeRecordTtl":null}}}""";
+            revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            settings = await server.GetSettingsAsync();
+            Assert.Equal(300, settings.GetProperty("cacheNegativeRecordTtl").GetInt32());
+            Assert.Equal("/dns/cache/negativeRecordTtl", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+        }
+
+        [Fact]
         public async Task ResolverOptionsPersistOwnershipAndRejectConflictingBackup()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -181,6 +181,19 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain("192.0.2.", error.Message);
         }
 
+        [Theory]
+        [InlineData("ttl", 604801)]
+        [InlineData("answerTtl", 301)]
+        public void CacheManifestRejectsStaleTtlsAboveTheRuntimeLimit(string setting, int ttl)
+        {
+            string path = WriteManifest($$"""
+                {"schemaVersion":1,"dns":{"cache":{"serveStale":{"{{setting}}":{{ttl}} } } } }
+                """);
+
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains("/dns/cache/serveStale/" + setting, error.Message);
+        }
+
         private string WriteManifest(string json)
         {
             string path = Path.Combine(_directory.FullName, ConfigurationManifest.DefaultFileName);

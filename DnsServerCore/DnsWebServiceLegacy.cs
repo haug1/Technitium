@@ -213,11 +213,14 @@ namespace DnsServerCore
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
                 return _dnsServer.HasManagedRecursionPolicy || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
-                    _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging);
+                    _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging || _dnsServer.HasManagedCachePolicy);
             }
 
             if (format == "DS")
             {
+                if (!isConfigTransfer && _dnsServer.HasManagedCachePolicy)
+                    throw new InvalidDataException("/dns/cache: Cannot verify cache policy in this combined backup format.");
+
                 if (_dnsServer.HasManagedRecursionPolicy)
                     throw new InvalidDataException("/dns/recursion: Cannot verify recursion policy in this combined backup format.");
 

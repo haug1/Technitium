@@ -365,8 +365,8 @@
               "additionalProperties": false,
               "properties": {
                 "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
-                "ttl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
-                "answerTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+                "ttl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 604800}, {"type": "null"}]},
+                "answerTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 300}, {"type": "null"}]},
                 "resetTtl": {"anyOf": [{"type": "integer", "minimum": 10, "maximum": 900}, {"type": "null"}]},
                 "maxWaitMs": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1800}, {"type": "null"}]}
               }

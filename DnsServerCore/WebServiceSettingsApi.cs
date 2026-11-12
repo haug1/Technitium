@@ -959,6 +959,19 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("resolverConcurrency", int.Parse, out int resolverConcurrency) ? resolverConcurrency : null,
                     request.TryGetQueryOrForm("resolverMaxStackCount", int.Parse, out int resolverMaxStackCount) ? resolverMaxStackCount : null));
 
+                DnsServer.CachePolicy cachePolicy = _dnsWebService._dnsServer.CheckManifestCachePolicy(new DnsServer.CachePolicy(
+                    request.TryGetQueryOrForm("saveCache", bool.Parse, out bool saveCache) ? saveCache : null,
+                    request.TryGetQueryOrForm("serveStale", bool.Parse, out bool serveStale) ? serveStale : null,
+                    request.TryGetQueryOrForm("serveStaleTtl", ZoneFile.ParseTtl, out uint serveStaleTtl) ? serveStaleTtl : null,
+                    request.TryGetQueryOrForm("serveStaleAnswerTtl", ZoneFile.ParseTtl, out uint serveStaleAnswerTtl) ? serveStaleAnswerTtl : null,
+                    request.TryGetQueryOrForm("serveStaleResetTtl", ZoneFile.ParseTtl, out uint serveStaleResetTtl) ? serveStaleResetTtl : null,
+                    request.TryGetQueryOrForm("serveStaleMaxWaitTime", int.Parse, out int serveStaleMaxWaitTime) ? serveStaleMaxWaitTime : null,
+                    request.TryGetQueryOrForm("cacheMaximumEntries", long.Parse, out long cacheMaximumEntries) ? cacheMaximumEntries : null,
+                    request.TryGetQueryOrForm("cacheMinimumRecordTtl", ZoneFile.ParseTtl, out uint cacheMinimumRecordTtl) ? cacheMinimumRecordTtl : null,
+                    request.TryGetQueryOrForm("cacheMaximumRecordTtl", ZoneFile.ParseTtl, out uint cacheMaximumRecordTtl) ? cacheMaximumRecordTtl : null,
+                    request.TryGetQueryOrForm("cacheNegativeRecordTtl", ZoneFile.ParseTtl, out uint cacheNegativeRecordTtl) ? cacheNegativeRecordTtl : null,
+                    request.TryGetQueryOrForm("cacheFailureRecordTtl", ZoneFile.ParseTtl, out uint cacheFailureRecordTtl) ? cacheFailureRecordTtl : null));
+
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
                 _dnsWebService._dnsServer.CheckManifestDnsLogging(new DnsServer.DnsLoggingSettings(
@@ -1737,39 +1750,7 @@ namespace DnsServerCore
 
                         #region cache
 
-                        //cache
-                        if (request.TryGetQueryOrForm("saveCache", bool.Parse, out bool saveCache))
-                            _dnsWebService._dnsServer.SaveCacheToDisk = saveCache;
-
-                        if (request.TryGetQueryOrForm("serveStale", bool.Parse, out bool serveStale))
-                            _dnsWebService._dnsServer.ServeStale = serveStale;
-
-                        if (request.TryGetQueryOrForm("serveStaleTtl", ZoneFile.ParseTtl, out uint serveStaleTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.ServeStaleTtl = serveStaleTtl;
-
-                        if (request.TryGetQueryOrForm("serveStaleAnswerTtl", ZoneFile.ParseTtl, out uint serveStaleAnswerTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.ServeStaleAnswerTtl = serveStaleAnswerTtl;
-
-                        if (request.TryGetQueryOrForm("serveStaleResetTtl", ZoneFile.ParseTtl, out uint serveStaleResetTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.ServeStaleResetTtl = serveStaleResetTtl;
-
-                        if (request.TryGetQueryOrForm("serveStaleMaxWaitTime", int.Parse, out int serveStaleMaxWaitTime))
-                            _dnsWebService._dnsServer.ServeStaleMaxWaitTime = serveStaleMaxWaitTime;
-
-                        if (request.TryGetQueryOrForm("cacheMaximumEntries", long.Parse, out long cacheMaximumEntries))
-                            _dnsWebService._dnsServer.CacheZoneManager.MaximumEntries = cacheMaximumEntries;
-
-                        if (request.TryGetQueryOrForm("cacheMinimumRecordTtl", ZoneFile.ParseTtl, out uint cacheMinimumRecordTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.MinimumRecordTtl = cacheMinimumRecordTtl;
-
-                        if (request.TryGetQueryOrForm("cacheMaximumRecordTtl", ZoneFile.ParseTtl, out uint cacheMaximumRecordTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.MaximumRecordTtl = cacheMaximumRecordTtl;
-
-                        if (request.TryGetQueryOrForm("cacheNegativeRecordTtl", ZoneFile.ParseTtl, out uint cacheNegativeRecordTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.NegativeRecordTtl = cacheNegativeRecordTtl;
-
-                        if (request.TryGetQueryOrForm("cacheFailureRecordTtl", ZoneFile.ParseTtl, out uint cacheFailureRecordTtl))
-                            _dnsWebService._dnsServer.CacheZoneManager.FailureRecordTtl = cacheFailureRecordTtl;
+                        _dnsWebService._dnsServer.SetCachePolicy(cachePolicy);
 
                         if (request.TryGetQueryOrForm("cachePrefetchEligibility", int.Parse, out int cachePrefetchEligibility))
                             _dnsWebService._dnsServer.CachePrefetchEligibility = cachePrefetchEligibility;

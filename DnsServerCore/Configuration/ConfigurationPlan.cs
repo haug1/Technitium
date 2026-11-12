@@ -70,6 +70,17 @@ namespace DnsServerCore.Configuration
             ["/dns/recursion/timeoutMs"] = Field("resolverTimeout", 1500, canApply: true),
             ["/dns/recursion/concurrency"] = Field("resolverConcurrency", 2, canApply: true),
             ["/dns/recursion/maxStackCount"] = Field("resolverMaxStackCount", 16, canApply: true),
+            ["/dns/cache/saveToDisk"] = Field("saveCache", true, canApply: true),
+            ["/dns/cache/serveStale/enabled"] = Field("serveStale", true, canApply: true),
+            ["/dns/cache/serveStale/ttl"] = Field("serveStaleTtl", 259200u, canApply: true),
+            ["/dns/cache/serveStale/answerTtl"] = Field("serveStaleAnswerTtl", 30u, canApply: true),
+            ["/dns/cache/serveStale/resetTtl"] = Field("serveStaleResetTtl", 30u, canApply: true),
+            ["/dns/cache/serveStale/maxWaitMs"] = Field("serveStaleMaxWaitTime", 1800, canApply: true),
+            ["/dns/cache/maximumEntries"] = Field("cacheMaximumEntries", 10000L, canApply: true),
+            ["/dns/cache/minimumRecordTtl"] = Field("cacheMinimumRecordTtl", 10u, canApply: true),
+            ["/dns/cache/maximumRecordTtl"] = Field("cacheMaximumRecordTtl", 604800u, canApply: true),
+            ["/dns/cache/negativeRecordTtl"] = Field("cacheNegativeRecordTtl", 300u, canApply: true),
+            ["/dns/cache/failureRecordTtl"] = Field("cacheFailureRecordTtl", 10u, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -175,7 +186,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -287,6 +298,33 @@ namespace DnsServerCore.Configuration
             int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
                 ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
             return new DnsServer.StatisticsSettings(inMemory, retention);
+        }
+
+        private static DnsServer.CachePolicy GetCachePolicy(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("cache", out JsonElement cache))
+                return default;
+
+            cache.TryGetProperty("serveStale", out JsonElement stale);
+            return new DnsServer.CachePolicy(
+                Read(cache, "saveToDisk", "saveToDisk") is JsonElement saveToDisk ? saveToDisk.GetBoolean() : null,
+                Read(stale, "enabled", "serveStale/enabled") is JsonElement serveStale ? serveStale.GetBoolean() : null,
+                Read(stale, "ttl", "serveStale/ttl") is JsonElement staleTtl ? decimal.ToUInt32(staleTtl.GetDecimal()) : null,
+                Read(stale, "answerTtl", "serveStale/answerTtl") is JsonElement staleAnswerTtl ? decimal.ToUInt32(staleAnswerTtl.GetDecimal()) : null,
+                Read(stale, "resetTtl", "serveStale/resetTtl") is JsonElement staleResetTtl ? decimal.ToUInt32(staleResetTtl.GetDecimal()) : null,
+                Read(stale, "maxWaitMs", "serveStale/maxWaitMs") is JsonElement staleMaxWait ? decimal.ToInt32(staleMaxWait.GetDecimal()) : null,
+                Read(cache, "maximumEntries", "maximumEntries") is JsonElement maximumEntries ? decimal.ToInt64(maximumEntries.GetDecimal()) : null,
+                Read(cache, "minimumRecordTtl", "minimumRecordTtl") is JsonElement minimumRecordTtl ? decimal.ToUInt32(minimumRecordTtl.GetDecimal()) : null,
+                Read(cache, "maximumRecordTtl", "maximumRecordTtl") is JsonElement maximumRecordTtl ? decimal.ToUInt32(maximumRecordTtl.GetDecimal()) : null,
+                Read(cache, "negativeRecordTtl", "negativeRecordTtl") is JsonElement negativeRecordTtl ? decimal.ToUInt32(negativeRecordTtl.GetDecimal()) : null,
+                Read(cache, "failureRecordTtl", "failureRecordTtl") is JsonElement failureRecordTtl ? decimal.ToUInt32(failureRecordTtl.GetDecimal()) : null);
+
+            static JsonElement? Read(JsonElement section, string field, string path)
+            {
+                if (section.ValueKind != JsonValueKind.Object || !section.TryGetProperty(field, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/cache/" + path].Default : value;
+            }
         }
 
         private static DnsServer.RecursionPolicy GetRecursionPolicy(ConfigurationManifest manifest)

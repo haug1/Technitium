@@ -165,7 +165,18 @@ namespace DnsServerCore.Dns
             ResolverRetries = 1UL << 34,
             ResolverTimeout = 1UL << 35,
             ResolverConcurrency = 1UL << 36,
-            ResolverMaxStackCount = 1UL << 37
+            ResolverMaxStackCount = 1UL << 37,
+            CacheSaveToDisk = 1UL << 38,
+            CacheServeStale = 1UL << 39,
+            CacheStaleTtl = 1UL << 40,
+            CacheStaleAnswerTtl = 1UL << 41,
+            CacheStaleResetTtl = 1UL << 42,
+            CacheStaleMaxWait = 1UL << 43,
+            CacheMaximumEntries = 1UL << 44,
+            CacheMinimumRecordTtl = 1UL << 45,
+            CacheMaximumRecordTtl = 1UL << 46,
+            CacheNegativeRecordTtl = 1UL << 47,
+            CacheFailureRecordTtl = 1UL << 48
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -185,6 +196,11 @@ namespace DnsServerCore.Dns
             int? ResolverRetries = null, int? ResolverTimeout = null, int? ResolverConcurrency = null, int? ResolverMaxStackCount = null);
 
         internal readonly record struct DnsLoggingSettings(bool? IgnoreResolverLogs, bool? LogQueries);
+
+        internal readonly record struct CachePolicy(
+            bool? SaveToDisk, bool? ServeStale, uint? StaleTtl, uint? StaleAnswerTtl, uint? StaleResetTtl,
+            int? StaleMaxWait, long? MaximumEntries, uint? MinimumRecordTtl, uint? MaximumRecordTtl,
+            uint? NegativeRecordTtl, uint? FailureRecordTtl);
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -696,14 +712,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -803,8 +819,14 @@ namespace DnsServerCore.Dns
             ManagedDnsSettings.RandomizeName | ManagedDnsSettings.QnameMinimization | ManagedDnsSettings.LocallyServedDnsZones |
             ManagedDnsSettings.ResolverRetries | ManagedDnsSettings.ResolverTimeout | ManagedDnsSettings.ResolverConcurrency | ManagedDnsSettings.ResolverMaxStackCount;
 
+        private const ManagedDnsSettings CacheOwnership = ManagedDnsSettings.CacheSaveToDisk | ManagedDnsSettings.CacheServeStale |
+            ManagedDnsSettings.CacheStaleTtl | ManagedDnsSettings.CacheStaleAnswerTtl | ManagedDnsSettings.CacheStaleResetTtl |
+            ManagedDnsSettings.CacheStaleMaxWait | ManagedDnsSettings.CacheMaximumEntries | ManagedDnsSettings.CacheMinimumRecordTtl |
+            ManagedDnsSettings.CacheMaximumRecordTtl | ManagedDnsSettings.CacheNegativeRecordTtl | ManagedDnsSettings.CacheFailureRecordTtl;
+        internal bool HasManagedCachePolicy => (_managedDnsSettings & CacheOwnership) != 0;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership)) != 0;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership)) != 0;
         internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy;
 
         internal IEnumerable<string> GetManagedDnsPaths()
@@ -832,6 +854,28 @@ namespace DnsServerCore.Dns
                 yield return "/dns/recursion/concurrency";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverMaxStackCount))
                 yield return "/dns/recursion/maxStackCount";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheSaveToDisk))
+                yield return "/dns/cache/saveToDisk";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheServeStale))
+                yield return "/dns/cache/serveStale/enabled";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleTtl))
+                yield return "/dns/cache/serveStale/ttl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleAnswerTtl))
+                yield return "/dns/cache/serveStale/answerTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleResetTtl))
+                yield return "/dns/cache/serveStale/resetTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleMaxWait))
+                yield return "/dns/cache/serveStale/maxWaitMs";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheMaximumEntries))
+                yield return "/dns/cache/maximumEntries";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheMinimumRecordTtl))
+                yield return "/dns/cache/minimumRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheMaximumRecordTtl))
+                yield return "/dns/cache/maximumRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheNegativeRecordTtl))
+                yield return "/dns/cache/negativeRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheFailureRecordTtl))
+                yield return "/dns/cache/failureRecordTtl";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1141,6 +1185,74 @@ namespace DnsServerCore.Dns
                 if (value < minimum || value > maximum)
                     throw new DnsWebServiceException($"/dns/recursion/{field}: Valid range is from {minimum} to {maximum}.");
             }
+        }
+
+        internal CachePolicy CheckManifestCachePolicy(CachePolicy cache, bool validateRanges = true)
+        {
+            if (validateRanges)
+            {
+                ValidateRange(cache.StaleTtl, 0, 604800, "serveStale/ttl");
+                ValidateRange(cache.StaleAnswerTtl, 0, 300, "serveStale/answerTtl");
+                ValidateRange(cache.StaleResetTtl, 10, 900, "serveStale/resetTtl");
+                ValidateRange(cache.StaleMaxWait, 0, 1800, "serveStale/maxWaitMs");
+                ValidateRange(cache.MaximumEntries, 0, long.MaxValue, "maximumEntries");
+            }
+
+            return cache with
+            {
+                SaveToDisk = Check(ManagedDnsSettings.CacheSaveToDisk, cache.SaveToDisk, _saveCacheToDisk, "saveToDisk"),
+                ServeStale = Check(ManagedDnsSettings.CacheServeStale, cache.ServeStale, _serveStale, "serveStale/enabled"),
+                StaleTtl = Check(ManagedDnsSettings.CacheStaleTtl, cache.StaleTtl, _cacheZoneManager.ServeStaleTtl, "serveStale/ttl"),
+                StaleAnswerTtl = Check(ManagedDnsSettings.CacheStaleAnswerTtl, cache.StaleAnswerTtl, _cacheZoneManager.ServeStaleAnswerTtl, "serveStale/answerTtl"),
+                StaleResetTtl = Check(ManagedDnsSettings.CacheStaleResetTtl, cache.StaleResetTtl, _cacheZoneManager.ServeStaleResetTtl, "serveStale/resetTtl"),
+                StaleMaxWait = Check(ManagedDnsSettings.CacheStaleMaxWait, cache.StaleMaxWait, _serveStaleMaxWaitTime, "serveStale/maxWaitMs"),
+                MaximumEntries = Check(ManagedDnsSettings.CacheMaximumEntries, cache.MaximumEntries, _cacheZoneManager.MaximumEntries, "maximumEntries"),
+                MinimumRecordTtl = Check(ManagedDnsSettings.CacheMinimumRecordTtl, cache.MinimumRecordTtl, _cacheZoneManager.MinimumRecordTtl, "minimumRecordTtl"),
+                MaximumRecordTtl = Check(ManagedDnsSettings.CacheMaximumRecordTtl, cache.MaximumRecordTtl, _cacheZoneManager.MaximumRecordTtl, "maximumRecordTtl"),
+                NegativeRecordTtl = Check(ManagedDnsSettings.CacheNegativeRecordTtl, cache.NegativeRecordTtl, _cacheZoneManager.NegativeRecordTtl, "negativeRecordTtl"),
+                FailureRecordTtl = Check(ManagedDnsSettings.CacheFailureRecordTtl, cache.FailureRecordTtl, _cacheZoneManager.FailureRecordTtl, "failureRecordTtl")
+            };
+
+            T? Check<T>(ManagedDnsSettings flag, T? candidate, T current, string field) where T : struct
+            {
+                if (!_managedDnsSettings.HasFlag(flag))
+                    return candidate;
+                if (candidate.HasValue && !candidate.Value.Equals(current))
+                    throw new DnsWebServiceException($"/dns/cache/{field}: Setting is managed by the configuration manifest.");
+                return null;
+            }
+
+            static void ValidateRange(long? value, long minimum, long maximum, string field)
+            {
+                if (value < minimum || value > maximum)
+                    throw new DnsWebServiceException($"/dns/cache/{field}: Valid range is from {minimum} to {maximum}.");
+            }
+        }
+
+        internal void SetCachePolicy(CachePolicy cache)
+        {
+            if (cache.SaveToDisk.HasValue)
+                SaveCacheToDisk = cache.SaveToDisk.Value;
+            if (cache.ServeStale.HasValue && cache.ServeStale != _serveStale)
+                ServeStale = cache.ServeStale.Value;
+            if (cache.StaleTtl.HasValue && cache.StaleTtl != _cacheZoneManager.ServeStaleTtl)
+                CacheZoneManager.ServeStaleTtl = cache.StaleTtl.Value;
+            if (cache.StaleAnswerTtl.HasValue && cache.StaleAnswerTtl != _cacheZoneManager.ServeStaleAnswerTtl)
+                CacheZoneManager.ServeStaleAnswerTtl = cache.StaleAnswerTtl.Value;
+            if (cache.StaleResetTtl.HasValue && cache.StaleResetTtl != _cacheZoneManager.ServeStaleResetTtl)
+                CacheZoneManager.ServeStaleResetTtl = cache.StaleResetTtl.Value;
+            if (cache.StaleMaxWait.HasValue && cache.StaleMaxWait != _serveStaleMaxWaitTime)
+                ServeStaleMaxWaitTime = cache.StaleMaxWait.Value;
+            if (cache.MaximumEntries.HasValue && cache.MaximumEntries != _cacheZoneManager.MaximumEntries)
+                CacheZoneManager.MaximumEntries = cache.MaximumEntries.Value;
+            if (cache.MinimumRecordTtl.HasValue && cache.MinimumRecordTtl != _cacheZoneManager.MinimumRecordTtl)
+                CacheZoneManager.MinimumRecordTtl = cache.MinimumRecordTtl.Value;
+            if (cache.MaximumRecordTtl.HasValue && cache.MaximumRecordTtl != _cacheZoneManager.MaximumRecordTtl)
+                CacheZoneManager.MaximumRecordTtl = cache.MaximumRecordTtl.Value;
+            if (cache.NegativeRecordTtl.HasValue && cache.NegativeRecordTtl != _cacheZoneManager.NegativeRecordTtl)
+                CacheZoneManager.NegativeRecordTtl = cache.NegativeRecordTtl.Value;
+            if (cache.FailureRecordTtl.HasValue && cache.FailureRecordTtl != _cacheZoneManager.FailureRecordTtl)
+                CacheZoneManager.FailureRecordTtl = cache.FailureRecordTtl.Value;
         }
 
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
@@ -1690,48 +1802,52 @@ namespace DnsServerCore.Dns
 
             //cache
             bool saveCacheToDisk = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheSaveToDisk)))
                 _saveCacheToDisk = saveCacheToDisk;
 
             bool serveStale = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheServeStale)))
                 _serveStale = serveStale;
 
             uint serveStaleTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleTtl)))
                 _cacheZoneManager.ServeStaleTtl = serveStaleTtl;
 
             uint serveStaleAnswerTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleAnswerTtl)))
                 _cacheZoneManager.ServeStaleAnswerTtl = serveStaleAnswerTtl;
 
             uint serveStaleResetTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleResetTtl)))
                 _cacheZoneManager.ServeStaleResetTtl = serveStaleResetTtl;
 
             int serveStaleMaxWaitTime = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheStaleMaxWait)))
                 _serveStaleMaxWaitTime = serveStaleMaxWaitTime;
 
             long cacheMaximumEntries = bR.ReadInt64();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheMaximumEntries)))
                 _cacheZoneManager.MaximumEntries = cacheMaximumEntries;
 
             uint minimumRecordTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheMinimumRecordTtl)))
                 _cacheZoneManager.MinimumRecordTtl = minimumRecordTtl;
 
             uint maximumRecordTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheMaximumRecordTtl)))
                 _cacheZoneManager.MaximumRecordTtl = maximumRecordTtl;
 
             uint negativeRecordTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheNegativeRecordTtl)))
                 _cacheZoneManager.NegativeRecordTtl = negativeRecordTtl;
 
             uint failureRecordTtl = bR.ReadUInt32();
-            if (apply && !isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheFailureRecordTtl)))
                 _cacheZoneManager.FailureRecordTtl = failureRecordTtl;
+
+            if (!apply && !isConfigTransfer && HasManagedCachePolicy)
+                CheckManifestCachePolicy(new CachePolicy(saveCacheToDisk, serveStale, serveStaleTtl, serveStaleAnswerTtl, serveStaleResetTtl,
+                    serveStaleMaxWaitTime, cacheMaximumEntries, minimumRecordTtl, maximumRecordTtl, negativeRecordTtl, failureRecordTtl), validateRanges: false);
 
             if (version >= 7)
             {
@@ -1938,7 +2054,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2121,18 +2237,18 @@ namespace DnsServerCore.Dns
             bW.Write(recursion.ResolverMaxStackCount ?? _resolverMaxStackCount);
 
             //cache
-            bW.Write(_saveCacheToDisk);
-            bW.Write(_serveStale);
-            bW.Write(_cacheZoneManager.ServeStaleTtl);
-            bW.Write(_cacheZoneManager.ServeStaleAnswerTtl);
-            bW.Write(_cacheZoneManager.ServeStaleResetTtl);
-            bW.Write(_serveStaleMaxWaitTime);
+            bW.Write(cache.SaveToDisk ?? _saveCacheToDisk);
+            bW.Write(cache.ServeStale ?? _serveStale);
+            bW.Write(cache.StaleTtl ?? _cacheZoneManager.ServeStaleTtl);
+            bW.Write(cache.StaleAnswerTtl ?? _cacheZoneManager.ServeStaleAnswerTtl);
+            bW.Write(cache.StaleResetTtl ?? _cacheZoneManager.ServeStaleResetTtl);
+            bW.Write(cache.StaleMaxWait ?? _serveStaleMaxWaitTime);
 
-            bW.Write(_cacheZoneManager.MaximumEntries);
-            bW.Write(_cacheZoneManager.MinimumRecordTtl);
-            bW.Write(_cacheZoneManager.MaximumRecordTtl);
-            bW.Write(_cacheZoneManager.NegativeRecordTtl);
-            bW.Write(_cacheZoneManager.FailureRecordTtl);
+            bW.Write(cache.MaximumEntries ?? _cacheZoneManager.MaximumEntries);
+            bW.Write(cache.MinimumRecordTtl ?? _cacheZoneManager.MinimumRecordTtl);
+            bW.Write(cache.MaximumRecordTtl ?? _cacheZoneManager.MaximumRecordTtl);
+            bW.Write(cache.NegativeRecordTtl ?? _cacheZoneManager.NegativeRecordTtl);
+            bW.Write(cache.FailureRecordTtl ?? _cacheZoneManager.FailureRecordTtl);
 
             bW.Write(_enableCachePrefetch);
             bW.Write(_cachePrefetchEligibility);
@@ -7710,7 +7826,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7819,6 +7935,40 @@ namespace DnsServerCore.Dns
                     if (recursion.ResolverMaxStackCount.HasValue)
                         ownership |= ManagedDnsSettings.ResolverMaxStackCount;
 
+                    if (cache.SaveToDisk.HasValue)
+                        ownership |= ManagedDnsSettings.CacheSaveToDisk;
+                    if (cache.ServeStale.HasValue)
+                        ownership |= ManagedDnsSettings.CacheServeStale;
+                    if (cache.StaleTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheStaleTtl;
+                    if (cache.StaleAnswerTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheStaleAnswerTtl;
+                    if (cache.StaleResetTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheStaleResetTtl;
+                    if (cache.StaleMaxWait.HasValue)
+                        ownership |= ManagedDnsSettings.CacheStaleMaxWait;
+                    if (cache.MaximumEntries.HasValue)
+                        ownership |= ManagedDnsSettings.CacheMaximumEntries;
+                    if (cache.MinimumRecordTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheMinimumRecordTtl;
+                    if (cache.MaximumRecordTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheMaximumRecordTtl;
+                    if (cache.NegativeRecordTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheNegativeRecordTtl;
+                    if (cache.FailureRecordTtl.HasValue)
+                        ownership |= ManagedDnsSettings.CacheFailureRecordTtl;
+
+                    bool cacheChanged = (cache.SaveToDisk.HasValue && cache.SaveToDisk != _saveCacheToDisk) ||
+                        (cache.ServeStale.HasValue && cache.ServeStale != _serveStale) ||
+                        (cache.StaleTtl.HasValue && cache.StaleTtl != _cacheZoneManager.ServeStaleTtl) ||
+                        (cache.StaleAnswerTtl.HasValue && cache.StaleAnswerTtl != _cacheZoneManager.ServeStaleAnswerTtl) ||
+                        (cache.StaleResetTtl.HasValue && cache.StaleResetTtl != _cacheZoneManager.ServeStaleResetTtl) ||
+                        (cache.StaleMaxWait.HasValue && cache.StaleMaxWait != _serveStaleMaxWaitTime) ||
+                        (cache.MaximumEntries.HasValue && cache.MaximumEntries != _cacheZoneManager.MaximumEntries) ||
+                        (cache.MinimumRecordTtl.HasValue && cache.MinimumRecordTtl != _cacheZoneManager.MinimumRecordTtl) ||
+                        (cache.MaximumRecordTtl.HasValue && cache.MaximumRecordTtl != _cacheZoneManager.MaximumRecordTtl) ||
+                        (cache.NegativeRecordTtl.HasValue && cache.NegativeRecordTtl != _cacheZoneManager.NegativeRecordTtl) ||
+                        (cache.FailureRecordTtl.HasValue && cache.FailureRecordTtl != _cacheZoneManager.FailureRecordTtl);
                     bool recursionChanged = (recursion.Mode.HasValue && recursion.Mode != _recursion) ||
                         (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? [])) ||
                         (recursion.RandomizeName.HasValue && recursion.RandomizeName != _randomizeName) ||
@@ -7855,7 +8005,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7869,7 +8019,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache));
                         _pendingSave = false;
                     }
                     catch
@@ -7885,6 +8035,7 @@ namespace DnsServerCore.Dns
                     SetOutboundSocketSettings(outbound);
                     SetClientSubnetSettings(subnet);
                     SetDnsLoggingSettings(dnsLogging);
+                    SetCachePolicy(cache);
                     if (recursion.NetworkAcl is not null)
                         RecursionNetworkACL = recursion.NetworkAcl;
                     if (recursion.Mode.HasValue)

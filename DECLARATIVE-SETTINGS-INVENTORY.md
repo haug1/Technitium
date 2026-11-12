@@ -179,8 +179,8 @@ These fields persist in `dns.config`, apply live, and remain local during cluste
 | --- | --- | --- | --- |
 | `dns.cache.saveToDisk` | `saveCache` | Boolean, true | Disabling deletes the on-disk cache. |
 | `dns.cache.serveStale.enabled` | `serveStale` | Boolean, true | Enables stale answers. |
-| `dns.cache.serveStale.ttl` | `serveStaleTtl` | Unsigned seconds, 259200 | Use the DNS TTL parser for legacy API input. |
-| `dns.cache.serveStale.answerTtl` | `serveStaleAnswerTtl` | Unsigned seconds, 30 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.serveStale.ttl` | `serveStaleTtl` | Unsigned seconds, 259200 | Maximum 604800. Use the DNS TTL parser for legacy API input. |
+| `dns.cache.serveStale.answerTtl` | `serveStaleAnswerTtl` | Unsigned seconds, 30 | Maximum 300. Use the DNS TTL parser for legacy API input. |
 | `dns.cache.serveStale.resetTtl` | `serveStaleResetTtl` | Unsigned seconds, 30 | Range 10–900. |
 | `dns.cache.serveStale.maxWaitMs` | `serveStaleMaxWaitTime` | Integer milliseconds, 1800 | Range 0–1800. |
 | `dns.cache.maximumEntries` | `cacheMaximumEntries` | Signed 64-bit count, 10000 | Nonnegative. Zero disables the entry limit. |
