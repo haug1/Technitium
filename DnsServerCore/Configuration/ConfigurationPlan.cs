@@ -84,8 +84,8 @@ namespace DnsServerCore.Configuration
             ["/logging/noStackTrace"] = Field("noStackTrace", false, canApply: true),
             ["/logging/useLocalTime"] = Field("useLocalTime", false, canApply: true),
             ["/logging/retentionDays"] = Field("maxLogFileDays", 365, canApply: true),
-            ["/logging/ignoreResolverLogs"] = Field("ignoreResolverLogs", false),
-            ["/logging/logQueries"] = Field("logQueries", false),
+            ["/logging/ignoreResolverLogs"] = Field("ignoreResolverLogs", false, canApply: true),
+            ["/logging/logQueries"] = Field("logQueries", false, canApply: true),
             ["/statistics/inMemory"] = Field("enableInMemoryStats", false, canApply: true),
             ["/statistics/retentionDays"] = Field("maxStatFileDays", 365, canApply: true),
             ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24, canApply: true),
@@ -166,7 +166,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -425,6 +425,12 @@ namespace DnsServerCore.Configuration
             if (addresses.Count == 0)
                 throw new InvalidDataException("/web/localAddresses: No declared address family is available on this server.");
             return addresses;
+        }
+
+        private static DnsServer.DnsLoggingSettings GetDnsLoggingSettings(JsonElement logging)
+        {
+            return new DnsServer.DnsLoggingSettings(GetLoggingValue(logging, "ignoreResolverLogs")?.GetBoolean(),
+                GetLoggingValue(logging, "logQueries")?.GetBoolean());
         }
 
         private static JsonElement? GetLoggingValue(JsonElement logging, string name)

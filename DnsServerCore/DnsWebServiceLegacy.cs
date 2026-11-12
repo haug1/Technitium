@@ -210,6 +210,11 @@ namespace DnsServerCore
             if (!isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention))
                 throw new InvalidDataException("/statistics: Release statistics ownership before restoring DNS settings from a backup.");
 
+            if (!isConfigTransfer && _dnsServer.ManifestOwnsResolverLogging)
+                throw new InvalidDataException("/logging/ignoreResolverLogs: Release resolver logging ownership before restoring DNS settings from a backup.");
+            if (!isConfigTransfer && _dnsServer.ManifestOwnsQueryLogging)
+                throw new InvalidDataException("/logging/logQueries: Release query logging ownership before restoring DNS settings from a backup.");
+
             var reader = new BinaryReader(stream);
             string format = Encoding.ASCII.GetString(stream.ReadExactly(2));
             if (format == "DC")

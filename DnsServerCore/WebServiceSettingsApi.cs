@@ -944,6 +944,11 @@ namespace DnsServerCore
                 DnsServer.ClientSubnetSettings subnet = _dnsWebService._dnsServer.CheckManifestClientSubnet(
                     _dnsWebService._dnsServer.NormalizeClientSubnetSettings(requestedSubnet));
 
+                bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
+                bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
+                _dnsWebService._dnsServer.CheckManifestDnsLogging(new DnsServer.DnsLoggingSettings(
+                    hasIgnoreResolverLogs ? ignoreResolverLogs : null, hasLogQueries ? logQueries : null));
+
                 bool hasInMemoryStats = request.TryGetQueryOrForm("enableInMemoryStats", bool.Parse, out bool enableInMemoryStats);
                 bool hasStatRetention = request.TryGetQueryOrForm("maxStatFileDays", int.Parse, out int maxStatFileDays);
                 _dnsWebService._dnsServer.CheckManifestStatistics(new DnsServer.StatisticsSettings(
@@ -1988,10 +1993,10 @@ namespace DnsServerCore
                         if (destination.HasValue)
                             _dnsWebService._log.LoggingType = destination.Value;
 
-                        if (request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs))
+                        if (hasIgnoreResolverLogs && !_dnsWebService._dnsServer.ManifestOwnsResolverLogging)
                             _dnsWebService._dnsServer.ResolverLogManager = ignoreResolverLogs ? null : _dnsWebService._log;
 
-                        if (request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries))
+                        if (hasLogQueries && !_dnsWebService._dnsServer.ManifestOwnsQueryLogging)
                             _dnsWebService._dnsServer.QueryLogManager = logQueries ? _dnsWebService._log : null;
 
                         if (noStackTrace.HasValue)

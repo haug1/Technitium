@@ -154,7 +154,9 @@ namespace DnsServerCore.Dns
             ClientSubnetIpv4Prefix = 8388608,
             ClientSubnetIpv6Prefix = 16777216,
             ClientSubnetIpv4Override = 33554432,
-            ClientSubnetIpv6Override = 67108864
+            ClientSubnetIpv6Override = 67108864,
+            IgnoreResolverLogs = 134217728,
+            LogQueries = 268435456
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -168,6 +170,8 @@ namespace DnsServerCore.Dns
 
         internal readonly record struct ClientSubnetSettings(bool? Enabled, byte? Ipv4Prefix, byte? Ipv6Prefix,
             bool HasIpv4Override, NetworkAddress Ipv4Override, bool HasIpv6Override, NetworkAddress Ipv6Override);
+
+        internal readonly record struct DnsLoggingSettings(bool? IgnoreResolverLogs, bool? LogQueries);
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -679,14 +683,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -775,8 +779,12 @@ namespace DnsServerCore.Dns
             ManagedDnsSettings.ClientSubnetIpv4Override | ManagedDnsSettings.ClientSubnetIpv6Override;
         internal bool HasManagedClientSubnet => (_managedDnsSettings & ClientSubnetOwnership) != 0;
 
+        internal bool ManifestOwnsResolverLogging => _managedDnsSettings.HasFlag(ManagedDnsSettings.IgnoreResolverLogs);
+        internal bool ManifestOwnsQueryLogging => _managedDnsSettings.HasFlag(ManagedDnsSettings.LogQueries);
+        private const ManagedDnsSettings DnsLoggingOwnership = ManagedDnsSettings.IgnoreResolverLogs | ManagedDnsSettings.LogQueries;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership)) != 0;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership)) != 0;
         internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet;
 
         internal IEnumerable<string> GetManagedDnsPaths()
@@ -808,6 +816,10 @@ namespace DnsServerCore.Dns
                 yield return "/dns/udpSocketPool/excludedPorts";
             if (ManifestOwnsAppAutoUpdate)
                 yield return "/apps/autoUpdate";
+            if (ManifestOwnsResolverLogging)
+                yield return "/logging/ignoreResolverLogs";
+            if (ManifestOwnsQueryLogging)
+                yield return "/logging/logQueries";
             if (ManifestOwnsInMemoryStatistics)
                 yield return "/statistics/inMemory";
             if (ManifestOwnsStatisticsRetention)
@@ -1042,6 +1054,22 @@ namespace DnsServerCore.Dns
         {
             if (ManifestOwnsAppAutoUpdate && enabled != _dnsApplicationManager.EnableAutomaticUpdate)
                 throw new DnsWebServiceException("/apps/autoUpdate: Setting is managed by the configuration manifest.");
+        }
+
+        internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
+        {
+            if (ManifestOwnsResolverLogging && settings.IgnoreResolverLogs.HasValue && settings.IgnoreResolverLogs != (_resolverLog is null))
+                throw new DnsWebServiceException("/logging/ignoreResolverLogs: Setting is managed by the configuration manifest.");
+            if (ManifestOwnsQueryLogging && settings.LogQueries.HasValue && settings.LogQueries != (_queryLog is not null))
+                throw new DnsWebServiceException("/logging/logQueries: Setting is managed by the configuration manifest.");
+        }
+
+        private void SetDnsLoggingSettings(DnsLoggingSettings settings)
+        {
+            if (settings.IgnoreResolverLogs.HasValue)
+                ResolverLogManager = settings.IgnoreResolverLogs.Value ? null : _log;
+            if (settings.LogQueries.HasValue)
+                QueryLogManager = settings.LogQueries.Value ? _log : null;
         }
 
         internal void CheckManifestStatistics(StatisticsSettings settings)
@@ -1736,7 +1764,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2007,8 +2035,8 @@ namespace DnsServerCore.Dns
             bW.Write(_forwarderConcurrency);
 
             //logging
-            bW.Write(_resolverLog is null); //ignore resolver logs
-            bW.Write(_queryLog is not null); //log all queries
+            bW.Write(dnsLogging.IgnoreResolverLogs ?? (_resolverLog is null));
+            bW.Write(dnsLogging.LogQueries ?? (_queryLog is not null));
             bW.Write(statistics.InMemory ?? _statsManager.EnableInMemoryStats);
             bW.Write(statistics.RetentionDays ?? _statsManager.MaxStatFileDays);
             // Existing version 7 readers stop after maxStatFileDays.
@@ -7516,7 +7544,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7600,6 +7628,13 @@ namespace DnsServerCore.Dns
                         (subnet.Ipv6Prefix.HasValue && subnet.Ipv6Prefix != _eDnsClientSubnetIPv6PrefixLength) ||
                         (subnet.HasIpv4Override && !Equals(subnet.Ipv4Override, _eDnsClientSubnetIpv4Override)) ||
                         (subnet.HasIpv6Override && !Equals(subnet.Ipv6Override, _eDnsClientSubnetIpv6Override));
+                    if (dnsLogging.IgnoreResolverLogs.HasValue)
+                        ownership |= ManagedDnsSettings.IgnoreResolverLogs;
+                    if (dnsLogging.LogQueries.HasValue)
+                        ownership |= ManagedDnsSettings.LogQueries;
+
+                    bool dnsLoggingChanged = (dnsLogging.IgnoreResolverLogs.HasValue && dnsLogging.IgnoreResolverLogs != (_resolverLog is null)) ||
+                        (dnsLogging.LogQueries.HasValue && dnsLogging.LogQueries != (_queryLog is not null));
                     bool excludedPortsChanged = outbound.ExcludedPorts is not null && !HaveSameSocketPoolExcludedPorts(outbound.ExcludedPorts);
                     bool ipv6Changed = outbound.Ipv6Mode.HasValue && outbound.Ipv6Mode != _ipv6Mode;
                     bool poolChanged = outbound.PoolEnabled.HasValue && outbound.PoolEnabled != _enableUdpSocketPool;
@@ -7625,7 +7660,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7639,7 +7674,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging));
                         _pendingSave = false;
                     }
                     catch
@@ -7654,6 +7689,7 @@ namespace DnsServerCore.Dns
 
                     SetOutboundSocketSettings(outbound);
                     SetClientSubnetSettings(subnet);
+                    SetDnsLoggingSettings(dnsLogging);
 
                     if (appAutoUpdateChanged)
                         _dnsApplicationManager.EnableAutomaticUpdate = appAutoUpdate.Value;
