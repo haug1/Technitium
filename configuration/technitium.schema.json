@@ -1,0 +1,1192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Technitium declarative configuration",
+  "description": "Draft manifest format. Runtime validation is required for names, capabilities, dependencies, and the effective configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "schemaVersion": {"const": 1},
+    "web": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "localAddresses": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255}, {"type": "null"}]},
+        "httpPort": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+        "tlsPort": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+        "httpUnixSocket": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "path": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "tlsUnixSocket": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "path": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "tlsEnabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "http3Enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "redirectHttpToTls": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "useSelfSignedCertificate": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "reverseProxyAcl": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/aclEntry"}, "maxItems": 255}, {"type": "null"}]},
+        "realIpHeader": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "frameAncestors": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "certificate": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+                "password": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]}
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "rootPath": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "destination": {"anyOf": [{"enum": ["None", "File", "Console", "FileAndConsole"]}, {"type": "null"}]},
+        "folder": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "noStackTrace": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "useLocalTime": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "retentionDays": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 2147483647}, {"type": "null"}]},
+        "ignoreResolverLogs": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "logQueries": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inMemory": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "retentionDays": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 2147483647}, {"type": "null"}]}
+      }
+    },
+    "blocklists": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sources": {"anyOf": [{"type": "array", "items": {"type": "string", "maxLength": 255}, "maxItems": 255}, {"type": "null"}]},
+        "updateIntervalHours": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 168}, {"type": "null"}]}
+      }
+    },
+    "dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serverDomain": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "localEndpoints": {"anyOf": [{"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 255}, {"type": "null"}]},
+        "sourceNetworks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ipv4": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/network"}, "maxItems": 255}, {"type": "null"}]},
+            "ipv6": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/network"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "authoritative": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "defaultRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "defaultNsRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "defaultSoaRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "defaultResponsiblePerson": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "useSoaSerialDateScheme": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "minSoaRefresh": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "minSoaRetry": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "zoneTransferAllowedNetworks": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/network"}, "maxItems": 255}, {"type": "null"}]},
+            "notifyAllowedNetworks": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/network"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "checkForUpdates": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "ipv6Mode": {"anyOf": [{"enum": ["Disabled", "Enabled", "Preferred"]}, {"type": "null"}]},
+        "udpSocketPool": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "excludedPorts": {
+              "anyOf": [
+                {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 65535}, "maxItems": 65535},
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "udpPayloadSize": {"anyOf": [{"type": "integer", "minimum": 512, "maximum": 4096}, {"type": "null"}]},
+        "dnssecValidation": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "clientSubnet": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "ipv4PrefixLength": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 32}, {"type": "null"}]},
+            "ipv6PrefixLength": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 64}, {"type": "null"}]},
+            "ipv4Override": {"anyOf": [{"$ref": "#/$defs/network"}, {"type": "null"}]},
+            "ipv6Override": {"anyOf": [{"$ref": "#/$defs/network"}, {"type": "null"}]}
+          }
+        },
+        "rateLimits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ipv4": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "prefix": {"type": "integer", "minimum": 0, "maximum": 32},
+                      "udpLimit": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+                      "tcpLimit": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+                    },
+                    "required": ["prefix", "udpLimit", "tcpLimit"]
+                  },
+                  "maxItems": 255
+                },
+                {"type": "null"}
+              ]
+            },
+            "ipv6": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "prefix": {"type": "integer", "minimum": 0, "maximum": 128},
+                      "udpLimit": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+                      "tcpLimit": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+                    },
+                    "required": ["prefix", "udpLimit", "tcpLimit"]
+                  },
+                  "maxItems": 255
+                },
+                {"type": "null"}
+              ]
+            },
+            "sampleMinutes": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 60}, {"type": "null"}]},
+            "udpTruncationPercentage": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 100}, {"type": "null"}]},
+            "bypassNetworks": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/network"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "tuning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clientTimeoutMs": {"anyOf": [{"type": "integer", "minimum": 1000, "maximum": 10000}, {"type": "null"}]},
+            "tcpSendTimeoutMs": {"anyOf": [{"type": "integer", "minimum": 1000, "maximum": 90000}, {"type": "null"}]},
+            "tcpReceiveTimeoutMs": {"anyOf": [{"type": "integer", "minimum": 1000, "maximum": 90000}, {"type": "null"}]},
+            "quicIdleTimeoutMs": {"anyOf": [{"type": "integer", "minimum": 1000, "maximum": 90000}, {"type": "null"}]},
+            "quicMaxInboundStreams": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1000}, {"type": "null"}]},
+            "listenBacklog": {"anyOf": [{"type": "integer", "minimum": -2147483648, "maximum": 2147483647}, {"type": "null"}]},
+            "udpSendBufferKiB": {"anyOf": [{"type": "integer", "minimum": 8, "maximum": 65536}, {"type": "null"}]},
+            "udpReceiveBufferKiB": {"anyOf": [{"type": "integer", "minimum": 8, "maximum": 65536}, {"type": "null"}]},
+            "maxConcurrentResolutionsPerCore": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 65535}, {"type": "null"}]}
+          }
+        },
+        "listeners": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "useClientSubnetAsSource": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "udpProxy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "port": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]}
+              }
+            },
+            "tcpProxy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "port": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]}
+              }
+            },
+            "http": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "port": {
+                  "anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535, "not": {"enum": [53, 853]}}, {"type": "null"}]
+                },
+                "unixSocket": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                        "path": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                      }
+                    },
+                    {"type": "null"}
+                  ]
+                },
+                "helpRedirect": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "realIpHeader": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]}
+              }
+            },
+            "https": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "unixSocket": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                        "path": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                      }
+                    },
+                    {"type": "null"}
+                  ]
+                },
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "port": {
+                  "anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535, "not": {"enum": [53, 853]}}, {"type": "null"}]
+                },
+                "http3Enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+              }
+            },
+            "tls": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "port": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535, "not": {"const": 53}}, {"type": "null"}]}
+              }
+            },
+            "quic": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "port": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535, "not": {"const": 53}}, {"type": "null"}]}
+              }
+            },
+            "reverseProxyAcl": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/aclEntry"}, "maxItems": 255}, {"type": "null"}]},
+            "certificate": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+                    "password": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]}
+                  }
+                },
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "recursion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "anyOf": [{"enum": ["Deny", "Allow", "AllowOnlyForPrivateNetworks", "UseSpecifiedNetworkACL"]}, {"type": "null"}]
+            },
+            "networkAcl": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/aclEntry"}, "maxItems": 255}, {"type": "null"}]},
+            "randomizeName": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "qnameMinimization": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "locallyServedDnsZones": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "retries": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 10}, {"type": "null"}]},
+            "timeoutMs": {"anyOf": [{"type": "integer", "minimum": 1000, "maximum": 10000}, {"type": "null"}]},
+            "concurrency": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 4}, {"type": "null"}]},
+            "maxStackCount": {"anyOf": [{"type": "integer", "minimum": 10, "maximum": 30}, {"type": "null"}]}
+          }
+        },
+        "proxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {"anyOf": [{"enum": ["None", "Http", "Socks5"]}, {"type": "null"}]},
+            "address": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "port": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+            "username": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "password": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+            "bypass": {
+              "anyOf": [{"type": "array", "items": {"type": "string", "maxLength": 255}, "maxItems": 255}, {"type": "null"}]
+            }
+          }
+        },
+        "forwarding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "servers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/nameserver"}, "maxItems": 255}, {"type": "null"}]},
+            "concurrent": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "retries": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 10}, {"type": "null"}]},
+            "timeoutMs": {"anyOf": [{"type": "integer", "minimum": 1000, "maximum": 10000}, {"type": "null"}]},
+            "concurrency": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 10}, {"type": "null"}]}
+          }
+        },
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "saveToDisk": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "serveStale": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "ttl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+                "answerTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+                "resetTtl": {"anyOf": [{"type": "integer", "minimum": 10, "maximum": 900}, {"type": "null"}]},
+                "maxWaitMs": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1800}, {"type": "null"}]}
+              }
+            },
+            "maximumEntries": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 9223372036854775807}, {"type": "null"}]},
+            "minimumRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "maximumRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "negativeRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "failureRecordTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "prefetch": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                "eligibility": {"anyOf": [{"type": "integer", "minimum": 2, "maximum": 2147483647}, {"type": "null"}]},
+                "trigger": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 2147483647}, {"type": "null"}]}
+              }
+            }
+          }
+        },
+        "blocking": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "allowTxtReport": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "bypassNetworks": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/network"}, "maxItems": 255}, {"type": "null"}]},
+            "responseType": {"anyOf": [{"enum": ["AnyAddress", "NxDomain", "CustomAddress"]}, {"type": "null"}]},
+            "answerTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "customAddresses": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "tsigKeys": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "algorithm": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+                      "secret": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]}
+                    }
+                  },
+                  {"type": "null"}
+                ]
+              }
+            },
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "allowZones": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+    "blockZones": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+    "dhcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scopes": {
+          "anyOf": [
+            {"type": "object", "additionalProperties": {"anyOf": [{"$ref": "#/$defs/dhcpScope"}, {"type": "null"}]}},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "users": {
+          "anyOf": [
+            {"type": "object", "additionalProperties": {"anyOf": [{"$ref": "#/$defs/user"}, {"type": "null"}]}},
+            {"type": "null"}
+          ]
+        },
+        "groups": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"description": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]}}
+                  },
+                  {"type": "null"}
+                ]
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "permissions": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "users": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {"enum": ["View", "Modify", "Delete"]},
+                              "maxItems": 3,
+                              "uniqueItems": true
+                            },
+                            {"type": "null"}
+                          ]
+                        }
+                      },
+                      "groups": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {"enum": ["View", "Modify", "Delete"]},
+                              "maxItems": 3,
+                              "uniqueItems": true
+                            },
+                            {"type": "null"}
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {"type": "null"}
+                ]
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "staticSessions": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"user": {"type": "string", "minLength": 1}, "token": {"$ref": "#/$defs/secretReference"}},
+                    "required": ["user", "token"]
+                  },
+                  {"type": "null"}
+                ]
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "sso": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "authority": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "clientId": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "clientSecret": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+            "metadataAddress": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "scopes": {"anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 255}, {"type": "null"}]},
+            "allowSignup": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "allowSignupOnlyForMappedUsers": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "groupMap": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]}
+                },
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "ldap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "server": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "port": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 65535}, {"type": "null"}]},
+            "sslOption": {"anyOf": [{"enum": ["None", "StartTLS", "LDAPS"]}, {"type": "null"}]},
+            "ignoreSslErrors": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "bindUsername": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "bindPassword": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+            "searchBase": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "userSearchFilter": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "groupAttribute": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "allowSignup": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "allowSignupOnlyForMappedUsers": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "groupMap": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]}
+                },
+                {"type": "null"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "apps": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "autoUpdate": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "packages": {
+          "anyOf": [
+            {"type": "object", "additionalProperties": {"anyOf": [{"$ref": "#/$defs/appPackage"}, {"type": "null"}]}},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "cluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "role": {"anyOf": [{"enum": ["Primary", "Secondary"]}, {"type": "null"}]},
+            "primaryUrl": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+            "primaryAddress": {"anyOf": [{"$ref": "#/$defs/ipAddress"}, {"type": "null"}]},
+            "username": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+            "password": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+            "totp": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+            "ignoreCertificateErrors": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+          }
+        },
+        "domain": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "node": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "addresses": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "heartbeatRefreshSeconds": {"anyOf": [{"type": "integer", "minimum": 10, "maximum": 300}, {"type": "null"}]},
+        "heartbeatRetrySeconds": {"anyOf": [{"type": "integer", "minimum": 10, "maximum": 300}, {"type": "null"}]},
+        "configRefreshSeconds": {"anyOf": [{"type": "integer", "minimum": 30, "maximum": 3600}, {"type": "null"}]},
+        "configRetrySeconds": {"anyOf": [{"type": "integer", "minimum": 30, "maximum": 3600}, {"type": "null"}]}
+      }
+    },
+    "zones": {"type": "object", "additionalProperties": {"anyOf": [{"$ref": "#/$defs/zone"}, {"type": "null"}]}}
+  },
+  "required": ["schemaVersion"],
+  "$defs": {
+    "ipAddress": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "string", "format": "ipv6"}]},
+    "ipv4Address": {"type": "string", "format": "ipv4"},
+    "network": {
+      "type": "string",
+      "minLength": 1,
+      "description": "IP address or CIDR network. The server validates address families and prefixes."
+    },
+    "aclEntry": {"type": "string", "minLength": 1, "description": "Network ACL entry. A leading ! denies the network."},
+    "secretReference": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"environment": {"type": "string", "minLength": 1}},
+          "required": ["environment"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"file": {"type": "string", "minLength": 1}},
+          "required": ["file"]
+        }
+      ]
+    },
+    "nameserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"address": {"type": "string", "minLength": 1}, "transport": {"enum": ["Udp", "Tcp", "Tls", "Https", "Quic"]}},
+      "required": ["address"]
+    },
+    "recordType": {"anyOf": [{"type": "string", "pattern": "^[A-Z][A-Z0-9-]*$"}, {"type": "integer", "minimum": 1, "maximum": 65535}]},
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "owner": {"type": "string"},
+        "type": {"$ref": "#/$defs/recordType"},
+        "data": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {"zoneFile": {"type": "string"}},
+              "required": ["zoneFile"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {"rawHex": {"type": "string", "pattern": "^(?:[0-9A-Fa-f]{2})*$"}},
+              "required": ["rawHex"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {"txtBase64": {"type": "array", "items": {"type": "string", "contentEncoding": "base64"}}},
+              "required": ["txtBase64"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "forwarder": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "address": {"type": "string", "minLength": 1},
+                    "transport": {"enum": ["Udp", "Tcp", "Tls", "Https", "Quic"]},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "dnssecValidation": {"type": "boolean"},
+                    "proxy": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {"enum": ["DefaultProxy", "NoProxy", "Http", "Socks5"]},
+                        "address": {"type": "string", "maxLength": 255},
+                        "port": {"type": "integer", "minimum": 0, "maximum": 65535},
+                        "username": {"type": "string", "maxLength": 255},
+                        "password": {"$ref": "#/$defs/secretReference"}
+                      },
+                      "required": ["type"]
+                    }
+                  },
+                  "required": ["address"]
+                }
+              },
+              "required": ["forwarder"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "app": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "classPath": {"type": "string", "minLength": 1},
+                    "configuration": {"$ref": "#/$defs/appConfiguration"}
+                  },
+                  "required": ["name", "classPath"]
+                }
+              },
+              "required": ["app"]
+            }
+          ]
+        },
+        "ttl": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "disabled": {"type": "boolean"},
+        "comments": {"type": "string"},
+        "expiryTtl": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "glue": {"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255},
+        "useSerialDateScheme": {"type": "boolean"},
+        "autoIpv4Hint": {"type": "boolean"},
+        "autoIpv6Hint": {"type": "boolean"}
+      },
+      "required": ["owner", "type", "data"]
+    },
+    "signingKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {"anyOf": [{"enum": ["KeySigningKey", "ZoneSigningKey"]}, {"type": "null"}]},
+        "algorithm": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "hashAlgorithm": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "curve": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "keySize": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 2147483647}, {"type": "null"}]},
+        "privateKey": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+        "rolloverDays": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 365}, {"type": "null"}]}
+      }
+    },
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "anyOf": [
+            {"enum": ["Primary", "Secondary", "Stub", "Forwarder", "SecondaryForwarder", "Catalog", "SecondaryCatalog"]},
+            {"type": "null"}
+          ]
+        },
+        "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "overrideQueryAccess": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "overrideZoneTransfer": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "overrideNotify": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+          }
+        },
+        "primary": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "servers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/nameserver"}, "maxItems": 255}, {"type": "null"}]},
+            "transferProtocol": {"anyOf": [{"enum": ["Udp", "Tcp", "Tls", "Https", "Quic"]}, {"type": "null"}]},
+            "tsigKey": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+            "validateZone": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+          }
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "Deny",
+                    "Allow",
+                    "AllowOnlyPrivateNetworks",
+                    "AllowOnlyZoneNameServers",
+                    "UseSpecifiedNetworkACL",
+                    "AllowZoneNameServersAndUseSpecifiedNetworkACL"
+                  ]
+                },
+                {"type": "null"}
+              ]
+            },
+            "networkAcl": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/aclEntry"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "transfer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "Deny",
+                    "Allow",
+                    "AllowOnlyZoneNameServers",
+                    "UseSpecifiedNetworkACL",
+                    "AllowZoneNameServersAndUseSpecifiedNetworkACL"
+                  ]
+                },
+                {"type": "null"}
+              ]
+            },
+            "networkAcl": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/aclEntry"}, "maxItems": 255}, {"type": "null"}]},
+            "tsigKeys": {"anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "notify": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "None",
+                    "ZoneNameServers",
+                    "SpecifiedNameServers",
+                    "BothZoneAndSpecifiedNameServers",
+                    "SeparateNameServersForCatalogAndMemberZones"
+                  ]
+                },
+                {"type": "null"}
+              ]
+            },
+            "nameServers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255}, {"type": "null"}]},
+            "secondaryCatalogNameServers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "updates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "Deny",
+                    "Allow",
+                    "AllowOnlyZoneNameServers",
+                    "UseSpecifiedNetworkACL",
+                    "AllowZoneNameServersAndUseSpecifiedNetworkACL"
+                  ]
+                },
+                {"type": "null"}
+              ]
+            },
+            "networkAcl": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/aclEntry"}, "maxItems": 255}, {"type": "null"}]},
+            "securityPolicies": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/recordType"}}, {"type": "null"}]}
+                      },
+                      {"type": "null"}
+                    ]
+                  }
+                },
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "permissions": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "users": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {"enum": ["View", "Modify", "Delete"]},
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {"type": "null"}
+                    ]
+                  }
+                },
+                "groups": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {"enum": ["View", "Modify", "Delete"]},
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {"type": "null"}
+                    ]
+                  }
+                }
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "records": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/record"}}, {"type": "null"}]},
+        "dnssec": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "dnsKeyTtl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]},
+            "proof": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {"anyOf": [{"enum": ["NSEC", "NSEC3"]}, {"type": "null"}]},
+                "iterations": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+                "saltLength": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 255}, {"type": "null"}]}
+              }
+            },
+            "keys": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {"anyOf": [{"$ref": "#/$defs/signingKey"}, {"type": "null"}]}
+                },
+                {"type": "null"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "dhcpScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "startingAddress": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+        "endingAddress": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+        "subnetMask": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+        "leaseTime": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "days": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 999}, {"type": "null"}]},
+            "hours": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 23}, {"type": "null"}]},
+            "minutes": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 59}, {"type": "null"}]}
+          }
+        },
+        "offerDelayMs": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+        "pingCheck": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "timeoutMs": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+            "retries": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 255}, {"type": "null"}]}
+          }
+        },
+        "domainName": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "domainSearchList": {"anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 255}, {"type": "null"}]},
+        "dnsUpdates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "overwriteDynamicRecords": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "ttl": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 4294967295}, {"type": "null"}]}
+          }
+        },
+        "boot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "serverAddress": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+            "serverHostName": {"anyOf": [{"type": "string", "maxLength": 63}, {"type": "null"}]},
+            "fileName": {"anyOf": [{"type": "string", "maxLength": 127}, {"type": "null"}]}
+          }
+        },
+        "routerAddress": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+        "dns": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "useThisServer": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "servers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipv4Address"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "winsServers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipv4Address"}, "maxItems": 255}, {"type": "null"}]},
+        "ntp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "servers": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipv4Address"}, "maxItems": 255}, {"type": "null"}]},
+            "serverDomainNames": {"anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 255}, {"type": "null"}]}
+          }
+        },
+        "staticRoutes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "destination": {"$ref": "#/$defs/ipv4Address"},
+                  "subnetMask": {"$ref": "#/$defs/ipv4Address"},
+                  "router": {"$ref": "#/$defs/ipv4Address"}
+                },
+                "required": ["destination", "subnetMask", "router"]
+              },
+              "maxItems": 255
+            },
+            {"type": "null"}
+          ]
+        },
+        "vendorInfo": {
+          "anyOf": [
+            {"type": "object", "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+            {"type": "null"}
+          ]
+        },
+        "capwapAcIpAddresses": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipv4Address"}, "maxItems": 255}, {"type": "null"}]},
+        "tftpServerAddresses": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipv4Address"}, "maxItems": 255}, {"type": "null"}]},
+        "genericOptions": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "code": {"type": "integer", "minimum": 0, "maximum": 255},
+                  "value": {"type": "string", "pattern": "^(?:[0-9A-Fa-f]{2})*$"}
+                },
+                "required": ["code", "value"]
+              },
+              "maxItems": 255
+            },
+            {"type": "null"}
+          ]
+        },
+        "exclusions": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"startingAddress": {"$ref": "#/$defs/ipv4Address"}, "endingAddress": {"$ref": "#/$defs/ipv4Address"}},
+                "required": ["startingAddress", "endingAddress"]
+              },
+              "maxItems": 255
+            },
+            {"type": "null"}
+          ]
+        },
+        "reservations": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "address": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+                      "hostName": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+                      "comments": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]}
+                    }
+                  },
+                  {"type": "null"}
+                ]
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "allowOnlyReservedLeases": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "blockLocallyAdministeredMacAddresses": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "ignoreClientIdentifierOption": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+      }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"anyOf": [{"enum": ["Local", "RemoteSSO", "RemoteLDAP"]}, {"type": "null"}]},
+        "displayName": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "externalIdentifier": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
+        "password": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+        "passwordIterations": {"anyOf": [{"type": "integer", "minimum": 100000, "maximum": 1000000}, {"type": "null"}]},
+        "totp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "enrollment": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]}
+          }
+        },
+        "disabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        "sessionTimeoutSeconds": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 604800}, {"type": "null"}]},
+        "groups": {"anyOf": [{"type": "array", "items": {"type": "string"}, "maxItems": 255}, {"type": "null"}]}
+      }
+    },
+    "appConfiguration": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"text": {"type": "string"}},
+          "required": ["text"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"file": {"type": "string", "minLength": 1}},
+          "required": ["file"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"secret": {"$ref": "#/$defs/secretReference"}},
+          "required": ["secret"]
+        }
+      ]
+    },
+    "appPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {"file": {"type": "string", "minLength": 1}},
+                  "required": ["file"]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {"url": {"type": "string", "pattern": "^https://"}},
+                  "required": ["url"]
+                }
+              ]
+            },
+            {"type": "null"}
+          ]
+        },
+        "version": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "configuration": {"anyOf": [{"$ref": "#/$defs/appConfiguration"}, {"type": "null"}]}
+      }
+    }
+  }
+}

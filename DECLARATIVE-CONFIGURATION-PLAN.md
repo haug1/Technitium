@@ -6,7 +6,7 @@ Technitium loads settings across several managers at startup. The DNS settings A
 
 ## 1. Inventory every setting and define the schema
 
-Build the field inventory from the persistence readers, settings APIs, and environment variable handling. For each setting, record its type, default, validation, secret handling, cluster scope, and restart requirements. Use the inventory as the release coverage checklist. [Settings inventory](DECLARATIVE-SETTINGS-INVENTORY.md) · [API documentation](APIDOCS.md) · [Environment variables](EnvironmentVariables.md)
+Build the field inventory from the persistence readers, settings APIs, and environment variable handling. For each setting, record its type, default, validation, secret handling, cluster scope, and restart requirements. Use the inventory as the release coverage checklist. [Settings inventory](DECLARATIVE-SETTINGS-INVENTORY.md) · [Draft schema](configuration/technitium.schema.json) · [Example manifests](configuration/examples) · [API documentation](APIDOCS.md) · [Environment variables](EnvironmentVariables.md)
 
 | Area | Manifest coverage |
 | --- | --- |

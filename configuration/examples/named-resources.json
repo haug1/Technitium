@@ -1,0 +1,70 @@
+{
+  "$schema": "../technitium.schema.json",
+  "schemaVersion": 1,
+  "dns": {
+    "serverDomain": "primary.example.test",
+    "localEndpoints": ["127.0.0.1:5353"],
+    "recursion": {"mode": "AllowOnlyForPrivateNetworks"},
+    "authoritative": {"defaultRecordTtl": 300}
+  },
+  "web": {
+    "localAddresses": ["127.0.0.1"],
+    "httpPort": 5380,
+    "tlsEnabled": true,
+    "useSelfSignedCertificate": true
+  },
+  "logging": {"destination": "Console"},
+  "statistics": {"inMemory": true},
+  "blocklists": {"sources": [], "updateIntervalHours": 0},
+  "allowZones": ["allowed.example.test"],
+  "blockZones": ["blocked.example.test"],
+  "zones": {
+    "lab.example.test": {
+      "type": "Primary",
+      "records": [
+        {"owner": "www.lab.example.test", "type": "A", "ttl": 300, "data": {"zoneFile": "192.0.2.10"}}
+      ]
+    }
+  },
+  "dhcp": {
+    "scopes": {
+      "Lab": {
+        "enabled": false,
+        "startingAddress": "192.0.2.10",
+        "endingAddress": "192.0.2.99",
+        "subnetMask": "255.255.255.0",
+        "reservations": {
+          "02-00-00-00-00-01": {"address": "192.0.2.20", "hostName": "fixture"}
+        }
+      }
+    }
+  },
+  "auth": {
+    "groups": {"Lab operators": {"description": "Operators for the lab zone"}},
+    "users": {
+      "lab-operator": {
+        "type": "Local",
+        "password": {"environment": "TECHNITIUM_LAB_OPERATOR_PASSWORD"},
+        "groups": ["Lab operators"]
+      }
+    },
+    "permissions": {"Zones": {"groups": {"Lab operators": ["View"]}}}
+  },
+  "apps": {
+    "autoUpdate": false,
+    "packages": {
+      "Filter AAAA": {
+        "source": {"file": "packages/filter-aaaa.zip"},
+        "version": "5.1",
+        "configuration": {"file": "app-config/filter-aaaa.json"}
+      }
+    }
+  },
+  "cluster": {
+    "domain": "example.test",
+    "bootstrap": {"role": "Primary"},
+    "node": {"addresses": ["127.0.0.1"]},
+    "heartbeatRefreshSeconds": 30,
+    "configRefreshSeconds": 900
+  }
+}
