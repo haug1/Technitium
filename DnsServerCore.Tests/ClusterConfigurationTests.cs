@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -571,12 +572,14 @@ namespace DnsServerCore.Tests
             var nodes = membership.GetProperty("response").GetProperty("clusterNodes");
             Assert.Equal(2, nodes.GetArrayLength());
             Assert.DoesNotContain(nodes.EnumerateArray(), node => node.GetProperty("id").GetInt32() == legacyId);
-            Assert.True(await WaitForAsync(async () => (await ReadSecondaryAppAsync()).GetProperty("config").ValueKind == JsonValueKind.Null),
-                "The Secondary did not clear the installed app's configuration.");
-            Assert.Contains((await ReadSecondaryAppAsync()).GetProperty("managedSettings").EnumerateArray(),
-                path => path.ValueEquals("/apps/packages/Fixture/configuration"));
-            Assert.Contains((await ReadSecondaryAppAsync()).GetProperty("managedSettings").EnumerateArray(),
-                path => path.ValueEquals("/apps/packages/Fixture/packageSha256"));
+            Assert.True(await WaitForAsync(async () =>
+            {
+                JsonElement app = await ReadSecondaryAppAsync();
+                var managed = app.GetProperty("managedSettings");
+                return app.GetProperty("config").ValueKind == JsonValueKind.Null &&
+                    managed.EnumerateArray().Any(path => path.ValueEquals("/apps/packages/Fixture/configuration")) &&
+                    managed.EnumerateArray().Any(path => path.ValueEquals("/apps/packages/Fixture/packageSha256"));
+            }), "The Secondary did not clear the installed app's configuration and inherit ownership.");
             using (var edit = new FormUrlEncodedContent([new("config", "local replacement")]))
             {
                 JsonElement denied = await secondary.CallAsync("apps/config/set?name=Fixture", token, edit);
