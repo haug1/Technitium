@@ -1,7 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -118,6 +120,41 @@ namespace DnsServerCore.Tests
             Assert.Contains("Configuration applied.", applied.Output);
             string operation = ReadOutputValue(applied.Output, "Configuration apply is pending. Operation ");
             Assert.Contains("Configuration applied.", (await RunAsync(server, "status", destination, operation)).Output);
+            Assert.Contains("No setting changes.", (await RunAsync(server, "plan", path, destination)).Output);
+        }
+
+        [Fact]
+        public async Task ConsoleReportsFailedWebRestartAndCanRetryAfterRollback()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            string origin = server.Client.BaseAddress!.AbsoluteUri;
+            using var occupied = new TcpListener(IPAddress.Loopback, 0);
+            occupied.Start();
+            int port = ((IPEndPoint)occupied.LocalEndpoint).Port;
+            string destination = $"http://127.0.0.1:{port}";
+            string path = Path.Combine(server.ConfigurationDirectory, "cli-rollback.json");
+            await File.WriteAllTextAsync(path, $$"""
+                {"schemaVersion":1,"web":{"httpPort":{{port}} },"logging":{"retentionDays":42} }
+                """);
+
+            var plan = await RunAsync(server, "plan", path, origin);
+            string revision = ReadOutputValue(plan.Output, "Revision ");
+            var failed = await RunAsync(server, 1, "apply", path, origin, revision, "--wait", origin);
+            Assert.Contains("Could not bind the web listeners", failed.Error);
+            string operation = ReadOutputValue(failed.Output, "Configuration apply is pending. Operation ");
+            Assert.Equal(failed.Error, (await RunAsync(server, 1, "status", origin, operation)).Error);
+            var settings = await server.GetSettingsAsync();
+            Assert.Equal(server.Client.BaseAddress.Port, settings.GetProperty("webServiceHttpPort").GetInt32());
+            Assert.Equal(365, settings.GetProperty("maxLogFileDays").GetInt32());
+
+            occupied.Stop();
+            plan = await RunAsync(server, "plan", path, origin);
+            revision = ReadOutputValue(plan.Output, "Revision ");
+            Assert.Contains("Configuration applied.",
+                (await RunAsync(server, "apply", path, origin, revision, "--wait", destination)).Output);
+            var exported = JsonNode.Parse((await RunAsync(server, "export", destination)).Output)!;
+            Assert.Equal(42, exported["logging"]!["retentionDays"]!.GetValue<int>());
+            Assert.Equal(port, exported["web"]!["httpPort"]!.GetValue<int>());
             Assert.Contains("No setting changes.", (await RunAsync(server, "plan", path, destination)).Output);
         }
 
