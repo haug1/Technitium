@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.ResourceRecords;
 using DnsServerCore.Dns.Trees;
@@ -24,11 +25,13 @@ using DnsServerCore.Dns.Zones;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary;
@@ -244,7 +247,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void SaveZoneFileInternal(string zoneName)
+        private void SaveZoneFileInternal(string zoneName, bool? disabled = null)
         {
             zoneName = zoneName.ToLowerInvariant();
 
@@ -253,7 +256,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             using (FileStream fS = new FileStream(tmpZoneFile, FileMode.Create, FileAccess.Write))
             {
-                WriteZoneTo(zoneName, fS);
+                WriteZoneTo(zoneName, fS, disabled);
 
                 if (fS.Position == 0)
                 {
@@ -271,6 +274,9 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                     return;
                 }
+
+                if (disabled.HasValue)
+                    fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpZoneFile, zoneFile, true);
@@ -575,7 +581,9 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        public void WriteZoneTo(string zoneName, Stream s)
+        public void WriteZoneTo(string zoneName, Stream s) => WriteZoneTo(zoneName, s, disabled: null);
+
+        private void WriteZoneTo(string zoneName, Stream s, bool? disabled)
         {
             AuthZoneInfo zoneInfo = GetAuthZoneInfo(zoneName, true);
             if (zoneInfo is null)
@@ -588,7 +596,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             bW.Write((byte)4); //version
 
             //write zone info
-            zoneInfo.WriteTo(bW);
+            zoneInfo.WriteTo(bW, disabled);
 
             //write all zone records
             List<DnsResourceRecord> records = new List<DnsResourceRecord>();
@@ -606,6 +614,53 @@ namespace DnsServerCore.Dns.ZoneManagers
         #endregion
 
         #region internal
+
+        internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneEnabled(ConfigurationManifest manifest)
+        {
+            var changed = new List<(AuthZoneInfo Zone, bool Disabled)>();
+            if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+            {
+                foreach (JsonProperty declaration in zones.EnumerateObject())
+                {
+                    string path = ConfigurationPlan.AppendPath("/zones", declaration.Name);
+                    string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
+                    AuthZoneInfo zone = GetAuthZoneInfo(name);
+                    if (zone is not { Type: AuthZoneType.Primary } || zone.CatalogZoneName is not null)
+                        throw new InvalidDataException($"{path}: Apply requires an existing primary zone outside catalogs.");
+
+                    if (declaration.Value.TryGetProperty("enabled", out JsonElement enabled))
+                    {
+                        bool disabled = enabled.ValueKind == JsonValueKind.False;
+                        if (zone.Disabled != disabled)
+                            changed.Add((zone, disabled));
+                    }
+                }
+            }
+
+            if (changed.Count == 0)
+                return (persist => persist(), null, []);
+
+            return (Commit, Write, changed.Select(entry => Path.Combine("zones", entry.Zone.Name + ".zone")).ToArray());
+
+            void Write()
+            {
+                foreach (var (zone, disabled) in changed)
+                    SaveZoneFileInternal(zone.Name, disabled);
+            }
+
+            void Commit(Action persist)
+            {
+                lock (_saveLock)
+                {
+                    persist();
+                    foreach (var (zone, disabled) in changed)
+                    {
+                        zone.Disabled = disabled;
+                        _dnsServer.CacheZoneManager.DeleteZone(zone.Name);
+                    }
+                }
+            }
+        }
 
         internal void TriggerUpdateServerDomain(bool useBlockingAnswerTtl = false)
         {

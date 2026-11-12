@@ -1186,7 +1186,9 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
-        public void WriteTo(BinaryWriter bW)
+        public void WriteTo(BinaryWriter bW) => WriteTo(bW, disabled: null);
+
+        internal void WriteTo(BinaryWriter bW, bool? disabled)
         {
             if (_apexZone is null)
                 throw new InvalidOperationException();
@@ -1196,7 +1198,7 @@ namespace DnsServerCore.Dns.Zones
             bW.BaseStream.WriteShortString(_name);
             bW.Write((byte)_type);
             bW.BaseStream.WriteDateTime(_lastModified);
-            bW.Write(_disabled);
+            bW.Write(disabled ?? _disabled);
 
             switch (_type)
             {

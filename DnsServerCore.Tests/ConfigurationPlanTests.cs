@@ -3004,6 +3004,40 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneApplyPersistsEnabledStateAndRollsBackFailedWrites()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=first.test&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=second.test&type=Primary", server.AdminToken));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"first.test":{"enabled":false},"second.test":{"enabled":false}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            string staging = Directory.CreateDirectory(Path.Combine(server.ConfigurationDirectory, "zones", "second.test.tmp")).FullName;
+            try
+            {
+                JsonElement failure = await ApplyAsync(server, manifest, revision);
+                Assert.Equal("error", failure.GetProperty("status").GetString());
+                Assert.Equal(revision, (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+            }
+            finally
+            {
+                Directory.Delete(staging);
+            }
+
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            JsonElement unchanged = await PreviewAsync(server, manifest);
+            Assert.Empty(unchanged.GetProperty("changes").EnumerateArray());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, unchanged.GetProperty("revision").GetString()!));
+
+            const string enable = """{"schemaVersion":1,"zones":{"first.test":{"enabled":true}}}""";
+            revision = (await PreviewAsync(server, enable)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, enable, revision));
+            Assert.Single((await server.QueryAsync("first.test", DnsResourceRecordType.SOA)).Answer);
+        }
+
+        [Fact]
         public async Task ZonePolicyPreviewReportsChangesAndKeepsAclValuesPrivate()
         {
             await using var server = await LoopbackWebService.StartAsync();

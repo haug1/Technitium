@@ -2225,14 +2225,14 @@ namespace DnsServerCore
             //zones
             _webService.MapGetAndPost("/api/zones/list", _zonesApi.ListZones);
             _webService.MapGetAndPost("/api/zones/catalogs/list", _zonesApi.ListCatalogZones);
-            _webService.MapGetAndPost("/api/zones/create", _zonesApi.CreateZoneAsync);
+            _webService.MapGetAndPost("/api/zones/create", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.CreateZoneAsync));
             _webService.MapGetAndPost("/api/zones/import", _zonesApi.ImportZoneAsync);
             _webService.MapGetAndPost("/api/zones/export", _zonesApi.ExportZoneAsync);
             _webService.MapGetAndPost("/api/zones/clone", _zonesApi.CloneZone);
             _webService.MapGetAndPost("/api/zones/convert", _zonesApi.ConvertZone);
-            _webService.MapGetAndPost("/api/zones/enable", _zonesApi.EnableZone);
-            _webService.MapGetAndPost("/api/zones/disable", _zonesApi.DisableZone);
-            _webService.MapGetAndPost("/api/zones/delete", _zonesApi.DeleteZone);
+            _webService.MapGetAndPost("/api/zones/enable", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.EnableZone));
+            _webService.MapGetAndPost("/api/zones/disable", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.DisableZone));
+            _webService.MapGetAndPost("/api/zones/delete", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.DeleteZone));
             _webService.MapGetAndPost("/api/zones/resync", _zonesApi.ResyncZone);
             _webService.MapGetAndPost("/api/zones/options/get", _zonesApi.GetZoneOptions);
             _webService.MapGetAndPost("/api/zones/options/set", _zonesApi.SetZoneOptions);
@@ -2254,10 +2254,10 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/zones/dnssec/properties/activateKskDnsKey", _zonesApi.ActivatePrimaryZoneKskDnsKey);
             _webService.MapGetAndPost("/api/zones/dnssec/properties/rolloverDnsKey", _zonesApi.RolloverPrimaryZoneDnsKey);
             _webService.MapGetAndPost("/api/zones/dnssec/properties/retireDnsKey", _zonesApi.RetirePrimaryZoneDnsKeyAsync);
-            _webService.MapGetAndPost("/api/zones/records/add", _zonesApi.AddRecord);
+            _webService.MapGetAndPost("/api/zones/records/add", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.AddRecord));
             _webService.MapGetAndPost("/api/zones/records/get", _zonesApi.GetRecords);
-            _webService.MapGetAndPost("/api/zones/records/update", _zonesApi.UpdateRecord);
-            _webService.MapGetAndPost("/api/zones/records/delete", _zonesApi.DeleteRecord);
+            _webService.MapGetAndPost("/api/zones/records/update", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.UpdateRecord));
+            _webService.MapGetAndPost("/api/zones/records/delete", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.DeleteRecord));
 
             //cache
             _webService.MapGetAndPost("/api/cache/list", _otherZonesApi.ListCachedZones);
@@ -3252,10 +3252,11 @@ namespace DnsServerCore
             string previousCertificateFileHash = _webServiceCertificateFileHash;
             try
             {
+                var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneEnabled(manifest);
                 await _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeScopes, scopeFiles));
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeScopes + zones.Write, [.. scopeFiles, .. zones.Files], zones.Commit));
             }
             catch
             {

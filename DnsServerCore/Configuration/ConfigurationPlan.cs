@@ -283,7 +283,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeScopes, string[] scopeFiles)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeResources, string[] resourceFiles, Action<Action> commitZones)
         {
             CheckApplySupport(manifest);
 
@@ -299,13 +299,13 @@ namespace DnsServerCore.Configuration
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     dns.AllowedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "allowZones"), writeAllowed =>
                     dns.BlockedZoneManager.ApplyManifestList(ConfigurationDomainLists.Read(manifest, "blockZones"), writeBlocked =>
-                    applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
+                    applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => commitZones(() => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
-                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked, writeScopes, scopeFiles))))));
+                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked, writeResources, resourceFiles)))))));
         }
 
         internal static DnsServer.DnsBindings GetDnsBindings(ConfigurationManifest manifest)
@@ -782,6 +782,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
+                throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
             if (manifest.Settings.TryGetProperty("allowZones", out _) || manifest.Settings.TryGetProperty("blockZones", out _))
                 throw new InvalidDataException("Applying explicit allow and block lists to a cluster is not implemented.");
             if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
@@ -861,6 +863,23 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
+            if (path == "/zones")
+            {
+                foreach (JsonProperty zone in value.EnumerateObject())
+                {
+                    string zonePath = AppendPath(path, zone.Name);
+                    if (zone.Value.ValueKind != JsonValueKind.Object)
+                        throw new InvalidDataException($"{zonePath}: Applying zone deletion is not implemented.");
+                    foreach (JsonProperty field in zone.Value.EnumerateObject())
+                    {
+                        if (field.Name == "enabled" || (field.Name == "type" && field.Value.ValueEquals("Primary")))
+                            continue;
+                        throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
+                    }
+                }
+                return;
+            }
+
             if (path is "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;

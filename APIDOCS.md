@@ -5325,6 +5325,8 @@ TSIG preview reports additions, removals, algorithm updates, and secret rotation
 
 Explicit `allowZones` and `blockZones` replace the corresponding normalized domain sets on standalone servers. Preview reports each added or removed name. The API requires the corresponding list permissions, including Delete when removing entries. Apply updates DNS live and rejects conflicting list edits and restores while the manifest owns the list. Export includes lists the caller may view.
 
+On standalone servers, apply accepts `enabled` for existing primary zones outside catalogs. The API requires Zones Modify permission for the section and the zone. The journal commits zone files with the other configuration changes before the server publishes the new enabled state.
+
 DHCP scope apply requires DHCP Server Modify permission and Delete permission when removing scopes. Enabled scopes must bind before the server commits changes. Scope files share the configuration rollback journal with the other changed settings. Active leases remain part of the scope when its settings change.
 
 Configuration export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. A scope whose reservations require a client identifier outside the manifest format is listed in `missingInputs`.

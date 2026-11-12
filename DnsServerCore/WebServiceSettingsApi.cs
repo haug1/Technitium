@@ -759,6 +759,16 @@ namespace DnsServerCore
                         !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Delete))
                         throw new DnsWebServiceException("Access was denied.");
                 }
+                if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+                {
+                    foreach (JsonProperty declaration in zones.EnumerateObject())
+                    {
+                        string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify) ||
+                            !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Modify))
+                            throw new DnsWebServiceException("Access was denied.");
+                    }
+                }
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
