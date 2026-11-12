@@ -29,6 +29,7 @@ namespace DnsServerCore.Configuration
         private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService,
             Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false);
 
+        private const string ServerDomainPath = "/dns/serverDomain";
         private const string DnsEndpointsPath = "/dns/localEndpoints";
         private const string Ipv4SourcePath = "/dns/sourceNetworks/ipv4";
         private const string Ipv6SourcePath = "/dns/sourceNetworks/ipv6";
@@ -36,6 +37,7 @@ namespace DnsServerCore.Configuration
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
+            [ServerDomainPath] = Field("dnsServerDomain", DnsServer.DefaultServerDomain),
             [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }, canApply: true),
             [Ipv4SourcePath] = Field("dnsServerIPv4SourceAddresses", new[] { "0.0.0.0" }, canApply: true),
             [Ipv6SourcePath] = Field("dnsServerIPv6SourceAddresses", new[] { "::" }, canApply: true),
@@ -105,6 +107,8 @@ namespace DnsServerCore.Configuration
                     GetCurrentSetting(currentSettings, path, setting).WriteTo(writer);
                 }
                 writer.WriteEndObject();
+                if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
+                    clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
                     ownership.WriteTo(writer);
                 writer.WriteEndArray();
@@ -309,6 +313,25 @@ namespace DnsServerCore.Configuration
                     {
                         candidate = JsonSerializer.SerializeToElement(GetManifestLogFolder(desired, log));
                         current = JsonSerializer.SerializeToElement(log.NormalizeLogFolder(current.GetString()));
+                    }
+                    else if (path == ServerDomainPath)
+                    {
+                        string domain = ConfigurationManifest.ReadServerDomain(desired);
+                        string existingDomain = current.GetString();
+                        if (!string.Equals(domain, existingDomain, StringComparison.OrdinalIgnoreCase) &&
+                            currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
+                        {
+                            try
+                            {
+                                DnsServer.CheckClusterServerDomain(domain, clusterDomain.GetString());
+                            }
+                            catch (ArgumentException ex)
+                            {
+                                throw new InvalidDataException($"{path}: {ex.Message}");
+                            }
+                        }
+                        candidate = JsonSerializer.SerializeToElement(domain);
+                        current = JsonSerializer.SerializeToElement(existingDomain.ToLowerInvariant());
                     }
                     else if (path == WebAddressesPath)
                     {

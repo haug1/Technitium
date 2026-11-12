@@ -88,6 +88,8 @@ namespace DnsServerCore.Configuration
             if (root.TryGetProperty("dns", out JsonElement dns))
             {
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
+                if (dns.TryGetProperty("serverDomain", out JsonElement serverDomain))
+                    ReadServerDomain(serverDomain);
                 if (dns.TryGetProperty("localEndpoints", out JsonElement endpoints))
                     ReadDnsLocalEndPoints(endpoints);
                 if (dns.TryGetProperty("sourceNetworks", out JsonElement sourceNetworks))
@@ -109,6 +111,21 @@ namespace DnsServerCore.Configuration
             }
 
             return new ConfigurationManifest(filePath, root.Clone());
+        }
+
+        internal static string ReadServerDomain(JsonElement value)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return DnsServer.DefaultServerDomain;
+
+            try
+            {
+                return DnsServer.NormalizeServerDomain(value.GetString());
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException or DnsServerException or DnsClientException)
+            {
+                throw new InvalidDataException("/dns/serverDomain: Invalid DNS server domain name.");
+            }
         }
 
         internal static NetworkAddress[] ReadNetworks(JsonElement value, string path, AddressFamily? family = null)

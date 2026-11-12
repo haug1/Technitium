@@ -685,10 +685,7 @@ namespace DnsServerCore
                             if (!_dnsWebService._dnsServer.ServerDomain.Equals(dnsServerDomain, StringComparison.OrdinalIgnoreCase))
                             {
                                 if (_dnsWebService._clusterManager.ClusterInitialized)
-                                {
-                                    if (!dnsServerDomain.EndsWith("." + _dnsWebService._clusterManager.ClusterDomain, StringComparison.OrdinalIgnoreCase))
-                                        throw new ArgumentException("DNS server domain name must end with the cluster domain name.", nameof(dnsServerDomain));
-                                }
+                                    DnsServer.CheckClusterServerDomain(DnsServer.NormalizeServerDomain(dnsServerDomain), _dnsWebService._clusterManager.ClusterDomain);
 
                                 _dnsWebService._dnsServer.ServerDomain = dnsServerDomain;
                                 serverDomainChanged = true;

@@ -357,13 +357,8 @@ namespace DnsServerCore.Dns
 
         public DnsServer(string configFolder, string dohwwwFolder, IReadOnlyList<IPEndPoint> localEndPoints, LogManager log, string serverDomain = null)
         {
-            if (string.IsNullOrEmpty(serverDomain))
-                serverDomain = Environment.MachineName.ToLowerInvariant();
-
-            if (!DnsClient.IsDomainNameValid(serverDomain) || IPAddress.TryParse(serverDomain, out _))
-                serverDomain = "dns-server-1"; //use this name instead since machine name is not a valid domain name
-
-            _serverDomain = serverDomain;
+            _serverDomain = string.IsNullOrEmpty(serverDomain) ? DefaultServerDomain
+                : IsValidServerDomain(serverDomain) ? serverDomain : "dns-server-1";
             _configFolder = configFolder;
             _dohwwwFolder = dohwwwFolder;
             LocalEndPoints = localEndPoints;
@@ -7242,6 +7237,42 @@ namespace DnsServerCore.Dns
 
         #region properties
 
+        internal static string DefaultServerDomain
+        {
+            get
+            {
+                string name = Environment.MachineName.ToLowerInvariant();
+                return IsValidServerDomain(name) ? name : "dns-server-1";
+            }
+        }
+
+        private static bool IsValidServerDomain(string value)
+        {
+            return DnsClient.IsDomainNameValid(value) && !IPAddress.TryParse(value, out _);
+        }
+
+        internal static string NormalizeServerDomain(string value)
+        {
+            value = value.TrimEnd('.');
+            if (DnsClient.IsDomainNameUnicode(value))
+                value = DnsClient.ConvertDomainNameToAscii(value);
+
+            if (value.Length == 0)
+                throw new ArgumentException("A DNS server domain name is required.", nameof(value));
+
+            DnsClient.IsDomainNameValid(value, true);
+            if (IPAddress.TryParse(value, out _))
+                throw new DnsServerException("Invalid domain name [" + value + "]: IP address cannot be used for DNS server domain name.");
+
+            return value.ToLowerInvariant();
+        }
+
+        internal static void CheckClusterServerDomain(string domain, string clusterDomain)
+        {
+            if (!domain.EndsWith("." + clusterDomain, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("DNS server domain name must end with the cluster domain name.", nameof(domain));
+        }
+
         public string ServerDomain
         {
             get { return _serverDomain; }
@@ -7249,15 +7280,7 @@ namespace DnsServerCore.Dns
             {
                 if (!_serverDomain.Equals(value, StringComparison.Ordinal))
                 {
-                    if (DnsClient.IsDomainNameUnicode(value))
-                        value = DnsClient.ConvertDomainNameToAscii(value);
-
-                    DnsClient.IsDomainNameValid(value, true);
-
-                    if (IPAddress.TryParse(value, out _))
-                        throw new DnsServerException("Invalid domain name [" + value + "]: IP address cannot be used for DNS server domain name.");
-
-                    _serverDomain = value.ToLowerInvariant();
+                    _serverDomain = NormalizeServerDomain(value);
                     _fallbackResponsiblePerson = new MailAddress("hostadmin@" + _serverDomain);
 
                     _authZoneManager.TriggerUpdateServerDomain();

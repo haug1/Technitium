@@ -464,6 +464,37 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ServerDomainPreviewUsesCanonicalNamesWithoutChangingIdentity()
+        {
+            await using var server = await LoopbackWebService.StartAsync(serverDomain: "server.test");
+            const string equivalent = """{"schemaVersion":1,"dns":{"serverDomain":"SERVER.TEST."}}""";
+            Assert.Empty((await PreviewAsync(server, equivalent)).GetProperty("changes").EnumerateArray());
+
+            const string updated = """{"schemaVersion":1,"dns":{"serverDomain":"bücher.test"}}""";
+            JsonElement change = Assert.Single((await PreviewAsync(server, updated)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("/dns/serverDomain", change.GetProperty("path").GetString());
+            Assert.Equal("server.test", (await server.GetSettingsAsync()).GetProperty("dnsServerDomain").GetString());
+
+            using var snapshot = JsonDocument.Parse("""{"dnsServerDomain":"xn--bcher-kva.test","clusterDomain":"test"}""");
+            Assert.Empty(ConfigurationPlan.Create(Load(updated), snapshot.RootElement));
+            InvalidDataException conflict = Assert.Throws<InvalidDataException>(() =>
+                ConfigurationPlan.Create(Load("""{"schemaVersion":1,"dns":{"serverDomain":"outside.example"}}"""), snapshot.RootElement));
+            Assert.Contains("/dns/serverDomain", conflict.Message);
+            Assert.Contains("cluster domain", conflict.Message);
+        }
+
+        [Theory]
+        [InlineData("192.0.2.1")]
+        [InlineData("invalid host.test")]
+        [InlineData(".")]
+        public void InvalidServerDomainsReportTheManifestPath(string domain)
+        {
+            string manifest = JsonSerializer.Serialize(new { schemaVersion = 1, dns = new { serverDomain = domain } });
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => Load(manifest));
+            Assert.StartsWith("/dns/serverDomain:", error.Message);
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();
