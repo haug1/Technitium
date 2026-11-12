@@ -1052,7 +1052,7 @@ namespace DnsServerCore
                     var grants = ConfigurationPermissions.Prepare(manifest, auth, groups, users, sessionUser);
                     if (declaresGroups)
                     {
-                        ConfigurationGroups.ValidateRemovals(auth, groups, ldap, users, grants);
+                        ConfigurationGroups.ValidateRemovals(auth, groups, ldap, users, grants, ConfigurationGroups.DeclaredZoneRemovals(manifest));
                         ConfigurationGroups.WriteSnapshot(writer, auth, groups);
                     }
                     if (users is not null)

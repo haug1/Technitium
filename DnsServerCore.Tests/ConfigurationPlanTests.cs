@@ -3454,6 +3454,36 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestCanRemoveAZoneAndItsPermissionGroupTogether()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string create = """
+                {"schemaVersion":1,"auth":{"groups":{"Retired Zone Readers":{}}},
+                    "zones":{"obsolete.test":{"type":"Primary","permissions":{"groups":{"Retired Zone Readers":["View"]}}}}}
+                """;
+            string revision = (await PreviewAsync(server, create)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, create, revision));
+            await server.RestartAsync();
+
+            const string removeGroupOnly = """{"schemaVersion":1,"auth":{"groups":{"Retired Zone Readers":null}}}""";
+            using var content = new StringContent(removeGroupOnly, Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/auth/groups/retired zone readers", rejected.GetProperty("errorMessage").GetString());
+
+            const string remove = """
+                {"schemaVersion":1,"auth":{"groups":{"Retired Zone Readers":null}},"zones":{"OBSOLETE.TEST.":null}}
+                """;
+            JsonElement preview = await PreviewAsync(server, remove);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, remove, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, remove)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("error", (await server.CallAsync("admin/groups/get?group=Retired%20Zone%20Readers", server.AdminToken)).GetProperty("status").GetString());
+            Assert.Equal("error", (await server.CallAsync("zones/permissions/get?zone=obsolete.test", server.AdminToken)).GetProperty("status").GetString());
+        }
+
+        [Fact]
         public async Task ManifestZoneGrantsApplyWithZoneCreationAndCanBeReset()
         {
             await using var server = await LoopbackWebService.StartAsync();

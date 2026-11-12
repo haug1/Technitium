@@ -118,18 +118,32 @@ namespace DnsServerCore.Configuration
 
         }
 
+        internal static HashSet<string> DeclaredZoneRemovals(ConfigurationManifest manifest)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+            {
+                foreach (JsonProperty entry in zones.EnumerateObject())
+                {
+                    if (entry.Value.ValueKind == JsonValueKind.Null)
+                        names.Add(ConfigurationManifest.CanonicalDnsName(entry.Name, "/zones", allowRoot: true));
+                }
+            }
+            return names;
+        }
+
         internal static void ValidateRemovals(AuthManager auth, IReadOnlyDictionary<string, Group> groups, ConfigurationLdap.Settings ldap,
-            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants)
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants, IReadOnlySet<string> removedZones)
         {
             foreach (var (name, candidate) in groups)
             {
                 if (candidate is null && auth.GetGroup(name) is Group group)
-                    ValidateRemoval(auth, group, ldap, users, grants);
+                    ValidateRemoval(auth, group, ldap, users, grants, removedZones);
             }
         }
 
         private static void ValidateRemoval(AuthManager auth, Group group, ConfigurationLdap.Settings ldap,
-            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants)
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants, IReadOnlySet<string> removedZones)
         {
             string name = group.Name.ToLowerInvariant();
             if (auth.GetGroupMembers(group).Any(user =>
@@ -139,7 +153,9 @@ namespace DnsServerCore.Configuration
                     (permission.GroupPermissions.ContainsKey(group) && !grants.Any(grant =>
                         grant.Zone is null && grant.Section == permission.Section && grant.Group && grant.Name == name && grant.After is null)) ||
                     permission.SubItemPermissions.Values.Any(item => item.GroupPermissions.ContainsKey(group) &&
-                        !grants.Any(grant => grant.Zone == item.SubItemName && grant.Group && grant.Name == name && grant.After is null))) ||
+                        !(permission.Section == PermissionSection.Zones && removedZones.Contains(item.SubItemName)) &&
+                        !grants.Any(grant => grant.Section == permission.Section && grant.Zone == item.SubItemName &&
+                            grant.Group && grant.Name == name && grant.After is null))) ||
                 (ldap ?? auth.GetManifestLdapSettings()).GroupMap?.Values.Any(IsMapping) == true ||
                 auth.SsoGroupMap?.Values.Any(IsMapping) == true)
                 throw new InvalidDataException($"{GroupPath(name)}: The group is still referenced by authentication settings.");

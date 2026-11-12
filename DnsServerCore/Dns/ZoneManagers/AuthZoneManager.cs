@@ -806,7 +806,6 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (staticSessions?.Changes.Count == 0)
                 staticSessions = null;
             var grants = ConfigurationPermissions.Prepare(manifest, auth, groupChanges, userChanges, creator);
-            ConfigurationGroups.ValidateRemovals(auth, groupChanges, ldap, userChanges, grants);
             string[] groupOwnership = ConfigurationGroups.GetOwnedPaths(manifest);
             if (auth.ManagedGroupPaths.SequenceEqual(groupOwnership))
                 groupOwnership = null;
@@ -874,6 +873,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
             }
 
+            ConfigurationGroups.ValidateRemovals(auth, groupChanges, ldap, userChanges, grants,
+                membership.Where(entry => !entry.Value).Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal));
             bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
                 !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
             if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null)

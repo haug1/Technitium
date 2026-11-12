@@ -537,7 +537,8 @@ namespace DnsServerCore.Auth
 
             lock (_saveLock)
             {
-                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants);
+                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants,
+                    membership.Where(entry => !entry.Value).Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal));
                 ConfigurationStaticSessions.CheckAccountRemovals(this, userChanges, staticSessions);
 
                 Dictionary<string, User> stagedUsers = null;
