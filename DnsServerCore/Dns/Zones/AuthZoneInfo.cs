@@ -1230,8 +1230,8 @@ namespace DnsServerCore.Dns.Zones
 
                 case AuthZoneType.Secondary:
                     bW.Write(catalog ?? _catalogZoneName ?? "");
-                    bW.Write(_overrideCatalogQueryAccess);
-                    bW.Write(_overrideCatalogZoneTransfer);
+                    bW.Write(policies.OverrideCatalogQuery ?? _overrideCatalogQueryAccess);
+                    bW.Write(policies.OverrideCatalogTransfer ?? _overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogPrimaryNameServers);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
@@ -1261,7 +1261,7 @@ namespace DnsServerCore.Dns.Zones
 
                 case AuthZoneType.Stub:
                     bW.Write(catalog ?? _catalogZoneName ?? "");
-                    bW.Write(_overrideCatalogQueryAccess);
+                    bW.Write(policies.OverrideCatalogQuery ?? _overrideCatalogQueryAccess);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
                     WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);

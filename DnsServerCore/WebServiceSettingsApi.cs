@@ -1406,8 +1406,10 @@ namespace DnsServerCore
                             writer.WriteBoolean("catalogChanged", before != catalog);
                             writer.WriteStartObject("catalogOverrides");
                             WriteOverride("overrideQueryAccess", zone?.OverrideCatalogQueryAccess);
-                            WriteOverride("overrideZoneTransfer", zone?.OverrideCatalogZoneTransfer);
-                            WriteOverride("overrideNotify", zone?.OverrideCatalogNotify);
+                            if (type != AuthZoneType.Stub)
+                                WriteOverride("overrideZoneTransfer", zone?.OverrideCatalogZoneTransfer);
+                            if (type is AuthZoneType.Primary or AuthZoneType.Forwarder)
+                                WriteOverride("overrideNotify", zone?.OverrideCatalogNotify);
                             writer.WriteEndObject();
 
                             void WriteOverride(string field, bool? current)

@@ -291,7 +291,7 @@ namespace DnsServerCore.Dns.Zones
         }
 
         internal void StageManifestMemberPolicies(string domain, IReadOnlyCollection<NetworkAccessControl> query,
-            IReadOnlyCollection<NetworkAccessControl> transfer, IReadOnlySet<string> keys,
+            IReadOnlyCollection<NetworkAccessControl> transfer, IReadOnlySet<string> keys, ConfigurationZonePrimary.Changes primary,
             Action<string, DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> write)
         {
             _manifestPropertyWriter = write;
@@ -300,6 +300,11 @@ namespace DnsServerCore.Dns.Zones
                 WriteAccessProperty("allow-query.ext." + domain, query);
                 WriteAccessProperty("allow-transfer.ext." + domain, transfer);
                 WriteTransferKeysProperty("transfer-tsig-key-names.ext." + domain, keys);
+                WritePrimaryAddressesProperty("primary-addresses.ext." + domain, primary.Servers);
+                WriteTextProperty("primary-transfer-protocol.ext." + domain, primary.Protocol?.ToString());
+                WriteRecordProperty("primary-transfer-tsig-key-name.ext." + domain, DnsResourceRecordType.PTR,
+                    string.IsNullOrEmpty(primary.TsigKey) ? null : new DnsPTRRecordData(primary.TsigKey));
+                WriteTextProperty("zonemd-validation.ext." + domain, primary.Validate?.ToString());
             }
             finally
             {
@@ -307,77 +312,36 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
-        public void SetPrimaryAddressesProperty(IReadOnlyList<NameServerAddress> primaryServerAddresses = null, string memberZoneName = null)
+        public void SetPrimaryAddressesProperty(IReadOnlyList<NameServerAddress> primaryServerAddresses = null, string memberZoneName = null) =>
+            WritePrimaryAddressesProperty("primary-addresses.ext." + GetMemberZoneDomain(memberZoneName), primaryServerAddresses);
+
+        private void WritePrimaryAddressesProperty(string domain, IReadOnlyList<NameServerAddress> addresses) =>
+            WriteRecordProperty(domain, DnsResourceRecordType.TXT, addresses is { Count: > 0 }
+                ? new DnsTXTRecordData(addresses.Select(server => server.ToString()).ToArray()) : null);
+
+        public void SetPrimaryZoneTransferProtocolProperty(DnsTransportProtocol? zoneTransferProtocol = null, string memberZoneName = null) =>
+            WriteTextProperty("primary-transfer-protocol.ext." + GetMemberZoneDomain(memberZoneName), zoneTransferProtocol?.ToString());
+
+        public void SetPrimaryZoneTransferTsigKeyNameProperty(string tsigKeyName = null, string memberZoneName = null) =>
+            WriteRecordProperty("primary-transfer-tsig-key-name.ext." + GetMemberZoneDomain(memberZoneName), DnsResourceRecordType.PTR,
+                tsigKeyName is null ? null : new DnsPTRRecordData(tsigKeyName));
+
+        public void SetZoneMdValidationProperty(bool? validateZone = null, string memberZoneName = null) =>
+            WriteTextProperty("zonemd-validation.ext." + GetMemberZoneDomain(memberZoneName), validateZone?.ToString());
+
+        private void WriteTextProperty(string domain, string value) =>
+            WriteRecordProperty(domain, DnsResourceRecordType.TXT, value is null ? null : new DnsTXTRecordData(value));
+
+        private void WriteRecordProperty(string domain, DnsResourceRecordType type, DnsResourceRecordData data)
         {
-            string domain = "primary-addresses.ext." + GetMemberZoneDomain(memberZoneName);
-
-            if (primaryServerAddresses is null)
+            if (data is null)
             {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.TXT);
+                WritePropertyRecords(domain, type, []);
+                return;
             }
-            else
-            {
-                IReadOnlyList<string> charStrings = primaryServerAddresses.Convert(delegate (NameServerAddress nameServer)
-                {
-                    return nameServer.ToString();
-                });
-
-                DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.TXT, DnsClass.IN, 0, new DnsTXTRecordData(charStrings));
-                record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                _dnsServer.AuthZoneManager.SetRecord(_name, record);
-            }
-        }
-
-        public void SetPrimaryZoneTransferProtocolProperty(DnsTransportProtocol? zoneTransferProtocol = null, string memberZoneName = null)
-        {
-            string domain = "primary-transfer-protocol.ext." + GetMemberZoneDomain(memberZoneName);
-
-            if (zoneTransferProtocol is null)
-            {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.TXT);
-            }
-            else
-            {
-                DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.TXT, DnsClass.IN, 0, new DnsTXTRecordData(zoneTransferProtocol.ToString()));
-                record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                _dnsServer.AuthZoneManager.SetRecord(_name, record);
-            }
-        }
-
-        public void SetPrimaryZoneTransferTsigKeyNameProperty(string tsigKeyName = null, string memberZoneName = null)
-        {
-            string domain = "primary-transfer-tsig-key-name.ext." + GetMemberZoneDomain(memberZoneName);
-
-            if (tsigKeyName is null)
-            {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.PTR);
-            }
-            else
-            {
-                DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(tsigKeyName));
-                record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                _dnsServer.AuthZoneManager.SetRecord(_name, record);
-            }
-        }
-
-        public void SetZoneMdValidationProperty(bool? validateZone = null, string memberZoneName = null)
-        {
-            string domain = "zonemd-validation.ext." + GetMemberZoneDomain(memberZoneName);
-
-            if (validateZone is null)
-            {
-                _dnsServer.AuthZoneManager.DeleteRecords(_name, domain, DnsResourceRecordType.TXT);
-            }
-            else
-            {
-                DnsResourceRecord record = new DnsResourceRecord(domain, DnsResourceRecordType.TXT, DnsClass.IN, 0, new DnsTXTRecordData(validateZone.ToString()));
-                record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                _dnsServer.AuthZoneManager.SetRecord(_name, record);
-            }
+            var record = new DnsResourceRecord(domain, type, DnsClass.IN, 0, data);
+            record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
+            WritePropertyRecords(domain, type, [record]);
         }
 
         private string GetMemberZoneDomain(string memberZoneName = null)

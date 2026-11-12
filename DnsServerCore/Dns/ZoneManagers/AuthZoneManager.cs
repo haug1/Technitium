@@ -827,10 +827,14 @@ namespace DnsServerCore.Dns.ZoneManagers
                     throw new InvalidDataException($"{path}: Declare catalog.name when applying a local catalog member.");
                 return null;
             }
-            if (type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
+            if (!SupportsManifestCatalogMembership(type) ||
                 !catalog.TryGetProperty("name", out JsonElement value) ||
                 catalog.EnumerateObject().Any(field => field.Name is not ("name" or "overrideNotify" or "overrideQueryAccess" or "overrideZoneTransfer")))
-                throw new InvalidDataException($"{path}/catalog: Specify a catalog name and optional overrides for a primary or forwarder zone.");
+                throw new InvalidDataException($"{path}/catalog: Specify a catalog name and supported overrides for this zone type.");
+            if (type == AuthZoneType.Stub && catalog.TryGetProperty("overrideZoneTransfer", out _))
+                throw new InvalidDataException($"{path}/catalog/overrideZoneTransfer: Stub zones do not have a transfer override.");
+            if (type is AuthZoneType.Secondary or AuthZoneType.Stub && catalog.TryGetProperty("overrideNotify", out _))
+                throw new InvalidDataException($"{path}/catalog/overrideNotify: This zone type does not have a notification override.");
             string before = member?.CatalogZoneName;
             if (before is not null && GetAuthZoneInfo(before)?.Type != AuthZoneType.Catalog)
                 throw new InvalidDataException($"{path}/catalog/name: This membership is maintained by a secondary catalog.");
@@ -855,6 +859,9 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
             return after;
         }
+
+        internal static bool SupportsManifestCatalogMembership(AuthZoneType type) =>
+            type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Secondary or AuthZoneType.Stub;
 
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneAndAuthChanges(ConfigurationManifest manifest, AuthManager auth, User creator,
             IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions, ConfigurationSso.Settings sso, bool isClusterSecondary)
@@ -942,17 +949,19 @@ namespace DnsServerCore.Dns.ZoneManagers
                         bool isActive = catalog.Length != 0 && !(disabled ?? zone?.Disabled ?? false);
                         if (wasActive && (!isActive || catalog != before))
                             AddCatalogEdit(before, new(name, type, false, null, null, null, isActive ? catalog : null));
-                        if (isActive && (!wasActive || catalog != before || CatalogPoliciesChanged(policies)))
+                        if (isActive && (!wasActive || catalog != before || CatalogPoliciesChanged(policies) || primary != default))
                         {
                             bool queryOverride = policies.OverrideCatalogQuery ?? zone?.OverrideCatalogQueryAccess ?? false;
-                            bool transferOverride = type == AuthZoneType.Primary &&
+                            bool transferOverride = type is AuthZoneType.Primary or AuthZoneType.Secondary &&
                                 (policies.OverrideCatalogTransfer ?? zone?.OverrideCatalogZoneTransfer ?? false);
                             var query = queryOverride ? ApexZone.GetQueryAccessACL(policies.QueryAccess ?? zone?.QueryAccess ?? AuthZoneQueryAccess.Allow,
                                 policies.QueryAcl ?? zone?.QueryAccessNetworkACL) : null;
-                            var transfer = transferOverride ? ApexZone.GetZoneTranferACL(policies.Transfer ?? zone?.ZoneTransfer ?? AuthZoneTransfer.AllowOnlyZoneNameServers,
+                            var transfer = transferOverride ? ApexZone.GetZoneTranferACL(policies.Transfer ?? zone?.ZoneTransfer ??
+                                (type == AuthZoneType.Primary ? AuthZoneTransfer.AllowOnlyZoneNameServers : AuthZoneTransfer.Deny),
                                 policies.TransferAcl ?? zone?.ZoneTransferNetworkACL) : null;
                             AddCatalogEdit(catalog, new(name, type, !wasActive || catalog != before ? true : null, query, transfer,
-                                transferOverride ? policies.TransferKeys ?? zone?.ZoneTransferTsigKeyNames : null));
+                                transferOverride ? policies.TransferKeys ?? zone?.ZoneTransferTsigKeyNames : null,
+                                Primary: GetCatalogMemberPrimary(type, zone, primary)));
                         }
                     }
                     bool editRecords = declaration.Value.TryGetProperty("records", out JsonElement records);
@@ -1166,6 +1175,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     try
                                     {
                                         policies.Apply(current);
+                                        primary.Apply(current);
                                     }
                                     finally
                                     {
@@ -1173,7 +1183,6 @@ namespace DnsServerCore.Dns.ZoneManagers
                                             current.ApexZone.CatalogZoneName = oldCatalog;
                                     }
                                 }
-                                primary.Apply(current);
                                 if (desiredCatalogs.TryGetValue(name, out string catalog))
                                     current.ApexZone.CatalogZoneName = catalog.Length == 0 ? null : catalog;
                                 if (disabled.HasValue)
@@ -1284,7 +1293,23 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private sealed record ManifestCatalogMemberEdit(string Member, AuthZoneType Type, bool? Add,
             IReadOnlyCollection<NetworkAccessControl> Query, IReadOnlyCollection<NetworkAccessControl> Transfer, IReadOnlySet<string> Keys,
-            string Destination = null);
+            string Destination = null, ConfigurationZonePrimary.Changes Primary = default);
+
+        private static ConfigurationZonePrimary.Changes GetCatalogMemberPrimary(AuthZoneType type, AuthZoneInfo current,
+            ConfigurationZonePrimary.Changes changes)
+        {
+            if (type is not (AuthZoneType.Secondary or AuthZoneType.Stub))
+                return default;
+
+            NameServerAddress[] servers = changes.Servers ?? current?.PrimaryNameServerAddresses?.ToArray();
+            if (type == AuthZoneType.Stub)
+                return new(servers, null, null, null);
+
+            DnsTransportProtocol protocol = changes.Protocol ?? current?.PrimaryZoneTransferProtocol ?? DnsTransportProtocol.Tcp;
+            return new(servers, protocol == DnsTransportProtocol.Tcp ? null : protocol,
+                changes.TsigKey ?? current?.PrimaryZoneTransferTsigKeyName,
+                (changes.Validate ?? current?.ValidateZone ?? false) ? true : null);
+        }
 
         private static bool CatalogPoliciesChanged(ConfigurationZonePolicies.Changes policies) =>
             policies.OverrideCatalogQuery.HasValue || policies.OverrideCatalogTransfer.HasValue ||
@@ -1382,7 +1407,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         domain = pointers.SingleOrDefault()?.Name ??
                             throw new InvalidDataException($"{GetManifestZonePath(edit.Member)}/catalog: The catalog member record is missing.");
                     }
-                    zone.StageManifestMemberPolicies(domain, edit.Query, edit.Transfer, edit.Keys,
+                    zone.StageManifestMemberPolicies(domain, edit.Query, edit.Transfer, edit.Keys, edit.Primary,
                         (name, type, rrset) => desired[(name, type)] = rrset);
                 }
             }

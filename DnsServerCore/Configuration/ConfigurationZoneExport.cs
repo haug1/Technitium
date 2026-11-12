@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using DnsServerCore.Auth;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ResourceRecords;
+using DnsServerCore.Dns.ZoneManagers;
 using DnsServerCore.Dns.Zones;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
@@ -29,7 +30,7 @@ namespace DnsServerCore.Configuration
                 if (isClusterInfrastructure(zone.Name) ||
                     (zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
-                    (zone.CatalogZoneName is string catalog && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
+                    (zone.CatalogZoneName is string catalog && (!AuthZoneManager.SupportsManifestCatalogMembership(zone.Type) ||
                         isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog)))
                 {
                     missingInputs.Add(path);
@@ -51,13 +52,19 @@ namespace DnsServerCore.Configuration
                     updates = new { mode = zone.Update.ToString(), networkAcl = zone.UpdateNetworkACL?.Select(rule => rule.ToString()) ?? [] }
                 }).AsObject();
 
-                if (zone.Type is AuthZoneType.Primary or AuthZoneType.Forwarder &&
-                    (zone.CatalogZoneName is not null || zone.OverrideCatalogNotify || zone.OverrideCatalogQueryAccess || zone.OverrideCatalogZoneTransfer))
-                    declaration["catalog"] = new JsonObject
+                if (AuthZoneManager.SupportsManifestCatalogMembership(zone.Type))
+                {
+                    var catalogDeclaration = new JsonObject
                     {
-                        ["name"] = zone.CatalogZoneName, ["overrideQueryAccess"] = zone.OverrideCatalogQueryAccess,
-                        ["overrideZoneTransfer"] = zone.OverrideCatalogZoneTransfer, ["overrideNotify"] = zone.OverrideCatalogNotify
+                        ["name"] = zone.CatalogZoneName, ["overrideQueryAccess"] = zone.OverrideCatalogQueryAccess
                     };
+                    if (zone.Type != AuthZoneType.Stub)
+                        catalogDeclaration["overrideZoneTransfer"] = zone.OverrideCatalogZoneTransfer;
+                    if (zone.Type is AuthZoneType.Primary or AuthZoneType.Forwarder)
+                        catalogDeclaration["overrideNotify"] = zone.OverrideCatalogNotify;
+                    if (zone.CatalogZoneName is not null || catalogDeclaration.Any(field => field.Key != "name" && field.Value.GetValue<bool>()))
+                        declaration["catalog"] = catalogDeclaration;
+                }
                 if (zone.ZoneTransferTsigKeyNames?.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                 {
                     declaration["transfer"].AsObject().Remove("tsigKeys");

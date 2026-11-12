@@ -4406,6 +4406,55 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task CatalogManifestsAdvertiseSecondaryMemberUpstreams()
+        {
+            await using var upstream = new LoopbackDnsServer();
+            upstream.AddPrimaryZone("relay-member.test", "www.relay-member.test", IPAddress.Parse("192.0.2.42"));
+            upstream.Server.AuthZoneManager.GetAuthZoneInfo("relay-member.test").ZoneTransfer = AuthZoneTransfer.Allow;
+            await upstream.StartAsync();
+            await using var source = await LoopbackWebService.StartAsync();
+            string manifest = $$$$$"""
+                {"schemaVersion":1,"zones":{
+                  "relay-catalog.test":{"type":"Catalog","transfer":{"mode":"Allow"}},
+                  "relay-member.test":{"type":"Secondary","catalog":{"name":"relay-catalog.test"},
+                    "primary":{"servers":[{"address":"{{{{{upstream.EndPoint}}}}}"}]}},
+                  "stub-member.test":{"type":"Stub","enabled":false,"catalog":{"name":"relay-catalog.test","overrideQueryAccess":true},
+                    "primary":{"servers":[{"address":"127.0.0.1"}]}}
+                }}
+                """;
+            string revision = (await PreviewAsync(source, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(source, manifest, revision));
+            await source.RestartAsync();
+            Assert.Empty((await PreviewAsync(source, manifest)).GetProperty("changes").EnumerateArray());
+            JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zones = export.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            Assert.Equal("relay-catalog.test", zones.GetProperty("relay-member.test").GetProperty("catalog").GetProperty("name").GetString());
+            Assert.True(zones.GetProperty("stub-member.test").GetProperty("catalog").GetProperty("overrideQueryAccess").GetBoolean());
+
+            await using var replica = await LoopbackWebService.StartAsync();
+            string replicaManifest = $$$$$"""
+                {"schemaVersion":1,"zones":{"relay-catalog.test":{"type":"SecondaryCatalog",
+                  "primary":{"servers":[{"address":"127.0.0.1:{{{{{source.DnsPort}}}}}"}]}}}}
+                """;
+            revision = (await PreviewAsync(replica, replicaManifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(replica, replicaManifest, revision));
+            DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+            JsonElement member;
+            do
+            {
+                member = await replica.CallAsync("zones/options/get?zone=relay-member.test", replica.AdminToken);
+                if (member.GetProperty("status").ValueEquals("ok"))
+                    break;
+                await Task.Delay(250);
+            }
+            while (DateTime.UtcNow < deadline);
+            LoopbackWebService.AssertOk(member);
+            Assert.Equal(upstream.EndPoint.ToString(), Assert.Single(member.GetProperty("response")
+                .GetProperty("primaryNameServerAddresses").EnumerateArray()).GetString());
+        }
+
+        [Fact]
         public async Task CatalogManifestsPersistTheSourceAndProvisionSecondaryMembers()
         {
             await using var primary = await LoopbackWebService.StartAsync();
