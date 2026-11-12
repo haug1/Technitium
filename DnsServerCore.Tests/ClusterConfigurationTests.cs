@@ -498,6 +498,11 @@ namespace DnsServerCore.Tests
             string digest = Convert.ToHexString(SHA256.HashData(package.ToArray()));
             string clear = $$"""{"schemaVersion":1,"apps":{"packages":{"Fixture":{"configuration":null,"packageSha256":"{{digest}}"} } } }""";
             var primaryUrl = new Uri(primaryNode.GetProperty("url").GetString()!);
+            using var beforeJoinBody = new StringContent(clear, Encoding.UTF8, "application/json");
+            JsonElement beforeJoin = await primary.CallAsync("settings/config/plan", primary.AdminToken, beforeJoinBody);
+            LoopbackWebService.AssertOk(beforeJoin);
+            string beforeJoinRevision = beforeJoin.GetProperty("response").GetProperty("revision").GetString()!;
+
             using (var certificate = X509CertificateLoader.LoadPkcs12FromFile(
                 Path.Combine(primary.ConfigurationDirectory, "self-signed-cert.pfx"), null))
             using (var legacy = new HttpApiClient(new Uri($"https://127.0.0.1:{primaryUrl.Port}/"), ipv6Mode: default, ignoreCertificateErrors: true))
@@ -515,6 +520,19 @@ namespace DnsServerCore.Tests
                 JsonElement blocked = await primary.CallAsync("settings/config/plan", primary.AdminToken, blockedBody);
                 Assert.Equal("error", blocked.GetProperty("status").GetString());
                 Assert.Contains("has not advertised support for declarative app package digests", blocked.GetProperty("errorMessage").GetString());
+
+                using var applyBody = new StringContent(clear, Encoding.UTF8, "application/json");
+                JsonElement denied = await primary.CallAsync("settings/config/apply", primary.AdminToken, applyBody, beforeJoinRevision);
+                Assert.Equal("error", denied.GetProperty("status").GetString());
+                Assert.Contains("has not advertised support for declarative app package digests", denied.GetProperty("errorMessage").GetString());
+                JsonElement unchanged = await primary.CallAsync("apps/config/get?name=Fixture", primary.AdminToken);
+                LoopbackWebService.AssertOk(unchanged);
+                JsonElement app = unchanged.GetProperty("response");
+                Assert.Equal("fixture configuration", app.GetProperty("config").GetString());
+                Assert.Empty(app.GetProperty("managedSettings").EnumerateArray());
+                Assert.Equal(digest, Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(
+                    Path.Combine(primary.ConfigurationDirectory, "apps", "Fixture", "Fixture.zip")))));
+
                 await legacy.DeleteSecondaryNodeAsync(legacyId);
             }
 
