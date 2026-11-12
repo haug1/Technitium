@@ -652,11 +652,8 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private static int ReadConfigVersion(Stream s, BinaryReader bR)
+        private static int ReadConfigVersion(BinaryReader bR)
         {
-            if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "DC") //format
-                throw new InvalidDataException("DNS Server config file format is invalid.");
-
             int version = bR.ReadByte();
             if ((version < 1) || (version > 7))
                 throw new InvalidDataException("DNS Server config version not supported.");
@@ -683,18 +680,20 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/dns/localEndpoints: Setting is managed by the configuration manifest.");
         }
 
-        internal void CheckRestoreManifestLocalEndPoints(Stream stream)
+        internal void CheckRestoreManifestLocalEndPoints(BinaryReader reader)
         {
-            var reader = new BinaryReader(stream);
-            ReadConfigVersion(stream, reader);
-            stream.ReadShortString(); // server domain
+            ReadConfigVersion(reader);
+            reader.BaseStream.ReadShortString(); // server domain
             CheckManifestLocalEndPoints(ReadLocalEndPoints(reader));
         }
 
         private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false)
         {
+            if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "DC")
+                throw new InvalidDataException("DNS Server config file format is invalid.");
+
             var bR = new BinaryReader(s);
-            int version = ReadConfigVersion(s, bR);
+            int version = ReadConfigVersion(bR);
 
             //general
             string serverDomain = s.ReadShortString();
@@ -712,7 +711,7 @@ namespace DnsServerCore.Dns
             }
 
             IReadOnlyList<IPEndPoint> localEndPoints = ReadLocalEndPoints(bR);
-            if (!isConfigTransfer)
+            if (!isConfigTransfer && (readOwnership || !_manifestOwnsLocalEndPoints))
                 _localEndPoints = localEndPoints;
 
             NetworkAddress[] ipv4SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);

@@ -152,101 +152,119 @@ namespace DnsServerCore
             }
         }
 
+        private readonly record struct LegacyWebConfiguration(int HttpPort, int TlsPort, IReadOnlyList<IPAddress> Addresses,
+            bool EnableTls, bool EnableHttp3, bool RedirectToTls, bool UseSelfSignedCertificate,
+            string CertificatePath, string CertificatePassword, string RealIpHeader);
+
+        private static LegacyWebConfiguration ReadLegacyWebConfiguration(BinaryReader reader, int version)
+        {
+            int httpPort = reader.ReadInt32();
+            int tlsPort = reader.ReadInt32();
+            int addressCount = reader.ReadByte();
+            IPAddress[] addresses = addressCount == 0 ? [IPAddress.Any, IPAddress.IPv6Any] : new IPAddress[addressCount];
+            for (int i = 0; i < addressCount; i++)
+                addresses[i] = IPAddressExtensions.ReadFrom(reader);
+
+            bool enableTls = reader.ReadBoolean();
+            bool enableHttp3 = version >= 33 ? reader.ReadBoolean() : enableTls && QuicConnection.IsSupported && Socket.OSSupportsIPv6;
+            bool redirectToTls = reader.ReadBoolean();
+            bool useSelfSignedCertificate = reader.ReadBoolean();
+            string certificatePath = reader.BaseStream.ReadShortString();
+            string certificatePassword = reader.BaseStream.ReadShortString();
+            string realIpHeader = version >= 38 ? reader.BaseStream.ReadShortString() : "X-Real-IP";
+
+            return new LegacyWebConfiguration(httpPort, tlsPort, addresses, enableTls, enableHttp3, redirectToTls,
+                useSelfSignedCertificate, certificatePath.Length == 0 ? null : certificatePath, certificatePassword, realIpHeader);
+        }
+
+        private static IReadOnlyList<IPEndPoint> ReadLegacyLocalEndPoints(BinaryReader reader)
+        {
+            int count = reader.ReadByte();
+            var endpoints = new List<IPEndPoint>(count);
+            for (int i = 0; i < count; i++)
+            {
+                var endpoint = (IPEndPoint)EndPointExtensions.ReadFrom(reader);
+                if (endpoint.Port != 853)
+                    endpoints.Add(endpoint);
+            }
+
+            return DnsServer.NormalizeLocalEndPoints(endpoints);
+        }
+
+        private void CheckRestoreManifestLocalEndPoints(Stream stream)
+        {
+            var reader = new BinaryReader(stream);
+            string format = Encoding.ASCII.GetString(stream.ReadExactly(2));
+            if (format == "DC")
+            {
+                _dnsServer.CheckRestoreManifestLocalEndPoints(reader);
+                return;
+            }
+
+            if (format == "DS")
+            {
+                int version = reader.ReadByte();
+                if (version is >= 28 and <= 42)
+                {
+                    ReadLegacyWebConfiguration(reader, version);
+                    stream.ReadShortString(); // server domain
+                    _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
+                    return;
+                }
+
+                if (version is >= 2 and <= 5)
+                {
+                    _dnsServer.CheckManifestLocalEndPoints(DnsServer.NormalizeLocalEndPoints(null));
+                    return;
+                }
+            }
+
+            throw new InvalidDataException("/dns/localEndpoints: Cannot verify the DNS listeners in this backup format.");
+        }
+
         private void ReadConfigFromV42(BinaryReader bR, int version)
         {
-            //web service
+            LegacyWebConfiguration web = ReadLegacyWebConfiguration(bR, version);
+            _webServiceHttpPort = web.HttpPort;
+            _webServiceTlsPort = web.TlsPort;
+            _webServiceLocalAddresses = web.Addresses;
+            _webServiceEnableTls = web.EnableTls;
+            _webServiceEnableHttp3 = web.EnableHttp3;
+            _webServiceHttpToTlsRedirect = web.RedirectToTls;
+            _webServiceUseSelfSignedTlsCertificate = web.UseSelfSignedCertificate;
+            _webServiceTlsCertificatePath = web.CertificatePath;
+            _webServiceTlsCertificatePassword = web.CertificatePassword;
+
+            if (_webServiceTlsCertificatePath is null)
             {
-                _webServiceHttpPort = bR.ReadInt32();
-                _webServiceTlsPort = bR.ReadInt32();
-
-                {
-                    int count = bR.ReadByte();
-                    if (count > 0)
-                    {
-                        IPAddress[] localAddresses = new IPAddress[count];
-
-                        for (int i = 0; i < count; i++)
-                            localAddresses[i] = IPAddressExtensions.ReadFrom(bR);
-
-                        _webServiceLocalAddresses = localAddresses;
-                    }
-                    else
-                    {
-                        _webServiceLocalAddresses = new IPAddress[] { IPAddress.Any, IPAddress.IPv6Any };
-                    }
-                }
-
-                _webServiceEnableTls = bR.ReadBoolean();
-
-                if (version >= 33)
-                    _webServiceEnableHttp3 = bR.ReadBoolean();
-                else
-                    _webServiceEnableHttp3 = _webServiceEnableTls && QuicConnection.IsSupported && Socket.OSSupportsIPv6;
-
-                _webServiceHttpToTlsRedirect = bR.ReadBoolean();
-                _webServiceUseSelfSignedTlsCertificate = bR.ReadBoolean();
-
-                _webServiceTlsCertificatePath = bR.BaseStream.ReadShortString();
-                _webServiceTlsCertificatePassword = bR.BaseStream.ReadShortString();
-
-                if (_webServiceTlsCertificatePath.Length == 0)
-                    _webServiceTlsCertificatePath = null;
-
-                if (_webServiceTlsCertificatePath is null)
-                {
-                    StopTlsCertificateUpdateTimer();
-                }
-                else
-                {
-                    string webServiceTlsCertificatePath = _log.ConvertToAbsolutePath(_webServiceTlsCertificatePath);
-
-                    try
-                    {
-                        LoadWebServiceTlsCertificate(webServiceTlsCertificatePath, _webServiceTlsCertificatePassword);
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Write("DNS Server encountered an error while loading Web Service TLS certificate: " + webServiceTlsCertificatePath, ex);
-                    }
-
-                    StartTlsCertificateUpdateTimer();
-                }
-
-                CheckAndLoadSelfSignedCertificate(false, false);
-
-                if (version >= 38)
-                    _webServiceRealIpHeader = bR.BaseStream.ReadShortString();
-                else
-                    _webServiceRealIpHeader = "X-Real-IP";
+                StopTlsCertificateUpdateTimer();
             }
+            else
+            {
+                string webServiceTlsCertificatePath = _log.ConvertToAbsolutePath(_webServiceTlsCertificatePath);
+
+                try
+                {
+                    LoadWebServiceTlsCertificate(webServiceTlsCertificatePath, _webServiceTlsCertificatePassword);
+                }
+                catch (Exception ex)
+                {
+                    _log.Write("DNS Server encountered an error while loading Web Service TLS certificate: " + webServiceTlsCertificatePath, ex);
+                }
+
+                StartTlsCertificateUpdateTimer();
+            }
+
+            CheckAndLoadSelfSignedCertificate(false, false);
+            _webServiceRealIpHeader = web.RealIpHeader;
 
             //dns
             {
                 //general
                 _dnsServer.ServerDomain = bR.BaseStream.ReadShortString();
-
-                {
-                    int count = bR.ReadByte();
-                    if (count > 0)
-                    {
-                        List<IPEndPoint> localEndPoints = new List<IPEndPoint>(count);
-
-                        for (int i = 0; i < count; i++)
-                        {
-                            IPEndPoint ep = EndPointExtensions.ReadFrom(bR) as IPEndPoint;
-                            if (ep.Port == 853)
-                                continue; //to avoid validation exception
-
-                            localEndPoints.Add(ep);
-                        }
-
-                        _dnsServer.LocalEndPoints = localEndPoints;
-                    }
-                    else
-                    {
-                        _dnsServer.LocalEndPoints = new IPEndPoint[] { new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53) };
-                    }
-                }
+                IReadOnlyList<IPEndPoint> endpoints = ReadLegacyLocalEndPoints(bR);
+                if (!_dnsServer.ManifestOwnsLocalEndPoints)
+                    _dnsServer.LocalEndPoints = endpoints;
 
                 if (version >= 34)
                 {
@@ -1222,56 +1240,9 @@ namespace DnsServerCore
                 _dnsServer.BlockListZoneManager.BlockListUpdateIntervalHours = 24;
             }
 
-            if (version >= 11)
-            {
-                int count = bR.ReadByte();
-                if (count > 0)
-                {
-                    List<IPEndPoint> localEndPoints = new List<IPEndPoint>(count);
-
-                    for (int i = 0; i < count; i++)
-                    {
-                        IPEndPoint ep = EndPointExtensions.ReadFrom(bR) as IPEndPoint;
-                        if (ep.Port == 853)
-                            continue; //to avoid validation exception
-
-                        localEndPoints.Add(ep);
-                    }
-
-                    _dnsServer.LocalEndPoints = localEndPoints;
-                }
-                else
-                {
-                    _dnsServer.LocalEndPoints = new IPEndPoint[] { new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53) };
-                }
-            }
-            else if (version >= 6)
-            {
-                int count = bR.ReadByte();
-                if (count > 0)
-                {
-                    List<IPEndPoint> localEndPoints = new List<IPEndPoint>(count);
-
-                    for (int i = 0; i < count; i++)
-                    {
-                        IPEndPoint ep = EndPointExtensions.ReadFrom(bR) as IPEndPoint;
-                        if (ep.Port == 853)
-                            continue; //to avoid validation exception
-
-                        localEndPoints.Add(ep);
-                    }
-
-                    _dnsServer.LocalEndPoints = localEndPoints;
-                }
-                else
-                {
-                    _dnsServer.LocalEndPoints = new IPEndPoint[] { new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53) };
-                }
-            }
-            else
-            {
-                _dnsServer.LocalEndPoints = new IPEndPoint[] { new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53) };
-            }
+            IReadOnlyList<IPEndPoint> endpoints = version >= 6 ? ReadLegacyLocalEndPoints(bR) : DnsServer.NormalizeLocalEndPoints(null);
+            if (!_dnsServer.ManifestOwnsLocalEndPoints)
+                _dnsServer.LocalEndPoints = endpoints;
 
             if (version >= 8)
             {

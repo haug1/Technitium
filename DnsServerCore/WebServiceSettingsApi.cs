@@ -2055,7 +2055,7 @@ namespace DnsServerCore
                                     if (checkDns && archive.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                                     {
                                         using Stream dnsConfiguration = dnsEntry.Open();
-                                        _dnsWebService._dnsServer.CheckRestoreManifestLocalEndPoints(dnsConfiguration);
+                                        _dnsWebService.CheckRestoreManifestLocalEndPoints(dnsConfiguration);
                                     }
                                 }
 

@@ -1,6 +1,7 @@
 using DnsServerCore.Configuration;
 using System;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -9,6 +10,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 using Xunit;
@@ -114,6 +116,50 @@ namespace DnsServerCore.Tests
             Assert.Equal(180, current.GetProperty("maxLogFileDays").GetInt32());
             Assert.Equal(endpoint.ToString(), current.GetProperty("dnsServerLocalEndPoints")[0].GetString());
             Assert.False(current.GetProperty("noStackTrace").GetBoolean());
+        }
+
+        [Fact]
+        public async Task LegacyCombinedBackupChecksManagedDnsListenersBeforeChangingSettings()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            JsonElement settings = await server.GetSettingsAsync();
+            IPEndPoint current = IPEndPoint.Parse(settings.GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
+            string manifest = ListenerManifest(current);
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+
+            using var backup = new MemoryStream();
+            using (var archive = new ZipArchive(backup, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                using var writer = new BinaryWriter(archive.CreateEntry("dns.config").Open());
+                writer.Write("DS"u8);
+                writer.Write((byte)42);
+                writer.Write(5380); // web HTTP port
+                writer.Write(53443); // web TLS port
+                writer.Write((byte)0); // web listener addresses
+                writer.Write(false); // web TLS
+                writer.Write(false); // web HTTP/3
+                writer.Write(false); // redirect to TLS
+                writer.Write(false); // self-signed certificate
+                writer.Write(string.Empty);
+                writer.Write(string.Empty);
+                writer.Write("X-Real-IP");
+                writer.Write("legacy.test");
+                writer.Write((byte)1);
+                LoopbackDnsServer.GetLoopbackEndPoint().WriteTo(writer);
+                // The prefix is sufficient for ownership preflight.
+            }
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(backup.ToArray()), "file", "legacy.zip");
+            JsonElement rejected = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/localEndpoints", rejected.GetProperty("errorMessage").GetString());
+            JsonElement after = await server.GetSettingsAsync();
+            Assert.Equal(settings.GetProperty("dnsServerDomain").GetString(), after.GetProperty("dnsServerDomain").GetString());
+            Assert.Equal(settings.GetProperty("webServiceHttpPort").GetInt32(), after.GetProperty("webServiceHttpPort").GetInt32());
+            await AssertListenerAnswersAsync(current);
         }
 
         [Fact]
