@@ -51,7 +51,7 @@ namespace DnsServerCore.Configuration
                             string group = entry.Value.GetString();
                             CheckLength(entry.Name, path);
                             CheckLength(group, path);
-                            if (!auth.Groups.Any(candidate => candidate.Name.Equals(group, StringComparison.OrdinalIgnoreCase)))
+                            if (!ConfigurationGroups.ExistsAfterApply(manifest, auth, group))
                                 throw new InvalidDataException($"{path}: The mapped local group does not exist.");
                             groups[entry.Name] = group;
                         }
@@ -181,13 +181,8 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static void Compare(JsonElement auth, JsonElement snapshot, List<ConfigurationChange> changes)
+        internal static void Compare(JsonElement snapshot, List<ConfigurationChange> changes)
         {
-            foreach (JsonProperty section in auth.EnumerateObject())
-            {
-                if (section.Name != "ldap")
-                    throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/auth", section.Name)}: Planning for this setting is not implemented.");
-            }
             JsonElement before = snapshot.GetProperty("current");
             foreach (JsonProperty field in snapshot.GetProperty("desired").EnumerateObject())
             {

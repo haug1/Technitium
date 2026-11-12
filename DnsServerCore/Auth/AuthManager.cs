@@ -481,15 +481,15 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void SaveConfigFileInternal(Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null)
+        private void SaveConfigFileInternal(Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, zonePermissions, ldap);
-                if (zonePermissions is not null || ldap is not null)
+                WriteConfigTo(fS, zonePermissions, ldap, groupChanges);
+                if (zonePermissions is not null || ldap is not null || groupChanges is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -498,9 +498,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0)
             {
                 persist(null);
                 return;
@@ -508,6 +508,12 @@ namespace DnsServerCore.Auth
 
             lock (_saveLock)
             {
+                foreach (var (name, candidate) in groupChanges)
+                {
+                    if (candidate is null && _groups.TryGetValue(name, out Group group))
+                        ConfigurationGroups.ValidateRemoval(this, group, ldap, ConfigurationPlan.AppendPath(ConfigurationGroups.Path, group.Name));
+                }
+
                 Permission permissions = membership.Count == 0 ? null : GetPermission(PermissionSection.Zones).CopySection();
                 Group admins = GetGroup(Group.ADMINISTRATORS);
                 Group dnsAdmins = GetGroup(Group.DNS_ADMINISTRATORS);
@@ -524,11 +530,21 @@ namespace DnsServerCore.Auth
 
                 persist(() =>
                 {
-                    if (permissions is not null || ldap is not null)
-                        SaveConfigFileInternal(permissions, ldap);
+                    if (permissions is not null || ldap is not null || groupChanges.Count > 0)
+                        SaveConfigFileInternal(permissions, ldap, groupChanges.Count > 0 ? groupChanges : null);
                     if (ldapOwnership is not null)
                         WriteLdapOwnership(ldapOwnership);
                 });
+                foreach (var (name, group) in groupChanges)
+                {
+                    if (group is null)
+                        _groups.TryRemove(name, out _);
+                    else if (_groups.TryGetValue(name, out Group existing))
+                        existing.Description = group.Description;
+                    else
+                        _groups.TryAdd(name, group);
+                }
+
                 if (ldapOwnership is not null)
                     _managedLdapFields = ldapOwnership;
                 if (permissions is not null)
@@ -892,17 +908,33 @@ namespace DnsServerCore.Auth
             _ldapEnabled = ldap.Enabled;
         }
 
-        private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null)
+        private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
             bW.Write(Encoding.ASCII.GetBytes("AS")); //format
             bW.Write((byte)4); //version
 
-            bW.Write(Convert.ToByte(_groups.Count));
-
-            foreach (KeyValuePair<string, Group> group in _groups)
-                group.Value.WriteTo(bW);
+            if (groupChanges is null)
+            {
+                bW.Write(Convert.ToByte(_groups.Count));
+                foreach (KeyValuePair<string, Group> group in _groups)
+                    group.Value.WriteTo(bW);
+            }
+            else
+            {
+                var groups = new Dictionary<string, Group>(_groups);
+                foreach (var (name, group) in groupChanges)
+                {
+                    if (group is null)
+                        groups.Remove(name);
+                    else
+                        groups[name] = group;
+                }
+                bW.Write(Convert.ToByte(groups.Count));
+                foreach (Group group in groups.Values)
+                    group.WriteTo(bW);
+            }
 
             bW.Write(Convert.ToByte(_users.Count));
 
@@ -1072,6 +1104,28 @@ namespace DnsServerCore.Auth
             adminUser.AddToGroup(adminGroup);
         }
 
+        internal IReadOnlyCollection<string> SyncRemoteGroups(User user, IEnumerable<string> remoteGroups, bool sso)
+        {
+            lock (_saveLock)
+            {
+                var mapping = sso ? _ssoGroupMap : _ldapGroupMap;
+                if (mapping is null)
+                    return null;
+
+                var groups = new Dictionary<string, Group>();
+                foreach (string remoteGroup in remoteGroups)
+                {
+                    if (mapping.TryGetValue(remoteGroup, out string localName) && GetGroup(localName) is Group group)
+                        groups.TryAdd(group.Name.ToLowerInvariant(), group);
+                }
+
+                Group everyone = GetGroup(Group.EVERYONE);
+                groups[everyone.Name.ToLowerInvariant()] = everyone;
+                user.SyncGroups(groups);
+                return groups.Keys;
+            }
+        }
+
         private async Task<User> AuthenticateUserAsync(string username, string password, string totp, IPAddress remoteAddress)
         {
             IPAddress network = GetClientNetwork(remoteAddress);
@@ -1115,18 +1169,7 @@ namespace DnsServerCore.Auth
                         //create new user
                         user = CreateLdapUser(authInfo.DisplayName, username);
 
-                        if (_ldapGroupMap is not null)
-                        {
-                            foreach (string remoteGroup in authInfo.Groups)
-                            {
-                                if (_ldapGroupMap.TryGetValue(remoteGroup, out string localGroupName))
-                                {
-                                    Group localGroup = GetGroup(localGroupName);
-                                    if (localGroup is not null)
-                                        user.AddToGroup(localGroup);
-                                }
-                            }
-                        }
+                        SyncRemoteGroups(user, authInfo.Groups, sso: false);
 
                         _log.Write(new IPEndPoint(remoteAddress, 0), "LDAP user account was created successfully with username: " + user.Username + " (displayName: " + user.DisplayName + ")");
 
@@ -1179,26 +1222,7 @@ namespace DnsServerCore.Auth
                         //sync display name
                         user.DisplayName = authInfo.DisplayName;
 
-                        //sync group memberships
-                        if (_ldapGroupMap is not null)
-                        {
-                            Dictionary<string, Group> groups = new Dictionary<string, Group>(4);
-
-                            foreach (string remoteGroup in authInfo.Groups)
-                            {
-                                if (_ldapGroupMap.TryGetValue(remoteGroup, out string localGroupName))
-                                {
-                                    Group localGroup = GetGroup(localGroupName);
-                                    if (localGroup is not null)
-                                        groups[localGroup.Name.ToLowerInvariant()] = localGroup;
-                                }
-                            }
-
-                            Group everyone = GetGroup(Group.EVERYONE);
-                            groups[everyone.Name.ToLowerInvariant()] = everyone;
-
-                            user.SyncGroups(groups);
-                        }
+                        SyncRemoteGroups(user, authInfo.Groups, sso: false);
                     }
                     catch (LdapAuthFailedException ex)
                     {

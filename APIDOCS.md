@@ -5331,6 +5331,8 @@ DHCP scope apply requires DHCP Server Modify permission and Delete permission wh
 
 Standalone servers support LDAP preview and apply with Administration Delete permission. Export includes configured LDAP settings for callers with Administration View permission and lists the bind password in `missingInputs`. A changed secret invalidates the preview revision. The LDAP settings response lists managed paths in `managedSettings`. LDAP edits and auth restores that conflict with these paths are rejected before mutation.
 
+Standalone servers support local group preview and apply under `auth.groups` with Administration Delete permission. Administration View permission includes groups and descriptions in exports. An explicit null entry removes an unreferenced custom group. Built-in groups and groups referenced by users, permissions, or directory mappings cannot be removed.
+
 Configuration export includes supported unsigned primary zones and their policies and records for callers with Zones View permission on the section and the zone. Zone-generated and DHCP-maintained records are omitted. Unsupported zones and record collections are identified by path in `missingInputs`.
 
 Configuration export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. A scope whose reservations require a client identifier outside the manifest format is listed in `missingInputs`.

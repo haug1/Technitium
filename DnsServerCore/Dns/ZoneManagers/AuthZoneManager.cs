@@ -799,6 +799,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (auth.ManagedLdapFields.SequenceEqual(ldapOwnership))
                 ldapOwnership = null;
 
+            var groupChanges = ConfigurationGroups.Prepare(manifest, auth, ldap);
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
@@ -859,11 +860,11 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
                 !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
-            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null)
+            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null && groupChanges.Count == 0)
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
-            if (membership.Count > 0 || ldap is not null)
+            if (membership.Count > 0 || ldap is not null || groupChanges.Count > 0)
                 files.Add("auth.config");
             if (ownershipChanged)
                 files.Add(ManifestOwnershipFile);
@@ -947,7 +948,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         try
                         {
-                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, write =>
+                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, write =>
                             {
                                 writeAuth = write;
                                 persist();

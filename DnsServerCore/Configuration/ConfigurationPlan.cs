@@ -202,8 +202,21 @@ namespace DnsServerCore.Configuration
 
                 if (section.Name == "zones" && currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     CompareZones(section.Value, zones, changes);
-                else if (section.Name == "auth" && currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
-                    ConfigurationLdap.Compare(section.Value, ldap, changes);
+                else if (section.Name == "auth")
+                {
+                    foreach (JsonProperty authSection in section.Value.EnumerateObject())
+                    {
+                        if (authSection.Name == "ldap" && currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
+                            ConfigurationLdap.Compare(ldap, changes);
+                        else if (authSection.Name == "groups" && currentSettings.TryGetProperty("manifestGroups", out JsonElement groups))
+                        {
+                            foreach (JsonProperty change in groups.GetProperty("changes").EnumerateObject())
+                                changes.Add(new ConfigurationChange(change.Name, (ConfigurationChangeKind)change.Value.GetInt32(), false));
+                        }
+                        else
+                            throw new InvalidDataException($"{AppendPath("/auth", authSection.Name)}: Planning for this setting is not implemented.");
+                    }
+                }
                 else if (section.Name == "dhcp" && currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
                     ConfigurationDhcp.Compare(section.Value, scopes, changes);
                 else
@@ -283,6 +296,8 @@ namespace DnsServerCore.Configuration
                     ldap.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestLdapOwnership", out JsonElement ldapOwnership))
                     ldapOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestGroups", out JsonElement groups))
+                    groups.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
@@ -790,6 +805,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
+                throw new InvalidDataException("/auth/groups: Applying group settings to a cluster is not implemented.");
             if (ConfigurationLdap.IsDeclared(manifest))
                 throw new InvalidDataException("/auth/ldap: Applying LDAP settings to a cluster is not implemented.");
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
@@ -902,7 +919,7 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (path is ConfigurationLdap.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationLdap.Path or ConfigurationGroups.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 

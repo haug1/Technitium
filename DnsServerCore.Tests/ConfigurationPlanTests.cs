@@ -791,6 +791,8 @@ namespace DnsServerCore.Tests
             JsonObject actualExport = JsonNode.Parse(manifest.GetRawText())!.AsObject();
             Assert.NotNull(actualExport["dhcp"]?["scopes"]?["Default"]);
             actualExport.Remove("dhcp");
+            Assert.NotNull(actualExport["auth"]?["groups"]?["Administrators"]);
+            actualExport.Remove("auth");
             Assert.True(JsonNode.DeepEquals(expectedExport, actualExport));
             Assert.Equal("Http", manifest.GetProperty("dns").GetProperty("proxy").GetProperty("type").GetString());
 
@@ -3336,6 +3338,65 @@ namespace DnsServerCore.Tests
             {
                 Environment.SetEnvironmentVariable(variable, previous);
             }
+        }
+
+        [Fact]
+        public async Task GroupManifestResolvesLdapMappingsAndPreservesExistingMembership()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string create = """
+                {"schemaVersion":1,"auth":{
+                    "groups":{"Operations":{"description":"Operations group"}},
+                    "ldap":{"groupMap":{"remote-ops":"Operations"}}
+                }}
+                """;
+            JsonElement preview = await PreviewAsync(server, create);
+            Assert.Contains(preview.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/auth/groups/Operations"));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, create, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, create)).GetProperty("changes").EnumerateArray());
+
+            const string remove = """{"schemaVersion":1,"auth":{"groups":{"operations":null}}}""";
+            using (var content = new StringContent(remove, Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/auth/groups/operations", rejected.GetProperty("errorMessage").GetString());
+            }
+
+            using var user = new FormUrlEncodedContent([new("user", "operator"), new("pass", "fixture-password")]);
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/create", server.AdminToken, user));
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/groups/set?group=operations&members=operator", server.AdminToken));
+            const string update = """
+                {"schemaVersion":1,"auth":{"groups":{"operations":{"description":"Updated operations"}}}}
+                """;
+            string revision = (await PreviewAsync(server, update)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, update, revision));
+            await server.RestartAsync();
+            JsonElement group = await server.CallAsync("admin/groups/get?group=operations", server.AdminToken);
+            LoopbackWebService.AssertOk(group);
+            Assert.Contains(group.GetProperty("response").GetProperty("members").EnumerateArray(), member => member.ValueEquals("operator"));
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement groups = export.GetProperty("response").GetProperty("manifest").GetProperty("auth").GetProperty("groups");
+            Assert.Equal("Updated operations", groups.GetProperty("Operations").GetProperty("description").GetString());
+
+            const string removeWithMapping = """
+                {"schemaVersion":1,"auth":{"groups":{"operations":null},"ldap":{"groupMap":null}}}
+                """;
+            using (var content = new StringContent(removeWithMapping, Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/auth/groups/operations", rejected.GetProperty("errorMessage").GetString());
+            }
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/groups/set?group=operations&members=", server.AdminToken));
+            revision = (await PreviewAsync(server, removeWithMapping)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, removeWithMapping, revision));
+            await server.RestartAsync();
+            Assert.Equal("error", (await server.CallAsync("admin/groups/get?group=operations", server.AdminToken)).GetProperty("status").GetString());
+            Assert.Empty((await PreviewAsync(server, removeWithMapping)).GetProperty("changes").EnumerateArray());
         }
 
         [Fact]

@@ -699,30 +699,7 @@ namespace DnsServerCore
                             user.DisplayName = displayName;
                     }
 
-                    //sync group membership
-                    {
-                        IReadOnlyDictionary<string, string> ssoGroupMap = _dnsWebService._authManager.SsoGroupMap;
-                        if (ssoGroupMap is not null)
-                        {
-                            Dictionary<string, Group> groups = new Dictionary<string, Group>(4);
-
-                            foreach (string remoteGroup in remoteGroups)
-                            {
-                                if (ssoGroupMap.TryGetValue(remoteGroup, out string localGroup))
-                                {
-                                    Group group = _dnsWebService._authManager.GetGroup(localGroup);
-                                    if (group is not null)
-                                        groups.TryAdd(group.Name.ToLowerInvariant(), group);
-                                }
-                            }
-
-                            Group everyone = _dnsWebService._authManager.GetGroup(Group.EVERYONE);
-                            groups[everyone.Name.ToLowerInvariant()] = everyone;
-
-                            user.SyncGroups(groups);
-                            memberOfGroups = groups.Keys;
-                        }
-                    }
+                    memberOfGroups = _dnsWebService._authManager.SyncRemoteGroups(user, remoteGroups, sso: true);
 
                     //create session
                     UserSession session = _dnsWebService._authManager.CreateSession(UserSessionType.Standard, null, user, remoteEP.Address, context.Request.Headers.UserAgent);

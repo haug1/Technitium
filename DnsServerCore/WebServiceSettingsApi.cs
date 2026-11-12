@@ -585,13 +585,15 @@ namespace DnsServerCore
 
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.View))
                 {
+                    if (!_dnsWebService._clusterManager.ClusterInitialized)
+                        manifest.Add("auth", new System.Text.Json.Nodes.JsonObject { ["groups"] = ConfigurationGroups.Export(_dnsWebService._authManager) });
                     ConfigurationLdap.Settings ldap = _dnsWebService._authManager.GetManifestLdapSettings();
                     if (!ConfigurationLdap.Same(ldap, ConfigurationLdap.Default))
                     {
                         if (_dnsWebService._clusterManager.ClusterInitialized)
                             missingInputs.Add(ConfigurationLdap.Path);
                         else
-                            manifest.Add("auth", new System.Text.Json.Nodes.JsonObject { ["ldap"] = ConfigurationLdap.Export(ldap) });
+                            manifest["auth"]["ldap"] = ConfigurationLdap.Export(ldap);
                         if (ldap.BindPassword is not null)
                             missingInputs.Add(ConfigurationLdap.Path + "/bindPassword");
                     }
@@ -976,6 +978,12 @@ namespace DnsServerCore
                     ConfigurationLdap.Settings ldap = preparedLdap ?? PrepareLdapForSession(manifest, sessionUser);
                     if (ldap is not null)
                         ConfigurationLdap.WriteSnapshot(writer, _dnsWebService._authManager.GetManifestLdapSettings(), ldap, _configurationRevisionKey);
+                    if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
+                    {
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
+                            throw new DnsWebServiceException("Access was denied.");
+                        ConfigurationGroups.WriteSnapshot(writer, manifest, _dnsWebService._authManager, ldap);
+                    }
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
                     if (webCertificate.HasValue)
