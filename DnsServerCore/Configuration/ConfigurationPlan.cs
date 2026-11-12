@@ -3,7 +3,10 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Mail;
+using System.Threading.Tasks;
+using DnsServerCore.Dns;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -103,9 +106,9 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static void ApplyLogging(ConfigurationManifest manifest, LogManager log)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false)
         {
-            CheckLoggingSupport(manifest);
+            CheckApplySupport(manifest);
 
             manifest.Settings.TryGetProperty("logging", out JsonElement logging);
             JsonElement? destination = GetLoggingValue(logging, "destination");
@@ -115,20 +118,32 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            log.ApplyManifestSettings(
+            return dns.ApplyManifestLocalEndPointsAsync(endpoints, alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
-                folder);
+                folder,
+                writeDnsConfig));
         }
 
-        internal static void CheckLoggingSupport(ConfigurationManifest manifest)
+        internal static void CheckApplySupport(ConfigurationManifest manifest)
         {
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
             {
                 if (section.Name is "schemaVersion" or "$schema")
                     continue;
+                if (section.Name == "dns")
+                {
+                    foreach (JsonProperty field in section.Value.EnumerateObject())
+                    {
+                        if (field.Name != "localEndpoints")
+                            throw new InvalidDataException($"/dns/{JsonEncodedText.Encode(field.Name)}: Applying this setting is not implemented.");
+                    }
+
+                    continue;
+                }
+
                 if (section.Name != "logging")
                     throw new InvalidDataException($"/{JsonEncodedText.Encode(section.Name)}: Applying this section is not implemented.");
 

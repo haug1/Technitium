@@ -1613,8 +1613,11 @@ namespace DnsServerCore
                     {
                         _log.Write("Attempting to restart DNS service.");
 
-                        await _dnsServer.StopAsync();
-                        await _dnsServer.StartAsync();
+                        await _settingsApi.WithConfigurationLockAsync(async () =>
+                        {
+                            await _dnsServer.StopAsync();
+                            await _dnsServer.StartAsync();
+                        });
 
                         _log.Write("DNS service was restarted successfully.");
                     }
@@ -2964,28 +2967,28 @@ namespace DnsServerCore
                     }
                 }
 
-                //start web service
-                if (throwIfBindFails)
-                    await StartWebServiceAsync(false);
-                else
-                    await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
-
-                //start dns and dhcp
-                await _dnsServer.StartAsync(throwIfBindFails);
-                _dhcpServer.Start();
-
-                _isRunning = true;
-                if (startupManifest is not null)
+                try
                 {
-                    try
+                    await _settingsApi.WithConfigurationLockAsync(async () =>
                     {
-                        await _settingsApi.ReconcileStartupConfigurationAsync(startupManifest);
-                    }
-                    catch
-                    {
-                        await StopAsync();
-                        throw;
-                    }
+                        // Start the web service and bind the DNS candidate before committing the manifest.
+                        if (throwIfBindFails)
+                            await StartWebServiceAsync(false);
+                        else
+                            await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
+
+                        _isRunning = true;
+                        IReadOnlyList<IPEndPoint> endpoints = startupManifest?.GetDnsLocalEndPoints();
+                        await _dnsServer.StartAsync(throwIfBindFails || (endpoints is not null), endpoints ?? _dnsServer.LocalEndPoints);
+                        _dhcpServer.Start();
+                        if (startupManifest is not null)
+                            await ConfigurationPlan.ApplyAsync(startupManifest, _log, _dnsServer, endpoints, alreadyActive: true);
+                    });
+                }
+                catch
+                {
+                    await StopAsync();
+                    throw;
                 }
 
                 _log.Write("DNS Server (v" + _currentVersion.ToString() + ") was started successfully.");

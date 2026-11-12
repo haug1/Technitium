@@ -60,16 +60,16 @@ The current preview covers DNS listener endpoints, authoritative DNS defaults, s
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config export https://dns.example.test > technitium.json` with the same token. The command writes stable manifest JSON for the supported preview fields. It omits blocklist source URLs because they can contain credentials, and reports the partial export on standard error. Supply those sources separately if the manifest needs to manage them.
 
-## Applying logging settings
+## Applying DNS listener and logging settings
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config apply path/to/technitium.json https://dns.example.test <revision>` with the revision printed by `config plan` and a token with Settings modify permission. Generate a new preview if the revision becomes stale.
 
-This implementation applies `logging.destination`, `logging.folder`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Other declarations are rejected before mutation. The server persists the values and their ownership together in `log.config`. Applying a manifest that omits a previously managed field releases ownership and keeps the current value. The settings API lists owned paths in `managedSettings`. Settings edits and backup restores that would change an owned value are rejected before other settings in the request are changed.
+This implementation applies `dns.localEndpoints`, `logging.destination`, `logging.folder`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Other declarations are rejected before mutation. The server persists the values and their ownership in `dns.config` and `log.config`. A failed DNS bind restores the previous listeners and rejects the apply. Applying a manifest that omits a previously managed field releases ownership and keeps the current value. The settings API lists owned paths in `managedSettings`. Settings edits and backup restores that would change an owned value are rejected before other settings in the request are changed.
 
 ### Startup
 
-Place `technitium.json` in the server's configuration directory to reconcile the supported logging settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. After listeners start successfully, the server commits logging values and ownership together.
+Place `technitium.json` in the server's configuration directory to reconcile the supported DNS listener and logging settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. The server binds the declared DNS listeners before committing values and ownership.
 
-The startup file takes effect again at the next restart. Update that file when changing the desired startup settings. With no startup file, the server continues with persisted values and ownership. To release all logging settings, apply or start with a manifest containing only `schemaVersion`.
+The startup file takes effect again at the next restart. Update that file when changing the desired startup settings. With no startup file, the server continues with persisted values and ownership. To release all managed settings, apply or start with a manifest containing only `schemaVersion`.
 
-If the process stops during manifest persistence, the next startup restores the previous logging configuration and ownership before loading settings. Startup then reconciles the startup manifest if one is present.
+If the process stops during manifest persistence, the next startup restores the previous DNS and logging configuration and ownership before loading settings. Startup then reconciles the startup manifest if one is present.

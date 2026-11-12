@@ -37,6 +37,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Mail;
 using System.Net.NetworkInformation;
@@ -122,6 +123,7 @@ namespace DnsServerCore.Dns
         readonly string _configFolder;
         readonly string _dohwwwFolder;
         IReadOnlyList<IPEndPoint> _localEndPoints;
+        bool _manifestOwnsLocalEndPoints;
         readonly LogManager _log;
 
         MailAddress _defaultResponsiblePerson;
@@ -465,7 +467,7 @@ namespace DnsServerCore.Dns
             {
                 using (FileStream fS = new FileStream(dnsConfigFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS, false);
+                    ReadConfigFrom(fS, false, readOwnership: true);
                 }
 
                 _log.Write("DNS Server config file was loaded: " + dnsConfigFile);
@@ -623,6 +625,7 @@ namespace DnsServerCore.Dns
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
                 WriteConfigTo(fS);
+                fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpConfigFile, configFile, true);
@@ -649,16 +652,49 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer)
+        private static int ReadConfigVersion(Stream s, BinaryReader bR)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "DC") //format
                 throw new InvalidDataException("DNS Server config file format is invalid.");
 
-            BinaryReader bR = new BinaryReader(s);
-
             int version = bR.ReadByte();
             if ((version < 1) || (version > 7))
                 throw new InvalidDataException("DNS Server config version not supported.");
+            return version;
+        }
+
+        private static IReadOnlyList<IPEndPoint> ReadLocalEndPoints(BinaryReader reader)
+        {
+            int count = reader.ReadByte();
+            if (count == 0)
+                return NormalizeLocalEndPoints(null);
+
+            var endpoints = new IPEndPoint[count];
+            for (int i = 0; i < count; i++)
+                endpoints[i] = (IPEndPoint)EndPointExtensions.ReadFrom(reader);
+            return endpoints;
+        }
+
+        internal bool ManifestOwnsLocalEndPoints => _manifestOwnsLocalEndPoints;
+
+        internal void CheckManifestLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints)
+        {
+            if (_manifestOwnsLocalEndPoints && !HaveSameLocalEndPoints(_localEndPoints, endpoints))
+                throw new DnsWebServiceException("/dns/localEndpoints: Setting is managed by the configuration manifest.");
+        }
+
+        internal void CheckRestoreManifestLocalEndPoints(Stream stream)
+        {
+            var reader = new BinaryReader(stream);
+            ReadConfigVersion(stream, reader);
+            stream.ReadShortString(); // server domain
+            CheckManifestLocalEndPoints(ReadLocalEndPoints(reader));
+        }
+
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false)
+        {
+            var bR = new BinaryReader(s);
+            int version = ReadConfigVersion(s, bR);
 
             //general
             string serverDomain = s.ReadShortString();
@@ -675,27 +711,9 @@ namespace DnsServerCore.Dns
                 }
             }
 
-            {
-                IPEndPoint[] localEndPoints;
-
-                int count = bR.ReadByte();
-                if (count > 0)
-                {
-                    IPEndPoint[] localEPs = new IPEndPoint[count];
-
-                    for (int i = 0; i < count; i++)
-                        localEPs[i] = (IPEndPoint)EndPointExtensions.ReadFrom(bR);
-
-                    localEndPoints = localEPs;
-                }
-                else
-                {
-                    localEndPoints = [new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53)];
-                }
-
-                if (!isConfigTransfer)
-                    _localEndPoints = localEndPoints;
-            }
+            IReadOnlyList<IPEndPoint> localEndPoints = ReadLocalEndPoints(bR);
+            if (!isConfigTransfer)
+                _localEndPoints = localEndPoints;
 
             NetworkAddress[] ipv4SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
             if (!isConfigTransfer)
@@ -1221,6 +1239,9 @@ namespace DnsServerCore.Dns
             int maxStatFileDays = bR.ReadInt32();
             if (!isConfigTransfer)
                 _statsManager.MaxStatFileDays = maxStatFileDays;
+
+            if (readOwnership)
+                _manifestOwnsLocalEndPoints = (version == 7) && (s.ReadByte() == 1);
         }
 
         private void WriteConfigTo(Stream s)
@@ -1512,6 +1533,9 @@ namespace DnsServerCore.Dns
             bW.Write(_queryLog is not null); //log all queries
             bW.Write(_statsManager.EnableInMemoryStats);
             bW.Write(_statsManager.MaxStatFileDays);
+            // Existing version 7 readers stop after maxStatFileDays.
+            if (_manifestOwnsLocalEndPoints)
+                bW.Write((byte)1);
         }
 
         #endregion
@@ -6209,9 +6233,10 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void UpdateThisServer()
+        private void UpdateThisServer(IReadOnlyList<IPEndPoint> endpoints = null)
         {
-            foreach (IPEndPoint localEndPoint in _localEndPoints)
+            endpoints ??= _localEndPoints;
+            foreach (IPEndPoint localEndPoint in endpoints)
             {
                 if (localEndPoint.Address.Equals(IPAddress.Any) || localEndPoint.Address.Equals(IPAddress.Loopback))
                 {
@@ -6226,7 +6251,7 @@ namespace DnsServerCore.Dns
                 }
             }
 
-            _thisServer = new NameServerAddress(_serverDomain, _localEndPoints[0]);
+            _thisServer = new NameServerAddress(_serverDomain, endpoints[0]);
         }
 
         #endregion
@@ -6253,9 +6278,9 @@ namespace DnsServerCore.Dns
 
         #region doh web service
 
-        private async Task StartDoHAsync(bool throwIfBindFails)
+        private async Task StartDoHAsync(bool throwIfBindFails, IReadOnlyList<IPEndPoint> endpoints)
         {
-            IReadOnlyList<IPAddress> localAddresses = WebUtilities.GetValidKestrelLocalAddresses(_localEndPoints.Convert(delegate (IPEndPoint ep) { return ep.Address; }));
+            IReadOnlyList<IPAddress> localAddresses = WebUtilities.GetValidKestrelLocalAddresses(endpoints.Convert(delegate (IPEndPoint ep) { return ep.Address; }));
 
             try
             {
@@ -6488,18 +6513,36 @@ namespace DnsServerCore.Dns
 
         #region public
 
-        public async Task StartAsync(bool throwIfBindFails = false)
+        public Task StartAsync(bool throwIfBindFails = false)
+        {
+            return StartAsync(throwIfBindFails, _localEndPoints);
+        }
+
+        internal async Task StartAsync(bool throwIfBindFails, IReadOnlyList<IPEndPoint> endpoints)
         {
             if (_disposed)
                 ObjectDisposedException.ThrowIf(_disposed, this);
-
             if (_state != ServiceState.Stopped)
                 throw new InvalidOperationException("DNS Server is already running.");
 
+            try
+            {
+                await StartListenersAsync(throwIfBindFails, endpoints);
+            }
+            catch
+            {
+                if (_state == ServiceState.Starting)
+                    await StopAsync();
+                throw;
+            }
+        }
+
+        private async Task StartListenersAsync(bool throwIfBindFails, IReadOnlyList<IPEndPoint> endpoints)
+        {
             _state = ServiceState.Starting;
 
             //bind on all local end points
-            foreach (IPEndPoint localEP in _localEndPoints)
+            foreach (IPEndPoint localEP in endpoints)
             {
                 Socket udpListener = null;
 
@@ -6783,19 +6826,19 @@ namespace DnsServerCore.Dns
             }
 
             if (_enableDnsOverHttp || _enableDnsOverHttpUnixSocket || ((_enableDnsOverHttps || _enableDnsOverHttpsUnixSocket) && (_dohSslServerAuthenticationOptions is not null)))
-                await StartDoHAsync(throwIfBindFails);
+                await StartDoHAsync(throwIfBindFails, endpoints);
 
             _qpmLimitSamplingTimer = new Timer(QpmLimitSamplingTimerCallback, null, Timeout.Infinite, Timeout.Infinite);
 
             _state = ServiceState.Running;
 
-            UpdateThisServer();
+            UpdateThisServer(endpoints);
             ResetQpsLimitTimer();
         }
 
         public async Task StopAsync()
         {
-            if (_state != ServiceState.Running)
+            if ((_state != ServiceState.Running) && (_state != ServiceState.Starting))
                 return;
 
             _state = ServiceState.Stopping;
@@ -6950,6 +6993,63 @@ namespace DnsServerCore.Dns
 
         public string ConfigFolder
         { get { return _configFolder; } }
+
+        internal static bool HaveSameLocalEndPoints(IReadOnlyList<IPEndPoint> current, IReadOnlyList<IPEndPoint> candidate)
+        {
+            // The interface qualifier is part of the binding even when the address and port match.
+            return current.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal)
+                .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
+        }
+
+        internal async Task ApplyManifestLocalEndPointsAsync(IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive, Action<Action> persist)
+        {
+            IReadOnlyList<IPEndPoint> previous = _localEndPoints;
+            bool owned = endpoints is not null;
+            bool changed = owned && !HaveSameLocalEndPoints(previous, endpoints);
+            bool restarted = changed && !alreadyActive;
+            try
+            {
+                if (restarted)
+                {
+                    await StopAsync();
+                    await StartAsync(true, endpoints);
+                }
+
+                lock (_saveLock)
+                {
+                    bool previouslyOwned = _manifestOwnsLocalEndPoints;
+                    if (!changed && (owned == previouslyOwned))
+                    {
+                        persist(null);
+                        return;
+                    }
+
+                    _localEndPoints = changed ? endpoints : previous;
+                    _manifestOwnsLocalEndPoints = owned;
+                    try
+                    {
+                        persist(SaveConfigFileInternal);
+                        _pendingSave = false;
+                    }
+                    catch
+                    {
+                        _localEndPoints = previous;
+                        _manifestOwnsLocalEndPoints = previouslyOwned;
+                        throw;
+                    }
+                }
+            }
+            catch
+            {
+                if (restarted)
+                {
+                    await StopAsync();
+                    await StartAsync(true, previous);
+                }
+
+                throw;
+            }
+        }
 
         internal static IReadOnlyList<IPEndPoint> NormalizeLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints, bool useDefaultPort = false)
         {

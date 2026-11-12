@@ -464,6 +464,8 @@ namespace DnsServerCore
                 jsonWriter.WriteString("logFolder", _dnsWebService._log.LogFolder);
                 jsonWriter.WriteNumber("maxLogFileDays", _dnsWebService._log.MaxLogFileDays);
                 jsonWriter.WriteStartArray("managedSettings");
+                if (_dnsWebService._dnsServer.ManifestOwnsLocalEndPoints)
+                    jsonWriter.WriteStringValue("/dns/localEndpoints");
                 foreach (string path in _dnsWebService._log.GetManagedManifestPaths())
                     jsonWriter.WriteStringValue(path);
                 jsonWriter.WriteEndArray();
@@ -544,37 +546,33 @@ namespace DnsServerCore
                     if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                         throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
 
-                    ConfigurationPlan.ApplyLogging(manifest, _dnsWebService._log);
+                    await ConfigurationPlan.ApplyAsync(manifest, _dnsWebService._log, _dnsWebService._dnsServer, manifest.GetDnsLocalEndPoints());
                 }
                 catch (InvalidDataException ex)
                 {
                     throw new DnsWebServiceException(ex.Message);
                 }
+                catch (SocketException)
+                {
+                    throw new DnsWebServiceException("/dns/localEndpoints: Could not bind the DNS listeners.");
+                }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
-                    throw new DnsWebServiceException("Could not persist the logging settings.");
+                    throw new DnsWebServiceException("Could not activate or persist the configuration settings.");
                 }
             }
 
-            public async Task WithConfigurationLockAsync(HttpContext context, Func<HttpContext, Task> action)
+            public Task WithConfigurationLockAsync(HttpContext context, Func<HttpContext, Task> action)
             {
-                await _configurationLock.WaitAsync(context.RequestAborted);
-                try
-                {
-                    await action(context);
-                }
-                finally
-                {
-                    _configurationLock.Release();
-                }
+                return WithConfigurationLockAsync(() => action(context), context.RequestAborted);
             }
 
-            internal async Task ReconcileStartupConfigurationAsync(ConfigurationManifest manifest)
+            internal async Task WithConfigurationLockAsync(Func<Task> action, CancellationToken cancellationToken = default)
             {
-                await _configurationLock.WaitAsync();
+                await _configurationLock.WaitAsync(cancellationToken);
                 try
                 {
-                    ConfigurationPlan.ApplyLogging(manifest, _dnsWebService._log);
+                    await action();
                 }
                 finally
                 {
@@ -639,6 +637,12 @@ namespace DnsServerCore
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
                 request.TryGetQueryOrForm("logFolder", out string logFolder);
                 _dnsWebService._log.CheckManifestOwnership(destination, noStackTrace, retentionDays, useLocalTime, logFolder);
+                IReadOnlyList<IPEndPoint> requestedDnsEndpoints = null;
+                if (request.TryQueryOrFormArray("dnsServerLocalEndPoints", InterfaceEndPoint.Parse, out IPEndPoint[] dnsServerLocalEndPoints))
+                {
+                    requestedDnsEndpoints = DnsServer.NormalizeLocalEndPoints(dnsServerLocalEndPoints, useDefaultPort: true);
+                    _dnsWebService._dnsServer.CheckManifestLocalEndPoints(requestedDnsEndpoints);
+                }
 
                 try
                 {
@@ -663,13 +667,12 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryQueryOrFormArray("dnsServerLocalEndPoints", InterfaceEndPoint.Parse, out IPEndPoint[] dnsServerLocalEndPoints))
+                        if ((requestedDnsEndpoints is not null) && !_dnsWebService._dnsServer.ManifestOwnsLocalEndPoints)
                         {
-                            IReadOnlyList<IPEndPoint> endpoints = DnsServer.NormalizeLocalEndPoints(dnsServerLocalEndPoints, useDefaultPort: true);
-                            if (!_dnsWebService._dnsServer.LocalEndPoints.HasSameItems(endpoints))
+                            if (!_dnsWebService._dnsServer.LocalEndPoints.HasSameItems(requestedDnsEndpoints))
                                 restartDnsService = true;
 
-                            _dnsWebService._dnsServer.LocalEndPoints = endpoints;
+                            _dnsWebService._dnsServer.LocalEndPoints = requestedDnsEndpoints;
                         }
 
                         if (request.TryQueryOrFormArray("dnsServerIPv4SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] dnsServerIPv4SourceAddresses))
@@ -2038,15 +2041,21 @@ namespace DnsServerCore
 
                             fS.Position = 0;
 
-                            if (logSettings && _dnsWebService._log.HasManagedLoggingSettings)
+                            bool checkLog = logSettings && _dnsWebService._log.HasManagedLoggingSettings;
+                            bool checkDns = dnsSettings && _dnsWebService._dnsServer.ManifestOwnsLocalEndPoints;
+                            if (checkLog || checkDns)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
-                                    ZipArchiveEntry entry = archive.GetEntry("log.config");
-                                    if (entry is not null)
+                                    if (checkLog && archive.GetEntry("log.config") is ZipArchiveEntry logEntry)
                                     {
-                                        using Stream logConfiguration = entry.Open();
+                                        using Stream logConfiguration = logEntry.Open();
                                         _dnsWebService._log.CheckRestoreManifestOwnership(logConfiguration);
+                                    }
+                                    if (checkDns && archive.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
+                                    {
+                                        using Stream dnsConfiguration = dnsEntry.Open();
+                                        _dnsWebService._dnsServer.CheckRestoreManifestLocalEndPoints(dnsConfiguration);
                                     }
                                 }
 

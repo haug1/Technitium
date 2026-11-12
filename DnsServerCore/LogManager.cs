@@ -106,7 +106,7 @@ namespace DnsServerCore
         {
             _isPortableApp = isPortableApp;
             _configFolder = configFolder;
-            ConfigurationJournal.Recover(_configFolder, "log.config");
+            ConfigurationJournal.Recover(_configFolder, "dns.config", "log.config");
 
             AppDomain.CurrentDomain.UnhandledException += delegate (object sender, UnhandledExceptionEventArgs e)
             {
@@ -324,7 +324,7 @@ namespace DnsServerCore
             return ConvertToRelativePath(ConvertToAbsolutePath(path));
         }
 
-        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder)
+        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig)
         {
             lock (_saveLock)
             {
@@ -352,7 +352,11 @@ namespace DnsServerCore
                     ((retentionDays ?? previousRetentionDays) == previousRetentionDays) &&
                     ((useLocalTime ?? previousUseLocalTime) == previousUseLocalTime) &&
                     string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal))
+                {
+                    if (writeDnsConfig is not null)
+                        ConfigurationJournal.Persist(_configFolder, writeDnsConfig, "dns.config");
                     return;
+                }
 
                 bool activate = ((destination ?? previousDestination) != previousDestination) ||
                     !string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal);
@@ -371,7 +375,10 @@ namespace DnsServerCore
                     if (activate)
                         ApplyLoggingType();
                     _managedSettings = managedSettings;
-                    ConfigurationJournal.Persist(_configFolder, SaveConfigFileInternal, "log.config");
+                    if (writeDnsConfig is null)
+                        ConfigurationJournal.Persist(_configFolder, SaveConfigFileInternal, "log.config");
+                    else
+                        ConfigurationJournal.Persist(_configFolder, writeDnsConfig + SaveConfigFileInternal, "dns.config", "log.config");
                     _pendingSave = false;
                 }
                 catch

@@ -1,12 +1,16 @@
 using DnsServerCore.Configuration;
 using System;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 using Xunit;
 
 namespace DnsServerCore.Tests
@@ -74,6 +78,88 @@ namespace DnsServerCore.Tests
                 Load("""{"schemaVersion":1,"dns":{"localEndpoints":["127.0.0.1","127.0.0.1:53"]}}""")).Message);
             Assert.Contains("853", Assert.Throws<InvalidDataException>(() =>
                 Load("""{"schemaVersion":1,"dns":{"localEndpoints":["127.0.0.1:853"]}}""")).Message);
+        }
+
+        [Fact]
+        public async Task LiveDnsListenerApplyPersistsOwnershipAndRejectsConflictingEdits()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            string previous = (await server.GetSettingsAsync()).GetProperty("dnsServerLocalEndPoints")[0].GetString()!;
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] previousBackup = await backup.Content.ReadAsByteArrayAsync();
+
+            IPEndPoint endpoint = LoopbackDnsServer.GetLoopbackEndPoint();
+            string manifest = ListenerManifest(endpoint);
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await AssertListenerAnswersAsync(endpoint);
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            await server.RestartAsync();
+            await AssertListenerAnswersAsync(endpoint);
+            JsonElement rejected = await server.CallAsync(
+                $"settings/set?dnsServerLocalEndPoints={Uri.EscapeDataString(previous)}&noStackTrace=true", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/localEndpoints", rejected.GetProperty("errorMessage").GetString());
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(previousBackup), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/dns/localEndpoints", restore.GetProperty("errorMessage").GetString());
+
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(180, current.GetProperty("maxLogFileDays").GetInt32());
+            Assert.Equal(endpoint.ToString(), current.GetProperty("dnsServerLocalEndPoints")[0].GetString());
+            Assert.False(current.GetProperty("noStackTrace").GetBoolean());
+        }
+
+        [Fact]
+        public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var occupied = new TcpListener(IPAddress.Loopback, 0);
+            occupied.Start();
+            string manifest = ListenerManifest((IPEndPoint)occupied.LocalEndpoint);
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+
+            JsonElement rejected = await ApplyAsync(server, manifest, revision);
+
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/localEndpoints", rejected.GetProperty("errorMessage").GetString());
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            Assert.Empty((await server.GetSettingsAsync()).GetProperty("managedSettings").EnumerateArray());
+        }
+
+        [Fact]
+        public async Task StartupBindsAndPersistsDeclaredDnsListeners()
+        {
+            IPEndPoint endpoint = LoopbackDnsServer.GetLoopbackEndPoint();
+            await using var server = await LoopbackWebService.StartAsync(startupManifest: ListenerManifest(endpoint));
+            await AssertListenerAnswersAsync(endpoint);
+            File.Delete(Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName));
+            await server.RestartAsync();
+            await AssertListenerAnswersAsync(endpoint);
+            Assert.Equal("/dns/localEndpoints", (await server.GetSettingsAsync()).GetProperty("managedSettings")[0].GetString());
+        }
+
+        private static string ListenerManifest(IPEndPoint endpoint)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                dns = new { localEndpoints = new[] { endpoint.ToString() } },
+                logging = new { retentionDays = 180 }
+            });
+        }
+
+        private static async Task AssertListenerAnswersAsync(IPEndPoint endpoint)
+        {
+            var client = new DnsClient(endpoint) { Timeout = 1000, Retries = 1 };
+            Assert.Equal(DnsResponseCode.Refused, (await client.ResolveAsync("example.invalid", DnsResourceRecordType.A)).RCODE);
         }
 
         [Fact]
@@ -278,10 +364,10 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task ApplyRestoresLiveLoggingSettingsWhenPersistenceFails()
+        public async Task ApplyRestoresDnsAndLoggingWhenSecondStoreFails()
         {
             await using var server = await LoopbackWebService.StartAsync();
-            const string manifest = """{"schemaVersion":1,"logging":{"retentionDays":180,"noStackTrace":true}}""";
+            string manifest = ListenerManifest(LoopbackDnsServer.GetLoopbackEndPoint());
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             string stagingPath = Path.Combine(server.ConfigurationDirectory, "log.tmp");
             Directory.CreateDirectory(stagingPath);
@@ -290,15 +376,17 @@ namespace DnsServerCore.Tests
 
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.Contains("persist", rejected.GetProperty("errorMessage").GetString());
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
             JsonElement current = await server.GetSettingsAsync();
             Assert.Equal(365, current.GetProperty("maxLogFileDays").GetInt32());
             Assert.False(current.GetProperty("noStackTrace").GetBoolean());
 
             Directory.Delete(stagingPath);
             await server.RestartAsync();
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
             JsonElement restored = await server.GetSettingsAsync();
             Assert.Equal(365, restored.GetProperty("maxLogFileDays").GetInt32());
-            Assert.False(restored.GetProperty("noStackTrace").GetBoolean());
+            Assert.Empty(restored.GetProperty("managedSettings").EnumerateArray());
         }
 
         [Fact]

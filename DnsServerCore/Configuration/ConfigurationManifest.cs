@@ -51,7 +51,7 @@ namespace DnsServerCore.Configuration
                 return null;
             }
 
-            ConfigurationPlan.CheckLoggingSupport(manifest);
+            ConfigurationPlan.CheckApplySupport(manifest);
             return manifest;
         }
 
@@ -92,6 +92,13 @@ namespace DnsServerCore.Configuration
             }
 
             return new ConfigurationManifest(filePath, root.Clone());
+        }
+
+        internal IReadOnlyList<IPEndPoint> GetDnsLocalEndPoints()
+        {
+            return Settings.TryGetProperty("dns", out JsonElement dns) && dns.TryGetProperty("localEndpoints", out JsonElement endpoints)
+                ? ReadDnsLocalEndPoints(endpoints)
+                : null;
         }
 
         internal static IReadOnlyList<IPEndPoint> ReadDnsLocalEndPoints(JsonElement value)
