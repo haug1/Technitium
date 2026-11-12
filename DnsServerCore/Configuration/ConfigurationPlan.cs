@@ -143,6 +143,7 @@ namespace DnsServerCore.Configuration
             ["/dns/listeners/http/unixSocket/path"] = Field<string>("dnsOverHttpUnixSocket", null, canApply: true),
             ["/dns/listeners/https/unixSocket/enabled"] = Field("enableDnsOverHttpsUnixSocket", false, canApply: true),
             ["/dns/listeners/https/unixSocket/path"] = Field<string>("dnsOverHttpsUnixSocket", null, canApply: true),
+            [ConfigurationDnsCertificate.Path + "/path"] = Field<string>("dnsTlsCertificatePath", null, canApply: true),
             ["/dns/listeners/useClientSubnetAsSource"] = Field("enableEDnsClientSubnetSourceAddress", false, canApply: true),
             ["/dns/listeners/http/helpRedirect"] = Field("enableDnsOverHttpHelpRedirect", true, canApply: true),
             ["/dns/listeners/http/realIpHeader"] = Field("dnsOverHttpRealIpHeader", "X-Real-IP", canApply: true),
@@ -176,9 +177,16 @@ namespace DnsServerCore.Configuration
 
             ValidateProxyAndForwarders(manifest, currentSettings);
             DnsServer.DnsBindings bindings = GetDnsBindings(manifest);
+            DnsServer.DnsBindings currentBindings = ReadCurrentDnsBindings(currentSettings);
+            bool hasCertificate = currentSettings.TryGetProperty("dnsListenerCertificateLoaded", out JsonElement loaded) && loaded.GetBoolean();
+            if (currentSettings.TryGetProperty("manifestDnsCertificate", out JsonElement certificate))
+            {
+                hasCertificate = certificate.GetProperty("desiredFile").ValueKind != JsonValueKind.Null;
+                if (!hasCertificate && ConfigurationDnsCertificate.HasSecureBindings(bindings, currentBindings))
+                    throw new InvalidDataException($"{ConfigurationDnsCertificate.Path}: Disable the secure DNS listeners before removing their certificate.");
+            }
             if (bindings != default)
-                ValidateDnsBindings(bindings, ReadCurrentDnsBindings(currentSettings),
-                    currentSettings.TryGetProperty("dnsListenerCertificateLoaded", out JsonElement loaded) && loaded.GetBoolean());
+                ValidateDnsBindings(bindings, currentBindings, hasCertificate);
             int? declaredWebTlsPort = manifest.Settings.TryGetProperty("web", out JsonElement web) &&
                 web.TryGetProperty("tlsPort", out JsonElement tlsPort)
                 ? tlsPort.ValueKind == JsonValueKind.Null ? _settings["/web/tlsPort"].Default.GetInt32() : decimal.ToInt32(tlsPort.GetDecimal())
@@ -241,6 +249,8 @@ namespace DnsServerCore.Configuration
                 }
                 if (currentSettings.TryGetProperty("dnsListenerCertificateLoaded", out JsonElement dnsCertificate))
                     dnsCertificate.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestDnsCertificate", out JsonElement certificate))
+                    certificate.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestProxyPassword", out JsonElement proxyPassword))
                     proxyPassword.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
@@ -259,7 +269,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate)
         {
             CheckApplySupport(manifest);
 
@@ -271,7 +281,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), proxy, alreadyActive, listenerTuningStaged, dnsBindingsStaged, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, alreadyActive, listenerTuningStaged, dnsBindingsStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -347,6 +357,18 @@ namespace DnsServerCore.Configuration
                 Setting setting = _settings["/dns/listeners/" + path];
                 return snapshot.TryGetProperty(setting.ApiField, out JsonElement value) ? value : setting.Default;
             }
+        }
+
+        internal static void ValidateDnsCertificateAndBindings(ConfigurationDnsCertificate.Candidate certificate, DnsServer.DnsBindings bindings,
+            DnsServer.DnsBindings current, bool hasCertificate)
+        {
+            if (certificate.Certificate is DnsServer.DnsCertificate desired)
+            {
+                hasCertificate = desired.Context is not null;
+                if (!hasCertificate && ConfigurationDnsCertificate.HasSecureBindings(bindings, current))
+                    throw new InvalidDataException($"{ConfigurationDnsCertificate.Path}: Disable the secure DNS listeners before removing their certificate.");
+            }
+            ValidateDnsBindings(bindings, current, hasCertificate);
         }
 
         internal static void ValidateDnsBindings(DnsServer.DnsBindings candidate, DnsServer.DnsBindings current, bool hasCertificate)
@@ -786,7 +808,7 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (path == "/dns/proxy" || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is "/dns/proxy" or ConfigurationDnsCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
@@ -1088,6 +1110,13 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path == ConfigurationDnsCertificate.Path)
+            {
+                ConfigurationDnsCertificate.Compare(desired, currentSettings,
+                    ConfigurationDnsCertificate.HasSecureBindings(default, ReadCurrentDnsBindings(currentSettings)), changes);
+                return;
+            }
+
             if (path == "/dns/proxy")
             {
                 ConfigurationProxy.Compare(desired, currentSettings, changes);

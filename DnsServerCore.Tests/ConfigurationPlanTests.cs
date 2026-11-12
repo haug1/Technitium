@@ -726,6 +726,107 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DnsCertificateApplyVerifiesThePreviewAndPreservesTheWorkingCertificate()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_DNS_CERTIFICATE_PASSWORD";
+            const string password = "fixture-certificate-password";
+            string? original = Environment.GetEnvironmentVariable(variable);
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, password);
+                string certificateFile = Path.Combine(server.ConfigurationDirectory, "resolver.pfx");
+                WriteCertificate(certificateFile);
+                int port = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+                string manifest = Manifest(port);
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.DoesNotContain(password, preview.GetRawText());
+                string activeThumbprint = WriteCertificate(certificateFile);
+                JsonElement stale = await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!);
+                Assert.Equal("error", stale.GetProperty("status").GetString());
+                Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+                Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("dnsTlsCertificatePath").ValueKind);
+
+                preview = await PreviewAsync(server, manifest);
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+                Assert.Equal(activeThumbprint, await ReadThumbprintAsync(port));
+                await server.RestartAsync();
+                Assert.Equal(activeThumbprint, await ReadThumbprintAsync(port));
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement exported = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(exported);
+                JsonElement response = exported.GetProperty("response");
+                Assert.Equal("resolver.pfx", response.GetProperty("manifest").GetProperty("dns").GetProperty("listeners")
+                    .GetProperty("certificate").GetProperty("path").GetString());
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
+                    input => input.GetString() == "/dns/listeners/certificate/password");
+                Assert.DoesNotContain(password, response.GetRawText());
+
+                JsonElement conflict = await server.CallAsync("settings/set?dnsTlsCertificatePath=replacement.pfx", server.AdminToken);
+                Assert.Equal("error", conflict.GetProperty("status").GetString());
+                Assert.Contains("/dns/listeners/certificate/path", conflict.GetProperty("errorMessage").GetString());
+
+                using var occupied = new TcpListener(IPAddress.Loopback, 0);
+                occupied.Start();
+                string rejectedManifest = Manifest(((IPEndPoint)occupied.LocalEndpoint).Port, "replacement.pfx");
+                WriteCertificate(Path.Combine(server.ConfigurationDirectory, "replacement.pfx"));
+                JsonElement replacement = await PreviewAsync(server, rejectedManifest);
+                JsonElement rejected = await ApplyAsync(server, rejectedManifest, replacement.GetProperty("revision").GetString()!);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Equal(activeThumbprint, await ReadThumbprintAsync(port));
+                await server.RestartAsync();
+                Assert.Equal(activeThumbprint, await ReadThumbprintAsync(port));
+
+                const string reset = """
+                    {"schemaVersion":1,"dns":{"listeners":{"tls":{"enabled":false},"certificate":null}}}
+                    """;
+                JsonElement remove = await PreviewAsync(server, reset);
+                LoopbackWebService.AssertOk(await ApplyAsync(server, reset, remove.GetProperty("revision").GetString()!));
+                Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("dnsTlsCertificatePath").ValueKind);
+
+                string startupPath = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+                await File.WriteAllTextAsync(Path.Combine(server.ConfigurationDirectory, "certificate-password"), password);
+                JsonNode startup = JsonNode.Parse(manifest)!;
+                startup["dns"]!["listeners"]!["certificate"]!["password"] = new JsonObject { ["file"] = "certificate-password" };
+                await File.WriteAllTextAsync(startupPath, startup.ToJsonString());
+                await server.RestartAsync();
+                Assert.Equal(activeThumbprint, await ReadThumbprintAsync(port));
+                File.Delete(startupPath);
+                await server.RestartAsync();
+                Assert.Equal(activeThumbprint, await ReadThumbprintAsync(port));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, original);
+            }
+
+            static string Manifest(int port, string file = "resolver.pfx") => $$"""
+                {"schemaVersion":1,"dns":{"listeners":{"tls":{"enabled":true,"port":{{port}} },
+                  "certificate":{"path":"{{file}}","password":{"environment":"TECHNITIUM_TEST_DNS_CERTIFICATE_PASSWORD"} } } } }
+                """;
+
+            static string WriteCertificate(string path)
+            {
+                using var key = System.Security.Cryptography.RSA.Create(2048);
+                var request = new CertificateRequest("CN=resolver.test", key, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                    System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+                using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+                File.WriteAllBytes(path, certificate.Export(X509ContentType.Pkcs12, password));
+                return certificate.Thumbprint;
+            }
+
+            static async Task<string> ReadThumbprintAsync(int port)
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, port);
+                using var stream = new System.Net.Security.SslStream(client.GetStream(), false, (_, _, _, _) => true);
+                await stream.AuthenticateAsClientAsync("resolver.test");
+                return stream.RemoteCertificate!.GetCertHashString();
+            }
+        }
+
+        [Fact]
         public async Task OptionalDnsBindingPersistsAndRecoversAfterABindFailure()
         {
             await using var server = await LoopbackWebService.StartAsync();

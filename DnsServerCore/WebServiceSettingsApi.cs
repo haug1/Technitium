@@ -595,7 +595,9 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest));
-                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser);
+                    CheckDnsCertificatePreviewPermission(manifest, sessionUser);
+                    ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer, preview: true);
+                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, dnsCertificate: dnsCertificate);
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
@@ -644,7 +646,7 @@ namespace DnsServerCore
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     ConfigurationPlan.CheckApplySupport(manifest);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                    ConfigurationProxy.Candidate proxy = CheckApplyRevision(manifest, expected, sessionUser);
+                    var (proxy, dnsCertificate) = CheckApplyRevision(manifest, expected, sessionUser);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners);
 
@@ -662,7 +664,7 @@ namespace DnsServerCore
                     }
                     else
                     {
-                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, listeners: listeners);
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, listeners: listeners);
                     }
                 }
                 catch (InvalidDataException ex)
@@ -679,16 +681,17 @@ namespace DnsServerCore
                 }
             }
 
-            private ConfigurationProxy.Candidate CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
+            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
                 ConfigurationProxy.Candidate proxy = ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
-                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy);
+                ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer);
+                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate);
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
-                ConfigurationPlan.ValidateDnsBindings(ConfigurationPlan.GetDnsBindings(manifest),
+                ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, ConfigurationPlan.GetDnsBindings(manifest),
                     _dnsWebService._dnsServer.CaptureDnsBindings(), _dnsWebService._dnsServer.HasDnsListenerCertificate);
-                return proxy;
+                return (proxy, dnsCertificate);
             }
 
             private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation, User sessionUser)
@@ -698,9 +701,9 @@ namespace DnsServerCore
                     await WithConfigurationLockAsync(async () =>
                     {
                         ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                        ConfigurationProxy.Candidate proxy = CheckApplyRevision(manifest, expected, sessionUser);
+                        var (proxy, dnsCertificate) = CheckApplyRevision(manifest, expected, sessionUser);
                         _dnsWebService.ValidateManifestWebListeners(listeners);
-                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy);
+                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate);
                     });
                     operation.State = "applied";
                 }
@@ -771,7 +774,16 @@ namespace DnsServerCore
                 }
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null)
+            private void CheckDnsCertificatePreviewPermission(ConfigurationManifest manifest, User sessionUser)
+            {
+                if (ConfigurationDnsCertificate.TryGetDeclaration(manifest, out JsonElement certificate) &&
+                    certificate.ValueKind == JsonValueKind.Object &&
+                    (certificate.TryGetProperty("path", out _) || certificate.TryGetProperty("password", out _)) &&
+                    !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+            }
+
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
@@ -779,6 +791,7 @@ namespace DnsServerCore
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
+                    ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
                     if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy))
                     {
                         string password = null;
@@ -1122,6 +1135,11 @@ namespace DnsServerCore
                     request.TryQueryOrForm("dnsOverHttpsUnixSocket", out string httpsSocketPath) ? string.IsNullOrWhiteSpace(httpsSocketPath) ? "" : httpsSocketPath : null);
                 _dnsWebService._dnsServer.CheckManagedDnsBindings(dnsBindings);
                 string dnsTlsCertificatePath = request.QueryOrForm("dnsTlsCertificatePath");
+                string dnsTlsCertificatePassword = request.QueryOrForm("dnsTlsCertificatePassword");
+                if (dnsTlsCertificatePassword is null or "************")
+                    dnsTlsCertificatePassword = _dnsWebService._dnsServer.DnsTlsCertificatePassword;
+                if (dnsTlsCertificatePath is not null)
+                    _dnsWebService._dnsServer.CheckManagedDnsCertificate(dnsTlsCertificatePath, dnsTlsCertificatePath.Length == 0 ? null : dnsTlsCertificatePassword);
                 _dnsWebService._dnsServer.CheckManagedDnsBindingDependencies(dnsBindings, removingCertificate: dnsTlsCertificatePath == "");
 
                 bool hasProxyType = request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType);
@@ -1602,11 +1620,6 @@ namespace DnsServerCore
                             }
                             else
                             {
-                                string dnsTlsCertificatePassword = request.QueryOrForm("dnsTlsCertificatePassword");
-
-                                if ((dnsTlsCertificatePassword is null) || (dnsTlsCertificatePassword == "************"))
-                                    dnsTlsCertificatePassword = _dnsWebService._dnsServer.DnsTlsCertificatePassword;
-
                                 if ((dnsTlsCertificatePath != _dnsWebService._dnsServer.DnsTlsCertificatePath) || (dnsTlsCertificatePassword != _dnsWebService._dnsServer.DnsTlsCertificatePassword))
                                 {
                                     _dnsWebService._dnsServer.SetDnsTlsCertificate(dnsTlsCertificatePath, dnsTlsCertificatePassword, true);

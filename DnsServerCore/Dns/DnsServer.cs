@@ -234,7 +234,9 @@ namespace DnsServerCore.Dns
             BindingHttpSocketEnabled = 1UL << 37,
             BindingHttpSocketPath = 1UL << 38,
             BindingHttpsSocketEnabled = 1UL << 39,
-            BindingHttpsSocketPath = 1UL << 40
+            BindingHttpsSocketPath = 1UL << 40,
+            DnsCertificatePath = 1UL << 41,
+            DnsCertificatePassword = 1UL << 42
         }
 
         internal readonly record struct DnsBindings(
@@ -276,6 +278,76 @@ namespace DnsServerCore.Dns
             ManagedDnsSettingsExtension.BindingHttpsSocketPath;
 
         internal bool HasManagedDnsBindings => (_managedDnsSettingsExtension & DnsBindingOwnership) != 0;
+        internal bool HasManagedDnsCertificate => (_managedDnsSettingsExtension &
+            (ManagedDnsSettingsExtension.DnsCertificatePath | ManagedDnsSettingsExtension.DnsCertificatePassword)) != 0;
+
+        internal sealed record DnsCertificate(string Path, string Password, SslStreamCertificateContext Context, DateTime LastModified, string FileHash);
+        private DnsCertificate _previousManifestDnsCertificate;
+        private string _dnsTlsCertificateFileHash;
+
+        internal string NormalizeDnsCertificatePath(string path)
+        {
+            return string.IsNullOrEmpty(path) ? null : _log.ConvertToRelativePath(_log.ConvertToAbsolutePath(path));
+        }
+
+        internal DnsCertificate CaptureDnsCertificate()
+        {
+            lock (_saveLock)
+                return new DnsCertificate(_dnsTlsCertificatePath, _dnsTlsCertificatePassword, _dotSslServerAuthenticationOptions?.ServerCertificateContext,
+                    _dnsTlsCertificateLastModifiedOn, _dnsTlsCertificateFileHash);
+        }
+
+        internal DnsCertificate ReadManifestDnsCertificate(string path, string password, bool preview)
+        {
+            if (path is null)
+                return new DnsCertificate(null, null, null, default, null);
+            string absolutePath = _log.ConvertToAbsolutePath(path);
+            return ReadDnsCertificate(absolutePath, path, password, preview ? X509KeyStorageFlags.EphemeralKeySet : X509KeyStorageFlags.DefaultKeySet);
+        }
+
+        internal void CheckManagedDnsCertificate(string path, string password)
+        {
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.DnsCertificatePath) &&
+                !string.Equals(NormalizeDnsCertificatePath(path), _dnsTlsCertificatePath, StringComparison.Ordinal))
+                throw new InvalidDataException("/dns/listeners/certificate/path: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.DnsCertificatePassword) &&
+                (password ?? "") != (_dnsTlsCertificatePassword ?? ""))
+                throw new InvalidDataException("/dns/listeners/certificate/password: Setting is managed by the configuration manifest.");
+        }
+
+        internal bool DnsCertificateChanged(ConfigurationDnsCertificate.Candidate candidate)
+        {
+            if (candidate.Certificate is not DnsCertificate desired)
+                return false;
+            DnsCertificate current = CaptureDnsCertificate();
+            return current.Path != desired.Path || (current.Password ?? "") != (desired.Password ?? "") || current.FileHash != desired.FileHash;
+        }
+
+        internal void StageManifestDnsCertificate(ConfigurationDnsCertificate.Candidate candidate)
+        {
+            lock (_saveLock)
+            {
+                _previousManifestDnsCertificate = CaptureDnsCertificate();
+                SetDnsCertificateState(candidate.Certificate);
+            }
+        }
+
+        internal void FinishManifestDnsCertificate(bool committed)
+        {
+            lock (_saveLock)
+            {
+                if (_previousManifestDnsCertificate is null)
+                    return;
+                if (!committed)
+                    SetDnsCertificateState(_previousManifestDnsCertificate);
+                _previousManifestDnsCertificate = null;
+                if (_dnsTlsCertificatePath is null)
+                    StopTlsCertificateUpdateTimer();
+                else
+                    StartTlsCertificateUpdateTimer();
+            }
+        }
+
         internal bool HasDnsListenerCertificate => _dotSslServerAuthenticationOptions is not null;
 
         internal DnsBindings CaptureDnsBindings()
@@ -336,7 +408,12 @@ namespace DnsServerCore.Dns
             _dnsOverHttpsPort = bindings.HttpsPort ?? _dnsOverHttpsPort;
             _enableDnsOverQuic = bindings.QuicEnabled ?? _enableDnsOverQuic;
             _dnsOverQuicPort = bindings.QuicPort ?? _dnsOverQuicPort;
-            _enableDnsOverHttp3 = bindings.Http3Enabled ?? _enableDnsOverHttp3;
+            if (bindings.Http3Enabled is bool http3 && http3 != _enableDnsOverHttp3)
+            {
+                _enableDnsOverHttp3 = http3;
+                if (HasDnsListenerCertificate)
+                    SetDnsCertificateOptions(CaptureDnsCertificate());
+            }
             _enableDnsOverHttpUnixSocket = bindings.HttpSocketEnabled ?? _enableDnsOverHttpUnixSocket;
             _dnsOverHttpUnixSocket = bindings.HttpSocketPath is null ? _dnsOverHttpUnixSocket : bindings.HttpSocketPath.Length == 0 ? null : bindings.HttpSocketPath;
             _enableDnsOverHttpsUnixSocket = bindings.HttpsSocketEnabled ?? _enableDnsOverHttpsUnixSocket;
@@ -997,14 +1074,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default, DnsBindings? persistedBindings = null)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default, DnsBindings? persistedBindings = null, DnsCertificate persistedCertificate = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, persistedBindings ?? _previousManifestDnsBindings ?? CaptureDnsBindings());
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, persistedBindings ?? _previousManifestDnsBindings ?? CaptureDnsBindings(), persistedCertificate ?? _previousManifestDnsCertificate ?? CaptureDnsCertificate());
                 fS.Flush(flushToDisk: true);
             }
 
@@ -1267,6 +1344,10 @@ namespace DnsServerCore.Dns
                 yield return "/dns/listeners/https/unixSocket/enabled";
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsSocketPath))
                 yield return "/dns/listeners/https/unixSocket/path";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.DnsCertificatePath))
+                yield return "/dns/listeners/certificate/path";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.DnsCertificatePassword))
+                yield return "/dns/listeners/certificate/password";
             foreach (string path in ConfigurationProxy.Paths(ManagedProxyFields))
                 yield return path;
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
@@ -2373,6 +2454,7 @@ namespace DnsServerCore.Dns
                 if (!readOwnership)
                 {
                     CheckManagedDnsBindings(bindings);
+                    CheckManagedDnsCertificate(dnsTlsCertificatePath, dnsTlsCertificatePassword);
                     CheckManagedDnsBindingDependencies(bindings, removingCertificate: dnsTlsCertificatePath.Length == 0);
                 }
                 if (apply)
@@ -2691,7 +2773,7 @@ namespace DnsServerCore.Dns
             return ownership;
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, DnsBindings persistedBindings)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, DnsBindings persistedBindings, DnsCertificate persistedCertificate)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2800,15 +2882,8 @@ namespace DnsServerCore.Dns
 
             AuthZoneInfo.WriteNetworkACLTo(listenerPolicy.ReverseProxyAcl ?? _dnsReverseProxyNetworkACL, bW);
 
-            if (_dnsTlsCertificatePath == null)
-                s.WriteShortString(string.Empty);
-            else
-                s.WriteShortString(_dnsTlsCertificatePath);
-
-            if (_dnsTlsCertificatePassword == null)
-                s.WriteShortString(string.Empty);
-            else
-                s.WriteShortString(_dnsTlsCertificatePassword);
+            s.WriteShortString(persistedCertificate.Path ?? "");
+            s.WriteShortString(persistedCertificate.Password ?? "");
 
             s.WriteShortString(listenerPolicy.RealIpHeader ?? _dnsOverHttpRealIpHeader);
 
@@ -2944,8 +3019,11 @@ namespace DnsServerCore.Dns
             {
                 _tlsCertificateUpdateTimer = new Timer(delegate (object state)
                 {
-                    if (!string.IsNullOrEmpty(_dnsTlsCertificatePath))
+                    lock (_saveLock)
                     {
+                        if (_previousManifestDnsCertificate is not null || string.IsNullOrEmpty(_dnsTlsCertificatePath))
+                            return;
+
                         string dnsTlsCertificatePath = _log.ConvertToAbsolutePath(_dnsTlsCertificatePath);
 
                         try
@@ -2976,6 +3054,14 @@ namespace DnsServerCore.Dns
 
         private void LoadDnsTlsCertificate(string tlsCertificatePath, string tlsCertificatePassword)
         {
+            DnsCertificate candidate = ReadDnsCertificate(tlsCertificatePath, _log.ConvertToRelativePath(tlsCertificatePath),
+                tlsCertificatePassword, X509KeyStorageFlags.PersistKeySet);
+            SetDnsCertificateOptions(candidate);
+            _log.Write("DNS Server TLS certificate was loaded: " + tlsCertificatePath);
+        }
+
+        private static DnsCertificate ReadDnsCertificate(string tlsCertificatePath, string storedPath, string tlsCertificatePassword, X509KeyStorageFlags keyStorage)
+        {
             FileInfo fileInfo = new FileInfo(tlsCertificatePath);
 
             if (!fileInfo.Exists)
@@ -2991,7 +3077,8 @@ namespace DnsServerCore.Dns
                     throw new ArgumentException("DNS Server TLS certificate file must be PKCS #12 formatted with .pfx or .p12 extension: " + tlsCertificatePath);
             }
 
-            X509Certificate2Collection certificateCollection = X509CertificateLoader.LoadPkcs12CollectionFromFile(tlsCertificatePath, tlsCertificatePassword, X509KeyStorageFlags.PersistKeySet);
+            byte[] data = File.ReadAllBytes(tlsCertificatePath);
+            X509Certificate2Collection certificateCollection = X509CertificateLoader.LoadPkcs12Collection(data, tlsCertificatePassword, keyStorage);
             X509Certificate2 serverCertificate = null;
 
             foreach (X509Certificate2 certificate in certificateCollection)
@@ -3006,7 +3093,30 @@ namespace DnsServerCore.Dns
             if (serverCertificate is null)
                 throw new ArgumentException("DNS Server TLS certificate file must contain a certificate with private key.");
 
-            SslStreamCertificateContext certificateContext = SslStreamCertificateContext.Create(serverCertificate, certificateCollection, false);
+            SslStreamCertificateContext certificateContext = SslStreamCertificateContext.Create(serverCertificate, certificateCollection,
+                offline: keyStorage == X509KeyStorageFlags.EphemeralKeySet);
+            return new DnsCertificate(storedPath, tlsCertificatePassword, certificateContext, fileInfo.LastWriteTimeUtc, Convert.ToHexString(SHA256.HashData(data)));
+        }
+
+        private void SetDnsCertificateState(DnsCertificate certificate)
+        {
+            _dnsTlsCertificatePath = certificate.Path;
+            _dnsTlsCertificatePassword = certificate.Password;
+            SetDnsCertificateOptions(certificate);
+        }
+
+        private void SetDnsCertificateOptions(DnsCertificate certificate)
+        {
+            _dnsTlsCertificateLastModifiedOn = certificate.LastModified;
+            _dnsTlsCertificateFileHash = certificate.FileHash;
+            SslStreamCertificateContext certificateContext = certificate.Context;
+            if (certificateContext is null)
+            {
+                _dotSslServerAuthenticationOptions = null;
+                _doqSslServerAuthenticationOptions = null;
+                _dohSslServerAuthenticationOptions = null;
+                return;
+            }
 
             _dotSslServerAuthenticationOptions = new SslServerAuthenticationOptions()
             {
@@ -3034,21 +3144,11 @@ namespace DnsServerCore.Dns
                 ApplicationProtocols = applicationProtocols,
                 ServerCertificateContext = certificateContext,
             };
-
-            _dnsTlsCertificateLastModifiedOn = fileInfo.LastWriteTimeUtc;
-
-            _log.Write("DNS Server TLS certificate was loaded: " + tlsCertificatePath);
         }
 
         public void RemoveDnsTlsCertificate()
         {
-            _dotSslServerAuthenticationOptions = null;
-            _doqSslServerAuthenticationOptions = null;
-            _dohSslServerAuthenticationOptions = null;
-
-            _dnsTlsCertificatePath = null;
-            _dnsTlsCertificatePassword = null;
-
+            SetDnsCertificateState(new DnsCertificate(null, null, null, default, null));
             StopTlsCertificateUpdateTimer();
         }
 
@@ -8426,7 +8526,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8435,7 +8535,9 @@ namespace DnsServerCore.Dns
             bool tuningRestart = DnsTuningRequiresRestart(tuning);
             DnsBindings previousBindings = CaptureDnsBindings();
             bool bindingsChanged = dnsBindingsStaged || DnsBindingsDiffer(bindings, previousBindings);
-            bool restarted = !alreadyActive && (tuningRestart || changed || bindingsChanged);
+            bool certificateChanged = _previousManifestDnsCertificate is not null || DnsCertificateChanged(certificate);
+            bool restarted = !alreadyActive && (tuningRestart || changed || bindingsChanged ||
+                certificateChanged && ConfigurationDnsCertificate.HasSecureBindings(bindings, previousBindings));
             DnsTuning previousListenerTuning = CaptureListenerTuning();
             try
             {
@@ -8445,13 +8547,20 @@ namespace DnsServerCore.Dns
                     SetListenerTuning(tuning);
                     if (bindingsChanged)
                         StageManifestDnsBindings(bindings);
-                    await StartAsync(true, endpoints ?? previous);
                 }
+                if (certificateChanged && !alreadyActive)
+                    StageManifestDnsCertificate(certificate);
+                if (restarted)
+                    await StartAsync(true, endpoints ?? previous);
 
                 lock (_saveLock)
                 {
                     ManagedDnsSettingsExtension previousExtendedOwnership = _managedDnsSettingsExtension;
                     ManagedDnsSettingsExtension extendedOwnership = (ManagedDnsSettingsExtension)proxy.Managed;
+                    if (certificate.OwnsPath)
+                        extendedOwnership |= ManagedDnsSettingsExtension.DnsCertificatePath;
+                    if (certificate.OwnsPassword)
+                        extendedOwnership |= ManagedDnsSettingsExtension.DnsCertificatePassword;
                     if (bindings.UdpProxyEnabled is not null)
                         extendedOwnership |= ManagedDnsSettingsExtension.BindingUdpProxyEnabled;
                     if (bindings.UdpProxyPort is not null)
@@ -8750,7 +8859,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !certificateChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8765,10 +8874,12 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, CaptureDnsBindings()));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, CaptureDnsBindings(), CaptureDnsCertificate()));
                         _pendingSave = false;
                         if (bindingsChanged)
                             FinishManifestDnsBindings(committed: true);
+                        if (certificateChanged)
+                            FinishManifestDnsCertificate(committed: true);
                     }
                     catch
                     {
@@ -8827,8 +8938,11 @@ namespace DnsServerCore.Dns
                     SetListenerTuning(previousListenerTuning);
                     if (bindingsChanged)
                         FinishManifestDnsBindings(committed: false);
-                    await StartAsync(true, previous);
                 }
+                if (certificateChanged && !alreadyActive)
+                    FinishManifestDnsCertificate(committed: false);
+                if (restarted)
+                    await StartAsync(true, previous);
 
                 throw;
             }

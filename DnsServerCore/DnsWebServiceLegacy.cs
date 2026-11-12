@@ -212,13 +212,13 @@ namespace DnsServerCore
             if (format == "DC")
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
-                return _dnsServer.HasManagedProxy || _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || _dnsServer.HasManagedForwardingPolicy || _dnsServer.HasManagedRateLimits || _dnsServer.HasManagedDnsTuning || !isConfigTransfer && (_dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
+                return _dnsServer.HasManagedProxy || _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || _dnsServer.HasManagedForwardingPolicy || _dnsServer.HasManagedRateLimits || _dnsServer.HasManagedDnsTuning || !isConfigTransfer && (_dnsServer.HasManagedDnsCertificate || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
                     _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging || _dnsServer.HasManagedCachePolicy);
             }
 
             if (format == "DS")
             {
-                if (_dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings)
+                if (_dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsCertificate)
                     throw new InvalidDataException("/dns/listeners: Cannot verify DNS listener policy in this combined backup format.");
 
                 if (_dnsServer.HasManagedProxy)
