@@ -72,14 +72,56 @@ namespace DnsServerCore.Tests
             {
                 Environment.SetEnvironmentVariable(variable, null);
             }
+        }
 
-            static async Task ApplyAsync(LoopbackWebService server, string file)
+        [Fact]
+        public async Task ConsoleExportMigratesSettingsFromLegacyDnsConfiguration()
+        {
+            await using var source = await LoopbackWebService.StartAsync();
+            await source.RestartAsync(null, () =>
             {
-                string origin = server.Client.BaseAddress!.AbsoluteUri;
-                var plan = await RunAsync(server, "plan", file, origin);
-                string revision = ReadOutputValue(plan.Output, "Revision ");
-                Assert.Contains("Configuration applied.", (await RunAsync(server, "apply", file, origin, revision)).Output);
-            }
+                File.Copy(Path.Combine(AppContext.BaseDirectory, "Fixtures", "dns-v6.config"),
+                    Path.Combine(source.ConfigurationDirectory, "dns.config"), overwrite: true);
+                var startup = new JsonObject
+                {
+                    ["schemaVersion"] = 1,
+                    ["dns"] = new JsonObject
+                    {
+                        ["localEndpoints"] = new JsonArray($"127.0.0.1:{source.DnsPort}")
+                    }
+                };
+                File.WriteAllText(Path.Combine(source.ConfigurationDirectory, "technitium.json"), startup.ToJsonString());
+            });
+
+            string sourceUrl = source.Client.BaseAddress!.AbsoluteUri;
+            var exported = JsonNode.Parse((await RunAsync(source, "export", sourceUrl)).Output)!;
+            JsonNode dns = exported["dns"]!;
+            Assert.Equal("legacy.example.test", dns["serverDomain"]!.GetValue<string>());
+            Assert.Equal(1234, dns["authoritative"]!["defaultRecordTtl"]!.GetValue<int>());
+            Assert.Equal("Deny", dns["recursion"]!["mode"]!.GetValue<string>());
+            Assert.False(dns["cache"]!["prefetch"]!["enabled"]!.GetValue<bool>());
+
+            // Use the destination listener bindings while migrating the legacy policy.
+            var policy = new JsonObject
+            {
+                ["serverDomain"] = dns["serverDomain"]!.DeepClone(),
+                ["authoritative"] = dns["authoritative"]!.DeepClone(),
+                ["recursion"] = dns["recursion"]!.DeepClone(),
+                ["cache"] = dns["cache"]!.DeepClone()
+            };
+            var migration = new JsonObject { ["schemaVersion"] = 1, ["dns"] = policy };
+            await using var destination = await LoopbackWebService.StartAsync();
+            string path = Path.Combine(destination.ConfigurationDirectory, "legacy-migration.json");
+            await File.WriteAllTextAsync(path, migration.ToJsonString());
+            await RunAsync(destination, "validate", path);
+            await ApplyAsync(destination, path);
+            await destination.RestartAsync();
+
+            string destinationUrl = destination.Client.BaseAddress!.AbsoluteUri;
+            var migrated = JsonNode.Parse((await RunAsync(destination, "export", destinationUrl)).Output)!;
+            foreach (var field in policy)
+                Assert.True(JsonNode.DeepEquals(field.Value, migrated["dns"]![field.Key]), $"Migrated DNS field {field.Key} differs.");
+            Assert.Contains("No setting changes.", (await RunAsync(destination, "plan", path, destinationUrl)).Output);
         }
 
         [Fact]
@@ -156,6 +198,14 @@ namespace DnsServerCore.Tests
             Assert.Equal(42, exported["logging"]!["retentionDays"]!.GetValue<int>());
             Assert.Equal(port, exported["web"]!["httpPort"]!.GetValue<int>());
             Assert.Contains("No setting changes.", (await RunAsync(server, "plan", path, destination)).Output);
+        }
+
+        private static async Task ApplyAsync(LoopbackWebService server, string file)
+        {
+            string origin = server.Client.BaseAddress!.AbsoluteUri;
+            var plan = await RunAsync(server, "plan", file, origin);
+            string revision = ReadOutputValue(plan.Output, "Revision ");
+            Assert.Contains("Configuration applied.", (await RunAsync(server, "apply", file, origin, revision)).Output);
         }
 
         private static string ReadOutputValue(string output, string prefix) =>
