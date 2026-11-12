@@ -1,5 +1,9 @@
+using System;
+using System.Diagnostics;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
@@ -79,6 +83,41 @@ namespace DnsServerCore.Tests
             JsonElement restored = await server.GetSettingsAsync();
             Assert.Equal(180, restored.GetProperty("defaultRecordTtl").GetInt32());
             Assert.False(restored.GetProperty("enableLogging").GetBoolean());
+        }
+
+        [Fact]
+        public async Task WebListenerRecoversItsPreviousPortAfterAFailedBind()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var occupiedListener = new TcpListener(IPAddress.Loopback, 0);
+            occupiedListener.Start();
+
+            int workingPort = server.Client.BaseAddress!.Port;
+            int occupiedPort = ((IPEndPoint)occupiedListener.LocalEndpoint).Port;
+            JsonElement update = await server.CallAsync($"settings/set?webServiceHttpPort={occupiedPort}", server.AdminToken);
+            LoopbackWebService.AssertOk(update);
+            Assert.Equal(occupiedPort, update.GetProperty("response").GetProperty("webServiceHttpPort").GetInt32());
+
+            int currentPort = occupiedPort;
+            var timer = Stopwatch.StartNew();
+            while ((currentPort != workingPort) && (timer.Elapsed < TimeSpan.FromSeconds(10)))
+            {
+                try
+                {
+                    currentPort = (await server.GetSettingsAsync()).GetProperty("webServiceHttpPort").GetInt32();
+                }
+                catch (HttpRequestException)
+                {
+                    // The old listener is temporarily unavailable during restart.
+                }
+
+                if (currentPort != workingPort)
+                    await Task.Delay(100);
+            }
+
+            Assert.Equal(workingPort, currentPort);
+            await server.RestartAsync();
+            Assert.Equal(workingPort, (await server.GetSettingsAsync()).GetProperty("webServiceHttpPort").GetInt32());
         }
     }
 }
