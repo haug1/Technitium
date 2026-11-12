@@ -136,6 +136,8 @@ Set `zones.<name>.dnssec.enabled` to true to sign a new or unsigned primary zone
 
 Regular export includes primary, conditional forwarder, secondary, secondary forwarder, stub, catalog, and secondary catalog zones outside catalogs and cluster infrastructure, including node-local zones on clustered servers. Callers need Zones View permission for the section and each included zone. The export includes supported policies and operator records. Export includes the apex SOA settings and serial date scheme with a serial of zero, so a new instance generates its own serial. Generated name server records, DNSSEC records, and DHCP-maintained records are omitted. If a record collection contains data or metadata that apply cannot reproduce, the export lists the collection in `missingInputs`.
 
+When export lists `/blocklists/sources` in `missingInputs`, supply the original ordered source array under `blocklists.sources`. Preserve any `!` allowlist prefixes and comments. Make file sources available on the destination and keep manifests containing credential-bearing URLs private.
+
 To reproduce the exported settings, validate the file, preview it against the destination, then apply using the destination revision. Check the declared DNS listener addresses and log directory against the destination host before applying.
 
 ## Applying DNS, web, logging, and blocklist settings

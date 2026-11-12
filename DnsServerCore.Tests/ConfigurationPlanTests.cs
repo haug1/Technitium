@@ -6135,22 +6135,36 @@ namespace DnsServerCore.Tests
         [Fact]
         public async Task ApplicableExportReproducesSettingsOnACleanInstance()
         {
+            const string blockListSource = "https://example.test/list?token=fixture-secret";
             IPEndPoint endpoint;
+            string migration;
             string exported;
             int httpPort;
             await using (var source = await LoopbackWebService.StartAsync())
             {
                 LoopbackWebService.AssertOk(await source.CallAsync(
                     "settings/set?maxLogFileDays=180&noStackTrace=true&useLocalTime=true&logFolder=archive&enableInMemoryStats=true&maxStatFileDays=120", source.AdminToken));
+                LoopbackWebService.AssertOk(await source.CallAsync(
+                    "settings/set?blockListUpdateIntervalHours=0&blockListUrls=" + Uri.EscapeDataString(blockListSource), source.AdminToken));
                 JsonElement settings = await source.GetSettingsAsync();
                 httpPort = settings.GetProperty("webServiceHttpPort").GetInt32();
                 endpoint = IPEndPoint.Parse(settings.GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
-                exported = ConfigurationPlan.Export(settings, includePreviewOnly: false).ToJsonString();
+                Assert.Equal(blockListSource, Assert.Single(settings.GetProperty("blockListUrls").EnumerateArray()).GetString());
+                JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement response = export.GetProperty("response");
+                Assert.DoesNotContain("fixture-secret", response.GetRawText());
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), input => input.ValueEquals("/blocklists/sources"));
+                exported = response.GetProperty("manifest").GetRawText();
+                JsonNode candidate = JsonNode.Parse(exported)!;
+                Assert.False(candidate["blocklists"]!.AsObject().ContainsKey("sources"));
+                candidate["blocklists"]!["sources"] = new JsonArray(blockListSource);
+                migration = candidate.ToJsonString();
             }
 
             await using var destination = await LoopbackWebService.StartAsync();
-            string revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
-            JsonElement queued = await ApplyAsync(destination, exported, revision);
+            string revision = (await PreviewAsync(destination, migration)).GetProperty("revision").GetString()!;
+            JsonElement queued = await ApplyAsync(destination, migration, revision);
             LoopbackWebService.AssertOk(queued);
             if (queued.GetProperty("response").TryGetProperty("operationId", out JsonElement operation))
                 Assert.Equal("applied", await WaitForWebApplyAsync(httpPort, destination.AdminToken, operation.GetString()!));
@@ -6158,13 +6172,17 @@ namespace DnsServerCore.Tests
             await destination.RestartAsync(httpPort);
             await AssertListenerAnswersAsync(endpoint);
             JsonElement applied = await destination.GetSettingsAsync();
-            Assert.Equal(exported, ConfigurationPlan.Export(applied, includePreviewOnly: false).ToJsonString());
+            Assert.Equal(blockListSource, Assert.Single(applied.GetProperty("blockListUrls").EnumerateArray()).GetString());
+            Assert.Equal(0, applied.GetProperty("blockListUpdateIntervalHours").GetInt32());
+            JsonElement repeatedExport = await destination.CallAsync("settings/config/export", destination.AdminToken);
+            LoopbackWebService.AssertOk(repeatedExport);
+            Assert.Equal(exported, repeatedExport.GetProperty("response").GetProperty("manifest").GetRawText());
 
-            JsonElement preview = await PreviewAsync(destination, exported);
+            JsonElement preview = await PreviewAsync(destination, migration);
             Assert.Empty(preview.GetProperty("changes").EnumerateArray());
             string unchangedRevision = preview.GetProperty("revision").GetString()!;
-            LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, unchangedRevision));
-            Assert.Equal(unchangedRevision, (await PreviewAsync(destination, exported)).GetProperty("revision").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, migration, unchangedRevision));
+            Assert.Equal(unchangedRevision, (await PreviewAsync(destination, migration)).GetProperty("revision").GetString());
         }
 
         [Fact]
