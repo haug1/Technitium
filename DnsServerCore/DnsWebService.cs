@@ -3164,7 +3164,7 @@ namespace DnsServerCore
             int[] userPeers = ConfigurationPlan.CheckClusterUserSupport(manifest, _clusterManager, users);
             int[] permissionPeers = ConfigurationPlan.CheckClusterPermissionSupport(manifest, _clusterManager,
                 clustered && !secondary && ConfigurationPermissions.TryGetDeclaration(manifest, out _) &&
-                ConfigurationPermissions.Prepare(manifest, _authManager, ConfigurationGroups.Prepare(manifest, _authManager), users, zoneCreator).Count > 0);
+                ConfigurationPermissions.Prepare(manifest, _authManager, ConfigurationGroups.Prepare(manifest, _authManager), users, zoneCreator).Any(grant => grant.Zone is null));
             var domainListChange = ConfigurationPlan.CheckClusterDomainListSupport(manifest, _clusterManager);
             var dnsPolicyChange = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager, proxy, tsig);
             var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,

@@ -992,7 +992,8 @@ namespace DnsServerCore.Configuration
 
             var auth = cluster.DnsWebService.AuthManager;
             if (!grantsChanged && !auth.PermissionOwnershipFromPrimary &&
-                auth.ManagedPermissionPaths.SequenceEqual(ConfigurationPermissions.GetOwnedPaths(manifest)))
+                auth.ManagedPermissionPaths.Where(ConfigurationPermissions.IsSectionPath).SequenceEqual(
+                    ConfigurationPermissions.GetOwnedPaths(manifest).Where(ConfigurationPermissions.IsSectionPath)))
                 return null;
             return cluster.CheckDeclarativePermissionPeers();
         }

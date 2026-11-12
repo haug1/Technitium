@@ -11,6 +11,8 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationPermissions
     {
         internal const string Path = "/auth/permissions";
+        internal static bool IsSectionPath(string path) =>
+            path == Path || path.StartsWith(Path + "/", StringComparison.Ordinal);
 
         private static readonly PermissionSection[] _sections = Enum.GetValues<PermissionSection>()
             .Where(section => section != PermissionSection.Unknown).ToArray();
@@ -78,14 +80,14 @@ namespace DnsServerCore.Configuration
                 CheckMap(current.Section, true, current.GroupPermissions, groups, group => group.Name, paths, current.SubItemName);
         }
 
-        internal static void CheckRestore(AuthManager auth, IReadOnlyDictionary<PermissionSection, Permission> restored)
+        internal static void CheckRestore(AuthManager auth, IReadOnlyDictionary<PermissionSection, Permission> restored, bool sectionOnly = false)
         {
             foreach (PermissionSection section in _sections)
             {
                 Permission current = auth.GetPermission(section);
                 restored.TryGetValue(section, out Permission candidate);
                 CheckScope(section, current, candidate);
-                if (section != PermissionSection.Zones)
+                if (sectionOnly || section != PermissionSection.Zones)
                     continue;
 
                 foreach (string zone in (current?.SubItemPermissions.Keys ?? []).Union(candidate?.SubItemPermissions.Keys ?? [], StringComparer.Ordinal))

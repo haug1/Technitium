@@ -1247,12 +1247,27 @@ def verify_permission_policy(primary, secondary, cluster_manifest, local_web):
         return (path in state["managedSettings"]) == owned and (
             grant is None if view is None else grant is not None and grant["canView"] == view and grant["canModify"] == modify)
 
+    local_zone = "local-permissions.test"
+    local_path = f"/zones/{local_zone}/permissions/groups/everyone"
+    local = {**local_web, "zones": {
+        local_zone: {"type": "Primary", "permissions": {"groups": {"Everyone": ["View"]}}},
+    }}
+
+    def check_local_ownership():
+        zone = ok(secondary.call(f"zones/permissions/get?zone={local_zone}"))
+        assert local_path in zone["managedSettings"], zone
+        assert any(grant["name"] == "Everyone" and grant["canView"] for grant in zone["groupPermissions"]), zone
+
+    apply(secondary, local)
+    check_local_ownership()
     apply(primary, desired)
     wait_for(lambda: matches(True, False, True), "the Secondary to inherit the Settings grant")
+    check_local_ownership()
     secondary.stop()
     secondary.start(release_seed=False)
     assert matches(True, False, True)
-    apply(secondary, local_web)
+    apply(secondary, local)
+    check_local_ownership()
     assert matches(True, False, True)
     denied = primary.call("admin/permissions/set?section=Settings&groupPermissions=")
     assert denied["status"] == "error" and path in denied["errorMessage"], denied
@@ -1268,6 +1283,7 @@ def verify_permission_policy(primary, secondary, cluster_manifest, local_web):
     wait_for(lambda: matches(None, None, True), "the Secondary to remove the grant")
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(None, None, False), "the Secondary to release permission ownership")
+    check_local_ownership()
 
 
 def assert_promoted_policy(state):

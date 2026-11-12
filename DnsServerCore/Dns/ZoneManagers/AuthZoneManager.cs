@@ -926,7 +926,10 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (auth.UserOwnershipFromPrimary ? isClusterSecondary : auth.ManagedUserPaths.SequenceEqual(userOwnership))
                 userOwnership = null;
             string[] permissionOwnership = ConfigurationPermissions.GetOwnedPaths(manifest);
-            if (auth.PermissionOwnershipFromPrimary ? isClusterSecondary : auth.ManagedPermissionPaths.SequenceEqual(permissionOwnership))
+            var currentPermissionOwnership = isClusterSecondary && auth.PermissionOwnershipFromPrimary
+                ? auth.ManagedPermissionPaths.Where(path => !ConfigurationPermissions.IsSectionPath(path))
+                : auth.ManagedPermissionPaths;
+            if ((!auth.PermissionOwnershipFromPrimary || isClusterSecondary) && currentPermissionOwnership.SequenceEqual(permissionOwnership))
                 permissionOwnership = null;
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records, AuthZoneType Type, ConfigurationZonePrimary.Changes Primary)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
@@ -1206,7 +1209,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         try
                         {
-                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, groupOwnership, userChanges, userOwnership, grants, permissionOwnership, staticSessions, sso, ssoOwnership, write =>
+                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, groupOwnership, userChanges, userOwnership, grants, permissionOwnership, isClusterSecondary, staticSessions, sso, ssoOwnership, write =>
                             {
                                 writeAuth = write;
                                 persist();

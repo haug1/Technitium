@@ -782,7 +782,10 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(initialized);
             JsonElement primaryNode = Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
 
-            const string manifest = """{"schemaVersion":1,"cluster":{"heartbeatRefreshSeconds":45,"configRefreshSeconds":120}}""";
+            const string manifest = """
+                {"schemaVersion":1,"cluster":{"heartbeatRefreshSeconds":45,"configRefreshSeconds":120},
+                 "auth":{"permissions":{"Settings":{"groups":{"Everyone":["View"]}}}}}
+                """;
             const string invalid = """{"schemaVersion":1,"cluster":{"heartbeatRefreshSeconds":90,"configRefreshSeconds":60}}""";
             JsonElement rejected = await PlanAsync(primary, primary.AdminToken, invalid);
             Assert.Equal("error", rejected.GetProperty("status").GetString());
@@ -803,6 +806,13 @@ namespace DnsServerCore.Tests
             JsonElement uninitialized = await PlanAsync(secondary, secondary.AdminToken, secondaryTopology);
             Assert.Equal("error", uninitialized.GetProperty("status").GetString());
             Assert.Contains("/cluster/node/addresses", uninitialized.GetProperty("errorMessage").GetString());
+
+            const string localZone = """
+                {"schemaVersion":1,"zones":{"local.test":{"type":"Primary","records":[
+                  {"owner":"www.local.test","type":"A","data":{"zoneFile":"192.0.2.42"}}
+                ],"permissions":{"groups":{"Everyone":["View"]}}}}}
+                """;
+            await ApplyLocalZoneAsync(secondary.AdminToken);
 
             using var form = new FormUrlEncodedContent([
                 new("secondaryNodeIpAddresses", "127.0.0.1"),
@@ -825,6 +835,7 @@ namespace DnsServerCore.Tests
             JsonElement settings = result.GetProperty("response");
             Assert.Equal(180, settings.GetProperty("defaultRecordTtl").GetInt32());
             Assert.Equal(secondary.Client.BaseAddress!.Port, settings.GetProperty("webServiceHttpPort").GetInt32());
+            await AssertPermissionOwnershipAsync("zones/permissions/get?zone=local.test", "/zones/local.test/permissions/groups/everyone");
 
             const string protectedZone = """{"schemaVersion":1,"zones":{"cluster.test":null}}""";
             JsonElement rejectedZone = await PlanAsync(primary, primary.AdminToken, protectedZone);
@@ -839,16 +850,13 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, topologyBody,
                 topologyPlan.GetProperty("revision").GetString()));
 
-            const string localZone = """
-                {"schemaVersion":1,"zones":{"local.test":{"type":"Primary","records":[
-                  {"owner":"www.local.test","type":"A","data":{"zoneFile":"192.0.2.42"}}
-                ]}}}
-                """;
-            JsonElement localPreview = await PlanAsync(secondary, syncedAdmin, localZone);
-            LoopbackWebService.AssertOk(localPreview);
-            using var localBody = new StringContent(localZone, Encoding.UTF8, "application/json");
-            LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, localBody,
-                localPreview.GetProperty("response").GetProperty("revision").GetString()));
+            await ApplyLocalZoneAsync(syncedAdmin);
+            await AssertPermissionOwnershipAsync("admin/permissions/get?section=Settings", "/auth/permissions/Settings/groups/everyone");
+            await AssertPermissionOwnershipAsync("zones/permissions/get?zone=local.test", "/zones/local.test/permissions/groups/everyone");
+            await secondary.RestartAsync();
+            syncedAdmin = secondary.AdminToken;
+            await AssertPermissionOwnershipAsync("admin/permissions/get?section=Settings", "/auth/permissions/Settings/groups/everyone");
+            await AssertPermissionOwnershipAsync("zones/permissions/get?zone=local.test", "/zones/local.test/permissions/groups/everyone");
             var localAnswer = Assert.Single((await secondary.QueryAsync("www.local.test", DnsResourceRecordType.A)).Answer);
             Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(localAnswer.RDATA).Address);
             JsonElement primaryZone = await primary.CallAsync("zones/options/get?zone=local.test", primary.AdminToken);
@@ -917,9 +925,10 @@ namespace DnsServerCore.Tests
             Assert.Contains("Release manifest ownership", blockedRestore.GetProperty("errorMessage").GetString());
 
             const string release = """{"schemaVersion":1}""";
-            JsonElement releasePlan = await PlanAsync(primary, primary.AdminToken, release);
+            const string releaseClusterOptions = """{"schemaVersion":1,"auth":{"permissions":{"Settings":{"groups":{"Everyone":["View"]}}}}}""";
+            JsonElement releasePlan = await PlanAsync(primary, primary.AdminToken, releaseClusterOptions);
             LoopbackWebService.AssertOk(releasePlan);
-            using var releaseBody = new StringContent(release, Encoding.UTF8, "application/json");
+            using var releaseBody = new StringContent(releaseClusterOptions, Encoding.UTF8, "application/json");
             LoopbackWebService.AssertOk(await primary.CallAsync("settings/config/apply", primary.AdminToken, releaseBody,
                 releasePlan.GetProperty("response").GetProperty("revision").GetString()));
 
@@ -968,6 +977,23 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, addressReleaseBody,
                 addressRelease.GetProperty("response").GetProperty("revision").GetString()));
             LoopbackWebService.AssertOk(await secondary.CallAsync("admin/cluster/updateIpAddress?ipAddresses=127.0.0.1", syncedAdmin));
+
+            async Task ApplyLocalZoneAsync(string token)
+            {
+                JsonElement preview = await PlanAsync(secondary, token, localZone);
+                LoopbackWebService.AssertOk(preview);
+                using var body = new StringContent(localZone, Encoding.UTF8, "application/json");
+                LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", token, body,
+                    preview.GetProperty("response").GetProperty("revision").GetString()));
+            }
+
+            async Task AssertPermissionOwnershipAsync(string endpoint, string path)
+            {
+                JsonElement permissions = await secondary.CallAsync(endpoint, syncedAdmin);
+                LoopbackWebService.AssertOk(permissions);
+                Assert.Contains(permissions.GetProperty("response").GetProperty("managedSettings").EnumerateArray(),
+                    entry => entry.ValueEquals(path));
+            }
 
             static async Task<JsonElement> PlanAsync(LoopbackWebService server, string token, string declaration)
             {

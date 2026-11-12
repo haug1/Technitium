@@ -1272,7 +1272,7 @@ namespace DnsServerCore
                         }
                     }
                     var grants = ConfigurationPermissions.Prepare(manifest, auth, groups, users, sessionUser);
-                    if (manifest is not null && ConfigurationPlan.CheckClusterPermissionSupport(manifest, _dnsWebService._clusterManager, grants.Count > 0) is { } permissionPeers)
+                    if (manifest is not null && ConfigurationPlan.CheckClusterPermissionSupport(manifest, _dnsWebService._clusterManager, grants.Any(grant => grant.Zone is null)) is { } permissionPeers)
                     {
                         writer.WritePropertyName("permissionPeers");
                         JsonSerializer.Serialize(writer, permissionPeers);
