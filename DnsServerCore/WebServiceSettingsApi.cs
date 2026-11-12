@@ -464,6 +464,10 @@ namespace DnsServerCore
                 jsonWriter.WriteString("logFolder", _dnsWebService._log.LogFolder);
                 jsonWriter.WriteNumber("maxLogFileDays", _dnsWebService._log.MaxLogFileDays);
                 jsonWriter.WriteStartArray("managedSettings");
+                if (_dnsWebService._manifestOwnsRealIpHeader)
+                    jsonWriter.WriteStringValue("/web/realIpHeader");
+                if (_dnsWebService._manifestOwnsFrameAncestors)
+                    jsonWriter.WriteStringValue("/web/frameAncestors");
                 foreach (string path in _dnsWebService._dnsServer.GetManagedDnsPaths())
                     jsonWriter.WriteStringValue(path);
                 if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
@@ -645,6 +649,11 @@ namespace DnsServerCore
                     : null;
                 if (jsonDocument is not null)
                     context.Items["jsonContent"] = jsonDocument;
+
+                var webHeaders = new WebHeaders(
+                    request.TryGetQueryOrForm("webServiceRealIpHeader", out string realIpHeader) ? NormalizeWebHeader(realIpHeader, realIp: true) : null,
+                    request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null);
+                _dnsWebService.CheckManifestWebHeaders(webHeaders);
 
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
                 request.TryGetQueryOrForm("logFolder", out string logFolder);
@@ -1152,27 +1161,10 @@ namespace DnsServerCore
                                 _dnsWebService._webServiceReverseProxyAddresses = webServiceReverseProxyAddresses;
                         }
 
-                        if (request.TryQueryOrForm("webServiceRealIpHeader", out string webServiceRealIpHeader))
-                        {
-                            if (string.IsNullOrWhiteSpace(webServiceRealIpHeader))
-                                webServiceRealIpHeader = "X-Real-IP";
-                            else if (webServiceRealIpHeader.Length > 255)
-                                throw new ArgumentException("Web Service Real IP header name cannot exceed 255 characters.", nameof(webServiceRealIpHeader));
-                            else if (webServiceRealIpHeader.Contains(' '))
-                                throw new ArgumentException("Web Service Real IP header name cannot contain invalid characters.", nameof(webServiceRealIpHeader));
-
-                            _dnsWebService._webServiceRealIpHeader = webServiceRealIpHeader;
-                        }
-
-                        if (request.TryQueryOrForm("webServiceCspFrameAncestorsHeader", out string webServiceCspFrameAncestorsHeader))
-                        {
-                            if (string.IsNullOrWhiteSpace(webServiceCspFrameAncestorsHeader))
-                                webServiceCspFrameAncestorsHeader = "'none'";
-                            else if (webServiceCspFrameAncestorsHeader.Length > 255)
-                                throw new ArgumentException("Web Service Content Security Policy (CSP) Frame Ancestors header value cannot exceed 255 characters.", nameof(webServiceCspFrameAncestorsHeader));
-
-                            _dnsWebService._webServiceCspFrameAncestorsHeader = webServiceCspFrameAncestorsHeader;
-                        }
+                        if (webHeaders.RealIp is not null && !_dnsWebService._manifestOwnsRealIpHeader)
+                            _dnsWebService._webServiceRealIpHeader = webHeaders.RealIp;
+                        if (webHeaders.FrameAncestors is not null && !_dnsWebService._manifestOwnsFrameAncestors)
+                            _dnsWebService._webServiceCspFrameAncestorsHeader = webHeaders.FrameAncestors;
 
                         string webServiceTlsCertificatePath = request.QueryOrForm("webServiceTlsCertificatePath");
                         if (webServiceTlsCertificatePath is not null)
@@ -2039,9 +2031,10 @@ namespace DnsServerCore
 
                             bool checkLog = logSettings && _dnsWebService._log.HasManagedLoggingSettings;
                             bool ownsBlockListSettings = _dnsWebService._dnsServer.BlockListZoneManager.HasManagedSettings;
-                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings);
+                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings || _dnsWebService._manifestOwnsRealIpHeader);
                             bool checkBlockList = blockLists && ownsBlockListSettings;
-                            if (checkLog || checkDns || checkBlockList)
+                            bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors);
+                            if (checkLog || checkDns || checkBlockList || checkWeb)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
@@ -2054,6 +2047,11 @@ namespace DnsServerCore
                                     {
                                         using Stream dnsConfiguration = dnsEntry.Open();
                                         _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
+                                    }
+                                    if (checkWeb && archive.GetEntry("webservice.config") is ZipArchiveEntry webEntry)
+                                    {
+                                        using Stream webConfiguration = webEntry.Open();
+                                        _dnsWebService.CheckManifestWebHeaders(_dnsWebService.ReadConfigFrom(webConfiguration, apply: false));
                                     }
                                     if (checkBlockList && archive.GetEntry("blocklist.config") is ZipArchiveEntry blockListEntry)
                                     {

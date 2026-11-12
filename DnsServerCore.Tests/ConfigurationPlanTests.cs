@@ -636,6 +636,46 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManagedWebHeadersTakeEffectLiveAndRejectConflictingRestore()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?webServiceSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"web":{"realIpHeader":"X-Proxy-IP","frameAncestors":"'self'"}}""";
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            Assert.All(preview.GetProperty("changes").EnumerateArray(), change => Assert.False(change.GetProperty("restartWebService").GetBoolean()));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+
+            using HttpResponseMessage page = await server.Client.GetAsync("/index.html");
+            page.EnsureSuccessStatusCode();
+            Assert.Contains("frame-ancestors 'self';", Assert.Single(page.Headers.GetValues("Content-Security-Policy")));
+            Assert.False(page.Headers.Contains("X-Frame-Options"));
+
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal("X-Proxy-IP", current.GetProperty("webServiceRealIpHeader").GetString());
+            Assert.Equal("'self'", current.GetProperty("webServiceCspFrameAncestorsHeader").GetString());
+            Assert.Equal(2, current.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement edit = await server.CallAsync("settings/set?webServiceRealIpHeader=X-Other-IP&maxLogFileDays=180", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/web/realIpHeader", edit.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?webServiceSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/web/realIpHeader", restore.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

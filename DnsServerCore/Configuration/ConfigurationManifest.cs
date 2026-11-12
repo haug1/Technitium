@@ -111,6 +111,14 @@ namespace DnsServerCore.Configuration
                 }
             }
 
+            if (root.TryGetProperty("web", out JsonElement web))
+            {
+                if (web.TryGetProperty("realIpHeader", out JsonElement realIp))
+                    ReadWebHeader(realIp, realIp: true);
+                if (web.TryGetProperty("frameAncestors", out JsonElement frameAncestors))
+                    ReadWebHeader(frameAncestors, realIp: false);
+            }
+
             if (root.TryGetProperty("blocklists", out JsonElement blocklists) && blocklists.TryGetProperty("sources", out JsonElement sources))
                 ReadBlockListSources(sources);
 
@@ -159,6 +167,19 @@ namespace DnsServerCore.Configuration
             catch (Exception ex) when (ex is ArgumentException or FormatException or DnsServerException or DnsClientException)
             {
                 throw new InvalidDataException("/dns/serverDomain: Invalid DNS server domain name.");
+            }
+        }
+
+        internal static string ReadWebHeader(JsonElement value, bool realIp)
+        {
+            try
+            {
+                return DnsWebService.NormalizeWebHeader(value.GetString(), realIp);
+            }
+            catch (ArgumentException)
+            {
+                string name = realIp ? "realIpHeader" : "frameAncestors";
+                throw new InvalidDataException($"/web/{name}: Invalid web header name or value.");
             }
         }
 

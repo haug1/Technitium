@@ -46,6 +46,7 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
@@ -133,6 +134,9 @@ namespace DnsServerCore
 
         string _webServiceTlsCertificatePath;
         string _webServiceTlsCertificatePassword;
+        bool _manifestOwnsRealIpHeader;
+        bool _manifestOwnsFrameAncestors;
+        internal readonly record struct WebHeaders(string RealIp, string FrameAncestors);
         string _webServiceRealIpHeader = "X-Real-IP";
         string _webServiceCspFrameAncestorsHeader = "'none'";
 
@@ -269,7 +273,7 @@ namespace DnsServerCore
             {
                 using (FileStream fS = new FileStream(webServiceConfigFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS);
+                    ReadConfigFrom(fS, readOwnership: true);
                 }
 
                 _log.Write("Web Service config file was loaded: " + webServiceConfigFile);
@@ -398,6 +402,7 @@ namespace DnsServerCore
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
                 WriteConfigTo(fS);
+                fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpConfigFile, configFile, true);
@@ -470,7 +475,7 @@ namespace DnsServerCore
                 _authManager.SaveConfigFile();
         }
 
-        private void ReadConfigFrom(Stream s)
+        private WebHeaders ReadConfigFrom(Stream s, bool readOwnership = false, bool apply = true)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "WC") //format
                 throw new InvalidDataException("Web Service config file format is invalid.");
@@ -481,84 +486,51 @@ namespace DnsServerCore
             if (version > 4)
                 throw new InvalidDataException("Web Service config version not supported.");
 
-            _webServiceHttpPort = bR.ReadInt32();
-            _webServiceTlsPort = bR.ReadInt32();
+            int httpPort = bR.ReadInt32();
+            int tlsPort = bR.ReadInt32();
+            int addressCount = bR.ReadByte();
+            IPAddress[] addresses = addressCount == 0 ? [IPAddress.Any, IPAddress.IPv6Any] : new IPAddress[addressCount];
+            for (int i = 0; i < addressCount; i++)
+                addresses[i] = IPAddressExtensions.ReadFrom(bR);
 
-            {
-                IPAddress[] webServiceLocalAddresses;
+            bool httpSocketEnabled = version >= 3 && bR.ReadBoolean();
+            string httpSocket = version >= 3 ? s.ReadShortString() : "";
+            bool tlsSocketEnabled = version >= 4 && bR.ReadBoolean();
+            string tlsSocket = version >= 4 ? s.ReadShortString() : "";
+            bool tlsEnabled = bR.ReadBoolean();
+            bool http3Enabled = bR.ReadBoolean();
+            bool redirectToTls = bR.ReadBoolean();
+            bool selfSignedCertificate = bR.ReadBoolean();
+            IReadOnlyList<NetworkAccessControl> proxyAddresses = version >= 2 ? AuthZoneInfo.ReadNetworkACLFrom(bR) :
+                [
+                    new NetworkAccessControl(IPAddress.Parse("127.0.0.0"), 8),
+                    new NetworkAccessControl(IPAddress.Parse("10.0.0.0"), 8),
+                    new NetworkAccessControl(IPAddress.Parse("100.64.0.0"), 10),
+                    new NetworkAccessControl(IPAddress.Parse("172.16.0.0"), 12),
+                    new NetworkAccessControl(IPAddress.Parse("192.168.0.0"), 16),
+                    new NetworkAccessControl(IPAddress.Parse("2000::"), 3, true),
+                    new NetworkAccessControl(IPAddress.IPv6Any, 0)
+                ];
+            string certificatePath = s.ReadShortString();
+            string certificatePassword = s.ReadShortString();
+            var headers = new WebHeaders(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'");
+            if (!apply)
+                return headers;
 
-                int count = bR.ReadByte();
-                if (count > 0)
-                {
-                    IPAddress[] localAddresses = new IPAddress[count];
-
-                    for (int i = 0; i < count; i++)
-                        localAddresses[i] = IPAddressExtensions.ReadFrom(bR);
-
-                    webServiceLocalAddresses = localAddresses;
-                }
-                else
-                {
-                    webServiceLocalAddresses = [IPAddress.Any, IPAddress.IPv6Any];
-                }
-
-                _webServiceLocalAddresses = webServiceLocalAddresses;
-            }
-
-            if (version >= 3)
-            {
-                _webServiceEnableHttpUnixSocket = bR.ReadBoolean();
-
-                _webServiceHttpUnixSocket = s.ReadShortString();
-                if (_webServiceHttpUnixSocket.Length == 0)
-                    _webServiceHttpUnixSocket = null;
-            }
-            else
-            {
-                _webServiceEnableHttpUnixSocket = false;
-                _webServiceHttpUnixSocket = null;
-            }
-
-            if (version >= 4)
-            {
-                _webServiceEnableTlsUnixSocket = bR.ReadBoolean();
-
-                _webServiceTlsUnixSocket = s.ReadShortString();
-                if (_webServiceTlsUnixSocket.Length == 0)
-                    _webServiceTlsUnixSocket = null;
-            }
-            else
-            {
-                _webServiceEnableTlsUnixSocket = false;
-                _webServiceTlsUnixSocket = null;
-            }
-
-            _webServiceEnableTls = bR.ReadBoolean();
-            _webServiceEnableHttp3 = bR.ReadBoolean();
-            _webServiceHttpToTlsRedirect = bR.ReadBoolean();
-            _webServiceUseSelfSignedTlsCertificate = bR.ReadBoolean();
-
-            if (version >= 2)
-            {
-                _webServiceReverseProxyAddresses = AuthZoneInfo.ReadNetworkACLFrom(bR);
-            }
-            else
-            {
-                _webServiceReverseProxyAddresses =
-                    [
-                        new NetworkAccessControl(IPAddress.Parse("127.0.0.0"), 8),
-                        new NetworkAccessControl(IPAddress.Parse("10.0.0.0"), 8),
-                        new NetworkAccessControl(IPAddress.Parse("100.64.0.0"), 10),
-                        new NetworkAccessControl(IPAddress.Parse("169.254.0.0"), 16),
-                        new NetworkAccessControl(IPAddress.Parse("172.16.0.0"), 12),
-                        new NetworkAccessControl(IPAddress.Parse("192.168.0.0"), 16),
-                        new NetworkAccessControl(IPAddress.Parse("2000::"), 3, true),
-                        new NetworkAccessControl(IPAddress.IPv6Any, 0)
-                    ];
-            }
-
-            _webServiceTlsCertificatePath = s.ReadShortString();
-            _webServiceTlsCertificatePassword = s.ReadShortString();
+            _webServiceHttpPort = httpPort;
+            _webServiceTlsPort = tlsPort;
+            _webServiceLocalAddresses = addresses;
+            _webServiceEnableHttpUnixSocket = httpSocketEnabled;
+            _webServiceHttpUnixSocket = httpSocket.Length == 0 ? null : httpSocket;
+            _webServiceEnableTlsUnixSocket = tlsSocketEnabled;
+            _webServiceTlsUnixSocket = tlsSocket.Length == 0 ? null : tlsSocket;
+            _webServiceEnableTls = tlsEnabled;
+            _webServiceEnableHttp3 = http3Enabled;
+            _webServiceHttpToTlsRedirect = redirectToTls;
+            _webServiceUseSelfSignedTlsCertificate = selfSignedCertificate;
+            _webServiceReverseProxyAddresses = proxyAddresses;
+            _webServiceTlsCertificatePath = certificatePath;
+            _webServiceTlsCertificatePassword = certificatePassword;
 
             if (_webServiceTlsCertificatePath.Length == 0)
                 _webServiceTlsCertificatePath = null;
@@ -585,12 +557,18 @@ namespace DnsServerCore
 
             CheckAndLoadSelfSignedCertificate(false, false);
 
-            _webServiceRealIpHeader = s.ReadShortString();
+            if (readOwnership)
+            {
+                int ownership = version == 4 ? s.ReadByte() : -1;
+                _manifestOwnsRealIpHeader = ownership >= 0 && (ownership & 1) != 0;
+                _manifestOwnsFrameAncestors = ownership >= 0 && (ownership & 2) != 0;
+            }
+            if (readOwnership || !_manifestOwnsRealIpHeader)
+                _webServiceRealIpHeader = headers.RealIp;
+            if (readOwnership || !_manifestOwnsFrameAncestors)
+                _webServiceCspFrameAncestorsHeader = headers.FrameAncestors;
 
-            if (version >= 3)
-                _webServiceCspFrameAncestorsHeader = s.ReadShortString();
-            else
-                _webServiceCspFrameAncestorsHeader = "'none'";
+            return headers;
         }
 
         private void WriteConfigTo(Stream s)
@@ -635,6 +613,8 @@ namespace DnsServerCore
 
             s.WriteShortString(_webServiceRealIpHeader);
             s.WriteShortString(_webServiceCspFrameAncestorsHeader);
+            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors)
+                bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0)));
         }
 
         #endregion
@@ -2803,6 +2783,65 @@ namespace DnsServerCore
             StartTlsCertificateUpdateTimer();
         }
 
+        internal static string NormalizeWebHeader(string value, bool realIp)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return realIp ? "X-Real-IP" : "'none'";
+
+            if (value.Length > 255 || value.Any(c => realIp
+                ? !char.IsAsciiLetterOrDigit(c) && !"!#$%&'*+-.^_`|~".Contains(c)
+                : c < ' ' || c > '~'))
+                throw new ArgumentException("Invalid web header name or value.");
+
+            return value;
+        }
+
+        private void CheckManifestWebHeaders(WebHeaders headers)
+        {
+            if (_manifestOwnsRealIpHeader && headers.RealIp is not null &&
+                !string.Equals(headers.RealIp, _webServiceRealIpHeader, StringComparison.OrdinalIgnoreCase))
+                throw new DnsWebServiceException("/web/realIpHeader: Setting is managed by the configuration manifest.");
+            if (_manifestOwnsFrameAncestors && headers.FrameAncestors is not null && headers.FrameAncestors != _webServiceCspFrameAncestorsHeader)
+                throw new DnsWebServiceException("/web/frameAncestors: Setting is managed by the configuration manifest.");
+        }
+
+        private void ApplyManifestWebHeaders(WebHeaders headers, Action<Action> persist)
+        {
+            lock (_saveLock)
+            {
+                string oldRealIp = _webServiceRealIpHeader;
+                string oldAncestors = _webServiceCspFrameAncestorsHeader;
+                bool oldRealIpOwned = _manifestOwnsRealIpHeader;
+                bool oldAncestorsOwned = _manifestOwnsFrameAncestors;
+                string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
+                string ancestors = headers.FrameAncestors ?? oldAncestors;
+                if (realIp == oldRealIp && ancestors == oldAncestors &&
+                    (headers.RealIp is not null) == oldRealIpOwned && (headers.FrameAncestors is not null) == oldAncestorsOwned)
+                {
+                    persist(null);
+                    return;
+                }
+
+                _webServiceRealIpHeader = realIp;
+                _webServiceCspFrameAncestorsHeader = ancestors;
+                _manifestOwnsRealIpHeader = headers.RealIp is not null;
+                _manifestOwnsFrameAncestors = headers.FrameAncestors is not null;
+                try
+                {
+                    persist(SaveConfigFileInternal);
+                    _pendingSave = false;
+                }
+                catch
+                {
+                    _webServiceRealIpHeader = oldRealIp;
+                    _webServiceCspFrameAncestorsHeader = oldAncestors;
+                    _manifestOwnsRealIpHeader = oldRealIpOwned;
+                    _manifestOwnsFrameAncestors = oldAncestorsOwned;
+                    throw;
+                }
+            }
+        }
+
         private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false)
         {
             string domain = manifest.GetServerDomain();
@@ -2814,7 +2853,7 @@ namespace DnsServerCore
             DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
             try
             {
-                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate, alreadyActive);
+                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate, ApplyManifestWebHeaders, alreadyActive);
             }
             catch
             {

@@ -106,7 +106,8 @@ namespace DnsServerCore
                 _dnsServer.DnsApplicationManager.EnableAutomaticUpdate = true;
                 _webServiceEnableHttp3 = _webServiceEnableTls && QuicConnection.IsSupported && Socket.OSSupportsIPv6;
                 _dnsServer.EnableDnsOverHttp3 = _dnsServer.EnableDnsOverHttps && QuicConnection.IsSupported && Socket.OSSupportsIPv6;
-                _webServiceRealIpHeader = "X-Real-IP";
+                if (!_manifestOwnsRealIpHeader)
+                    _webServiceRealIpHeader = "X-Real-IP";
                 _dnsServer.DnsOverHttpRealIpHeader = "X-Real-IP";
                 _dnsServer.DefaultResponsiblePerson = null;
                 _dnsServer.AuthZoneManager.UseSoaSerialDateScheme = false;
@@ -224,7 +225,8 @@ namespace DnsServerCore
                 int version = reader.ReadByte();
                 if (version is >= 28 and <= 42)
                 {
-                    ReadLegacyWebConfiguration(reader, version);
+                    LegacyWebConfiguration web = ReadLegacyWebConfiguration(reader, version);
+                    CheckManifestWebHeaders(new WebHeaders(web.RealIpHeader, null));
                     string domain = stream.ReadShortString();
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
@@ -269,6 +271,7 @@ namespace DnsServerCore
 
                 if (version is >= 2 and <= 27)
                 {
+                    CheckManifestWebHeaders(new WebHeaders("X-Real-IP", null));
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(stream.ReadShortString()));
 
@@ -332,7 +335,8 @@ namespace DnsServerCore
             }
 
             CheckAndLoadSelfSignedCertificate(false, false);
-            _webServiceRealIpHeader = web.RealIpHeader;
+            if (!_manifestOwnsRealIpHeader)
+                _webServiceRealIpHeader = web.RealIpHeader;
 
             //dns
             {

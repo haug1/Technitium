@@ -57,6 +57,8 @@ namespace DnsServerCore.Configuration
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true),
+            ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
+            ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
             ["/logging/destination"] = Field("loggingType", "File", canApply: true),
             ["/logging/folder"] = Field("logFolder", "logs", canApply: true),
             ["/logging/noStackTrace"] = Field("noStackTrace", false, canApply: true),
@@ -119,7 +121,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, bool alreadyActive)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, Action<DnsWebService.WebHeaders, Action<Action>> applyWebHeaders, bool alreadyActive)
         {
             CheckApplySupport(manifest);
 
@@ -132,13 +134,24 @@ namespace DnsServerCore.Configuration
                 ? GetManifestLogFolder(folderValue, log) : null;
 
             return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig =>
-                dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig => log.ApplyManifestSettings(
+                dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
+                    applyWebHeaders(GetWebHeaders(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
-                writeDnsConfig, writeCertificate, writeBlockListConfig)));
+                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig))));
+        }
+
+        private static DnsWebService.WebHeaders GetWebHeaders(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("web", out JsonElement web))
+                return default;
+
+            return new DnsWebService.WebHeaders(
+                web.TryGetProperty("realIpHeader", out JsonElement realIp) ? ConfigurationManifest.ReadWebHeader(realIp, realIp: true) : null,
+                web.TryGetProperty("frameAncestors", out JsonElement ancestors) ? ConfigurationManifest.ReadWebHeader(ancestors, realIp: false) : null);
         }
 
         private static IReadOnlyList<string> GetBlockListSources(ConfigurationManifest manifest)
@@ -375,6 +388,14 @@ namespace DnsServerCore.Configuration
                     {
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
+                    }
+                    else if (path is "/web/realIpHeader" or "/web/frameAncestors")
+                    {
+                        bool realIp = path == "/web/realIpHeader";
+                        string value = ConfigurationManifest.ReadWebHeader(desired, realIp);
+                        if (realIp && string.Equals(value, current.GetString(), StringComparison.OrdinalIgnoreCase))
+                            value = current.GetString();
+                        candidate = JsonSerializer.SerializeToElement(value);
                     }
                     else if (path == BlockListSourcesPath)
                     {

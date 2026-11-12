@@ -106,7 +106,7 @@ namespace DnsServerCore
         {
             _isPortableApp = isPortableApp;
             _configFolder = configFolder;
-            ConfigurationJournal.Recover(_configFolder, "dns.config", "log.config", "self-signed-cert.pfx", "blocklist.config");
+            ConfigurationJournal.Recover(_configFolder, "dns.config", "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config");
 
             AppDomain.CurrentDomain.UnhandledException += delegate (object sender, UnhandledExceptionEventArgs e)
             {
@@ -324,7 +324,7 @@ namespace DnsServerCore
             return ConvertToRelativePath(ConvertToAbsolutePath(path));
         }
 
-        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig, Action writeCertificate, Action writeBlockListConfig)
+        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig, Action writeCertificate, Action writeBlockListConfig, Action writeWebConfig)
         {
             lock (_saveLock)
             {
@@ -353,7 +353,7 @@ namespace DnsServerCore
                     ((useLocalTime ?? previousUseLocalTime) == previousUseLocalTime) &&
                     string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal))
                 {
-                    PersistManifestSettings(writeDnsConfig, null, writeCertificate, writeBlockListConfig);
+                    PersistManifestSettings(writeDnsConfig, null, writeCertificate, writeBlockListConfig, writeWebConfig);
                     return;
                 }
 
@@ -374,7 +374,7 @@ namespace DnsServerCore
                     if (activate)
                         ApplyLoggingType();
                     _managedSettings = managedSettings;
-                    PersistManifestSettings(writeDnsConfig, SaveConfigFileInternal, writeCertificate, writeBlockListConfig);
+                    PersistManifestSettings(writeDnsConfig, SaveConfigFileInternal, writeCertificate, writeBlockListConfig, writeWebConfig);
                     _pendingSave = false;
                 }
                 catch
@@ -392,13 +392,13 @@ namespace DnsServerCore
             }
         }
 
-        private void PersistManifestSettings(Action dns, Action logging, Action certificate, Action blocklist)
+        private void PersistManifestSettings(Action dns, Action logging, Action certificate, Action blocklist, Action web)
         {
-            Action write = dns + logging + certificate + blocklist;
+            Action write = dns + logging + certificate + blocklist + web;
             if (write is null)
                 return;
 
-            var files = new List<string>(4);
+            var files = new List<string>(5);
             if (dns is not null)
                 files.Add("dns.config");
             if (logging is not null)
@@ -407,6 +407,8 @@ namespace DnsServerCore
                 files.Add("self-signed-cert.pfx");
             if (blocklist is not null)
                 files.Add("blocklist.config");
+            if (web is not null)
+                files.Add("webservice.config");
 
             ConfigurationJournal.Persist(_configFolder, write, files.ToArray());
         }
