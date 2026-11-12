@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace DnsServerApp
@@ -31,9 +32,9 @@ namespace DnsServerApp
                         await WritePlanAsync(LoadManifest(args[2]), ParseServerUrl(args[3]));
                         return 0;
 
-                    case "apply" when args.Length == 5:
-                        await ApplyAsync(LoadManifest(args[2]), ParseServerUrl(args[3]), args[4]);
-                        return 0;
+                    case "apply" when args.Length == 5 || (args.Length == 7 && args[5] == "--wait"):
+                        return await ApplyAsync(LoadManifest(args[2]), ParseServerUrl(args[3]), args[4],
+                            args.Length == 7 ? ParseServerUrl(args[6]) : null);
 
                     case "status" when args.Length == 4:
                         return await ReadApplyStatusAsync(ParseServerUrl(args[2]), args[3]);
@@ -53,7 +54,7 @@ namespace DnsServerApp
                     default:
                         Console.Error.WriteLine("Usage: DnsServerApp config validate [manifest]");
                         Console.Error.WriteLine("       DnsServerApp config plan <manifest> <server-url>");
-                        Console.Error.WriteLine("       DnsServerApp config apply <manifest> <server-url> <revision>");
+                        Console.Error.WriteLine("       DnsServerApp config apply <manifest> <server-url> <revision> [--wait <result-url>]");
                         Console.Error.WriteLine("       DnsServerApp config status <server-url> <operation-id>");
                         Console.Error.WriteLine("       DnsServerApp config export <server-url> [--include-preview-only]");
                         return 2;
@@ -118,41 +119,101 @@ namespace DnsServerApp
             Console.WriteLine($"Revision {preview.GetProperty("revision").GetString()}");
         }
 
-        private static async Task ApplyAsync(ConfigurationManifest manifest, Uri serverUrl, string revision)
+        private static async Task<int> ApplyAsync(ConfigurationManifest manifest, Uri serverUrl, string revision, Uri? resultUrl)
         {
             if ((revision.Length != 64) || !Array.TrueForAll(revision.ToCharArray(), char.IsAsciiHexDigit))
                 throw new InvalidDataException("Supply the revision printed by config plan.");
 
             using var content = new StringContent(manifest.Settings.GetRawText(), Encoding.UTF8, "application/json");
             JsonElement response = await ReadServerResponseAsync(serverUrl, "/api/settings/config/apply", content, revision.ToUpperInvariant());
-            if (response.TryGetProperty("operationId", out JsonElement id))
-            {
-                Console.WriteLine($"Configuration apply is pending. Operation {id.GetString()}");
-                Console.WriteLine("Use config status with the server origin and operation ID to check the result.");
-            }
-            else
+            if (!response.TryGetProperty("operationId", out JsonElement id))
             {
                 Console.WriteLine("Configuration applied.");
+                return 0;
             }
+
+            string operationId = id.GetString() ?? "";
+            Console.WriteLine($"Configuration apply is pending. Operation {operationId}");
+            if (resultUrl is not null)
+                return await WaitForApplyAsync(serverUrl, resultUrl, operationId);
+
+            Console.WriteLine("Use config status with the server origin and operation ID to check the result.");
+            return 0;
         }
 
         private static async Task<int> ReadApplyStatusAsync(Uri serverUrl, string operationId)
         {
+            JsonElement result = await GetApplyStatusAsync(serverUrl, operationId);
+            return PrintApplyStatus(result);
+        }
+
+        private static async Task<JsonElement> GetApplyStatusAsync(Uri serverUrl, string operationId, CancellationToken cancellationToken = default)
+        {
             if (!Guid.TryParseExact(operationId, "N", out Guid id))
                 throw new InvalidDataException("Supply the operation ID printed by config apply.");
 
-            JsonElement result = await ReadServerResponseAsync(serverUrl, "/api/settings/config/status?operationId=" + id.ToString("N"));
-            string? state = result.GetProperty("state").GetString();
-            if (state == "failed")
-            {
-                Console.Error.WriteLine(result.GetProperty("message").GetString());
-                return 1;
-            }
-            Console.WriteLine(state == "applied" ? "Configuration applied." : "Configuration apply is pending.");
-            return 0;
+            JsonElement result = await ReadServerResponseAsync(serverUrl, "/api/settings/config/status?operationId=" + id.ToString("N"), cancellationToken: cancellationToken);
+            if (result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("state", out JsonElement state) ||
+                state.ValueKind != JsonValueKind.String ||
+                (state.ValueEquals("failed") && (!result.TryGetProperty("message", out JsonElement message) || message.ValueKind != JsonValueKind.String)))
+                throw new InvalidDataException("The server returned an invalid configuration apply status.");
+
+            return result;
         }
 
-        private static async Task<JsonElement> ReadServerResponseAsync(Uri serverUrl, string apiPath, HttpContent? content = null, string? revision = null)
+        private static async Task<int> WaitForApplyAsync(Uri originalUrl, Uri resultUrl, string operationId)
+        {
+            Uri[] origins = originalUrl.Equals(resultUrl) ? [originalUrl] : [resultUrl, originalUrl];
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+            try
+            {
+                while (!timeout.IsCancellationRequested)
+                {
+                    foreach (Uri origin in origins)
+                    {
+                        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+                        attempt.CancelAfter(TimeSpan.FromSeconds(2));
+                        try
+                        {
+                            JsonElement result = await GetApplyStatusAsync(origin, operationId, attempt.Token);
+                            if (result.GetProperty("state").GetString() != "pending")
+                                return PrintApplyStatus(result);
+                        }
+                        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or InvalidDataException)
+                        {
+                            // The server may be switching listeners, or this origin may no longer serve the operation.
+                        }
+                    }
+
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), timeout.Token);
+                }
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            { }
+
+            Console.Error.WriteLine($"Timed out waiting for operation {operationId}. Use config status to check its outcome.");
+            return 1;
+        }
+
+        private static int PrintApplyStatus(JsonElement result)
+        {
+            switch (result.GetProperty("state").GetString())
+            {
+                case "applied":
+                    Console.WriteLine("Configuration applied.");
+                    return 0;
+                case "failed":
+                    Console.Error.WriteLine(result.GetProperty("message").GetString());
+                    return 1;
+                case "pending":
+                    Console.WriteLine("Configuration apply is pending.");
+                    return 0;
+                default:
+                    throw new InvalidDataException("The server returned an unknown configuration apply state.");
+            }
+        }
+
+        private static async Task<JsonElement> ReadServerResponseAsync(Uri serverUrl, string apiPath, HttpContent? content = null, string? revision = null, CancellationToken cancellationToken = default)
         {
             string? token = Environment.GetEnvironmentVariable("TECHNITIUM_CONFIG_API_TOKEN");
             if (string.IsNullOrWhiteSpace(token))
@@ -172,11 +233,11 @@ namespace DnsServerApp
             };
             if (revision is not null)
                 request.Headers.IfMatch.Add(new EntityTagHeaderValue("\"" + revision + "\""));
-            using HttpResponseMessage response = await client.SendAsync(request);
+            using HttpResponseMessage response = await client.SendAsync(request, cancellationToken);
             response.EnsureSuccessStatusCode();
 
-            using Stream responseStream = await response.Content.ReadAsStreamAsync();
-            using JsonDocument document = await JsonDocument.ParseAsync(responseStream);
+            using Stream responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using JsonDocument document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
             JsonElement root = document.RootElement;
             if ((root.ValueKind != JsonValueKind.Object) || !root.TryGetProperty("status", out JsonElement status)
                 || (status.ValueKind != JsonValueKind.String)
