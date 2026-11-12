@@ -5321,6 +5321,8 @@ The Primary can apply `dns.tsigKeys` when every peer advertises `supportsDeclara
 
 The Primary can apply `auth.ldap` when every peer advertises `supportsDeclarativeLdap`. Secondaries inherit the settings and ownership through configuration sync. The Primary export includes the effective LDAP settings and reports any bind password as a missing input.
 
+The Primary can apply `auth.sso` when every peer advertises `supportsDeclarativeSso`. Secondaries inherit the settings and ownership through configuration sync and restart their web service when the provider configuration requires it.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7460,6 +7462,7 @@ WHERE:
 - `supportsDeclarativeDnsTuning` (optional): Set to true when the Secondary can inherit manifest ownership of DNS tuning and rebind local DNS listeners. Required when the Primary manages any DNS tuning field.
 - `supportsDeclarativeTsig` (optional): Set to true when the Secondary can inherit manifest ownership of TSIG keys. Required when the Primary manages operator TSIG keys.
 - `supportsDeclarativeLdap` (optional): Set to true when the Secondary can inherit manifest ownership of LDAP settings. Required when the Primary manages any LDAP fields.
+- `supportsDeclarativeSso` (optional): Set to true when the Secondary can inherit manifest ownership of SSO settings. Required when the Primary manages any SSO fields.
 
 RESPONSE:
 ```

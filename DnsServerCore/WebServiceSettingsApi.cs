@@ -610,10 +610,13 @@ namespace DnsServerCore
                     ConfigurationSso.Settings sso = _dnsWebService._authManager.GetManifestSsoSettings();
                     if (!ConfigurationSso.Same(sso, ConfigurationSso.Default))
                     {
-                        if (_dnsWebService._clusterManager.ClusterInitialized)
+                        if (_dnsWebService._clusterManager.ClusterInitialized && _dnsWebService._clusterManager.GetSelfNode().Type != ClusterNodeType.Primary)
                             missingInputs.Add(ConfigurationSso.Path);
                         else
+                        {
+                            manifest["auth"] ??= new System.Text.Json.Nodes.JsonObject();
                             manifest["auth"]["sso"] = ConfigurationSso.Export(sso);
+                        }
                         if (sso.ClientSecret is not null)
                             missingInputs.Add(ConfigurationSso.Path + "/clientSecret");
                     }
@@ -1200,6 +1203,11 @@ namespace DnsServerCore
                         ConfigurationLdap.WriteSnapshot(writer, _dnsWebService._authManager.GetManifestLdapSettings(), ldap, _configurationRevisionKey);
                     var auth = _dnsWebService._authManager;
                     var sso = preparedSso ?? PrepareSsoForSession(manifest, sessionUser);
+                    if (manifest is not null && ConfigurationPlan.CheckClusterSsoSupport(manifest, _dnsWebService._clusterManager, sso) is { } ssoPeers)
+                    {
+                        writer.WritePropertyName("ssoPeers");
+                        JsonSerializer.Serialize(writer, ssoPeers);
+                    }
                     if (sso is not null)
                         ConfigurationSso.WriteSnapshot(writer, auth.GetManifestSsoSettings(), sso, _configurationRevisionKey);
                     var groups = ConfigurationGroups.Prepare(manifest, auth);

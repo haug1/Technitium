@@ -71,6 +71,7 @@ namespace DnsServerCore
                 jsonWriter.WriteBoolean("supportsDeclarativeDnsTuning", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeTsig", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeLdap", true);
+                jsonWriter.WriteBoolean("supportsDeclarativeSso", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeClusterHandoff", true);
 
                 if (_dnsWebService._clusterManager.ClusterInitialized)
@@ -345,9 +346,10 @@ namespace DnsServerCore
                 bool supportsDeclarativeDnsTuning = request.GetQueryOrForm("supportsDeclarativeDnsTuning", bool.Parse, false);
                 bool supportsDeclarativeTsig = request.GetQueryOrForm("supportsDeclarativeTsig", bool.Parse, false);
                 bool supportsDeclarativeLdap = request.GetQueryOrForm("supportsDeclarativeLdap", bool.Parse, false);
+                bool supportsDeclarativeSso = request.GetQueryOrForm("supportsDeclarativeSso", bool.Parse, false);
                 ClusterNode secondaryNode = _dnsWebService._clusterManager.JoinCluster(secondaryNodeId, secondaryNodeUrl,
                     secondaryNodeIpAddresses, secondaryNodeCertificate, supportsDeclarativeOptions, supportsDeclarativeBlockLists,
-                    supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits, supportsDeclarativeProxy, supportsDeclarativeDnsTuning, supportsDeclarativeTsig, supportsDeclarativeLdap);
+                    supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits, supportsDeclarativeProxy, supportsDeclarativeDnsTuning, supportsDeclarativeTsig, supportsDeclarativeLdap, supportsDeclarativeSso);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Secondary node '" + secondaryNode.ToString() + "' joined the Cluster (" + _dnsWebService._clusterManager.ClusterDomain + ") successfully.");
 

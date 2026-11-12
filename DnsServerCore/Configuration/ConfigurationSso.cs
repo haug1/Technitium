@@ -150,6 +150,8 @@ namespace DnsServerCore.Configuration
                     fields.Add(field.Name);
                 }
             }
+            if (fields.Count > ushort.MaxValue)
+                throw new InvalidDataException($"{Path}: Too many SSO ownership declarations.");
             return fields.ToArray();
         }
 

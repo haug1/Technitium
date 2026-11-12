@@ -302,6 +302,8 @@ namespace DnsServerCore.Configuration
                     dnsPolicyPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("ldapPeers", out JsonElement ldapPeers))
                     ldapPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("ssoPeers", out JsonElement ssoPeers))
+                    ssoPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -886,8 +888,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/auth/groups: Applying group settings to a cluster is not implemented.");
             if (ConfigurationApplications.IsDeclared(manifest))
                 throw new InvalidDataException("/apps/packages: Applying app packages to a cluster is not implemented.");
-            if (ConfigurationSso.IsDeclared(manifest))
-                throw new InvalidDataException("/auth/sso: Applying SSO settings to a cluster is not implemented.");
+            CheckClusterSsoRole(manifest, cluster);
             CheckClusterLdapRole(manifest, cluster);
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
                 throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
@@ -897,6 +898,28 @@ namespace DnsServerCore.Configuration
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        private static void CheckClusterSsoRole(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (ConfigurationSso.IsDeclared(manifest) && cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new InvalidDataException("/auth/sso: Only the Primary can apply cluster SSO settings.");
+        }
+
+        internal static int[] CheckClusterSsoSupport(ConfigurationManifest manifest, ClusterManager cluster, ConfigurationSso.Settings sso)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            CheckClusterSsoRole(manifest, cluster);
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                return null;
+
+            var auth = cluster.DnsWebService.AuthManager;
+            if (!auth.SsoOwnershipFromPrimary && auth.ManagedSsoFields.SequenceEqual(ConfigurationSso.GetOwnedFields(manifest)) &&
+                (sso is null || ConfigurationSso.Same(auth.GetManifestSsoSettings(), sso)))
+                return null;
+            return cluster.CheckDeclarativeSsoPeers();
         }
 
         private static void CheckClusterLdapRole(ConfigurationManifest manifest, ClusterManager cluster)

@@ -72,6 +72,7 @@ namespace DnsServerCore.Cluster
         internal volatile bool SupportsDeclarativeDnsTuning;
         internal volatile bool SupportsDeclarativeTsig;
         internal volatile bool SupportsDeclarativeLdap;
+        internal volatile bool SupportsDeclarativeSso;
         string _version;
         DateTime _upSince;
         DateTime _lastSeen;
@@ -246,6 +247,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeDnsTuning = clusterInfo.SupportsDeclarativeDnsTuning;
                 SupportsDeclarativeTsig = clusterInfo.SupportsDeclarativeTsig;
                 SupportsDeclarativeLdap = clusterInfo.SupportsDeclarativeLdap;
+                SupportsDeclarativeSso = clusterInfo.SupportsDeclarativeSso;
 
                 if (_type == ClusterNodeType.Primary)
                     _clusterManager.UpdateClusterFromPrimaryNode(clusterInfo); //update cluster nodes from primary node response
@@ -275,6 +277,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeDnsTuning = false;
                 SupportsDeclarativeTsig = false;
                 SupportsDeclarativeLdap = false;
+                SupportsDeclarativeSso = false;
             }
             catch (Exception ex)
             {
@@ -288,6 +291,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeDnsTuning = false;
                 SupportsDeclarativeTsig = false;
                 SupportsDeclarativeLdap = false;
+                SupportsDeclarativeSso = false;
                 success = false;
                 _clusterManager.DnsWebService.LogManager.Write("Heartbeat failed for " + _type.ToString() + " node '" + ToString() + "'.", ex);
             }

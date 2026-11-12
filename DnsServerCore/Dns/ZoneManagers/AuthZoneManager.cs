@@ -821,7 +821,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 ldapOwnership = null;
 
             string[] ssoOwnership = ConfigurationSso.GetOwnedFields(manifest);
-            if (auth.ManagedSsoFields.SequenceEqual(ssoOwnership))
+            if (auth.SsoOwnershipFromPrimary ? isClusterSecondary : auth.ManagedSsoFields.SequenceEqual(ssoOwnership))
                 ssoOwnership = null;
 
             var groupChanges = ConfigurationGroups.Prepare(manifest, auth);
@@ -906,7 +906,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
-            if (membership.Count > 0 || ldap is not null || ldapOwnership is not null || groupChanges.Count > 0 || userChanges.Count > 0 || grants.Count > 0 || sso is not null)
+            if (membership.Count > 0 || ldap is not null || ldapOwnership is not null || groupChanges.Count > 0 || userChanges.Count > 0 || grants.Count > 0 || sso is not null || ssoOwnership is not null)
                 files.Add("auth.config");
             if (ownershipChanged)
                 files.Add(ManifestOwnershipFile);

@@ -870,7 +870,7 @@ namespace DnsServerCore.Cluster
             return Convert.ToHexString(SHA256.HashData(payload));
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false, bool supportsDeclarativeProxy = false, bool supportsDeclarativeDnsTuning = false, bool supportsDeclarativeTsig = false, bool supportsDeclarativeLdap = false)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false, bool supportsDeclarativeProxy = false, bool supportsDeclarativeDnsTuning = false, bool supportsDeclarativeTsig = false, bool supportsDeclarativeLdap = false, bool supportsDeclarativeSso = false)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
@@ -906,6 +906,9 @@ namespace DnsServerCore.Cluster
             if (_dnsWebService.AuthManager.ManagedLdapFields.Count > 0 && !supportsDeclarativeLdap)
                 throw new DnsServerException("/auth/ldap: The Secondary must support declarative LDAP before joining.");
 
+            if (_dnsWebService.AuthManager.ManagedSsoFields.Count > 0 && !supportsDeclarativeSso)
+                throw new DnsServerException("/auth/sso: The Secondary must support declarative SSO before joining.");
+
             string secondaryNodeDomain = secondaryNodeUrl.Host.ToLowerInvariant();
 
             if (!secondaryNodeDomain.EndsWith("." + _clusterDomain, StringComparison.OrdinalIgnoreCase))
@@ -932,7 +935,8 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeProxy = supportsDeclarativeProxy,
                 SupportsDeclarativeDnsTuning = supportsDeclarativeDnsTuning,
                 SupportsDeclarativeTsig = supportsDeclarativeTsig,
-                SupportsDeclarativeLdap = supportsDeclarativeLdap
+                SupportsDeclarativeLdap = supportsDeclarativeLdap,
+                SupportsDeclarativeSso = supportsDeclarativeSso
             };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
@@ -1323,6 +1327,17 @@ namespace DnsServerCore.Cluster
             {
                 if (!peer.SupportsDeclarativeLdap)
                     throw new InvalidDataException($"/auth/ldap: Node '{peer.Name}' has not advertised support for declarative LDAP.");
+            }
+            return peers.Select(peer => peer.Id).ToArray();
+        }
+
+        internal int[] CheckDeclarativeSsoPeers()
+        {
+            var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id).ToArray();
+            foreach (ClusterNode peer in peers)
+            {
+                if (!peer.SupportsDeclarativeSso)
+                    throw new InvalidDataException($"/auth/sso: Node '{peer.Name}' has not advertised support for declarative SSO.");
             }
             return peers.Select(peer => peer.Id).ToArray();
         }
@@ -1929,7 +1944,7 @@ namespace DnsServerCore.Cluster
 
                 //join cluster
                 primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
-                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, supportsDeclarativeProxy: true, supportsDeclarativeDnsTuning: true, supportsDeclarativeTsig: true, supportsDeclarativeLdap: true, cancellationToken);
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, supportsDeclarativeProxy: true, supportsDeclarativeDnsTuning: true, supportsDeclarativeTsig: true, supportsDeclarativeLdap: true, supportsDeclarativeSso: true, cancellationToken);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);

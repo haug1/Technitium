@@ -123,6 +123,8 @@ def wait_for(check, description, timeout=45):
 def verify(current, previous, folder, propagation, graceful):
     ports = allocate_ports()
     password = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_SSO_SECRET"] = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_SSO_ROTATED_SECRET"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_LDAP_SECRET"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_LDAP_ROTATED_SECRET"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_TSIG_SECRET"] = base64.b64encode(secrets.token_bytes(32)).decode()
@@ -157,6 +159,8 @@ def verify(current, previous, folder, propagation, graceful):
         tsig_revision = ok(primary.call("settings/config/plan", manifest=tsig_policy))["revision"]
         ldap_policy = {"schemaVersion": 1, "auth": {"ldap": {"port": 1389}}}
         ldap_revision = ok(primary.call("settings/config/plan", manifest=ldap_policy))["revision"]
+        sso_policy = {"schemaVersion": 1, "auth": {"sso": {"clientId": "cluster-fixture"}}}
+        sso_revision = ok(primary.call("settings/config/plan", manifest=sso_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -171,12 +175,26 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeDnsTuning"] is True
             assert joined["supportsDeclarativeTsig"] is True
             assert joined["supportsDeclarativeLdap"] is True
+            assert joined["supportsDeclarativeSso"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeLdap"), joined
+        assert not joined.get("supportsDeclarativeSso"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=sso_policy),
+            primary.call("settings/config/apply", manifest=sso_policy, revision=sso_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative SSO" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            assert "/auth/sso/clientId" not in ok(node.call("admin/sso/get"))["managedSettings"]
+        if joined.get("supportsDeclarativeLdap"):
+            plan = ok(primary.call("settings/config/plan", manifest=ldap_policy))
+            ok(primary.call("settings/config/apply", manifest=ldap_policy, revision=plan["revision"]))
+            assert ok(primary.call("admin/ldap/get"))["ldapPort"] == 1389
+            print("Mixed-build check passed. Existing LDAP support allowed the update and rejected SSO changes.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=ldap_policy),
             primary.call("settings/config/apply", manifest=ldap_policy, revision=ldap_revision),
@@ -528,6 +546,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_dns_tuning(primary, secondary, release, local_web)
     verify_tsig_policy(primary, secondary, release, local_web)
     verify_ldap_policy(primary, secondary, release, local_web)
+    verify_sso_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -942,6 +961,79 @@ def verify_ldap_policy(primary, secondary, cluster_manifest, local_web):
     assert not apply(primary, desired)["changes"]
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(2389, rotated, set()), "the Secondary to release LDAP ownership")
+
+
+def verify_sso_policy(primary, secondary, cluster_manifest, local_web):
+    first = "TECHNITIUM_TEST_CLUSTER_SSO_SECRET"
+    rotated = "TECHNITIUM_TEST_CLUSTER_SSO_ROTATED_SECRET"
+    sso = {"enabled": True, "authority": "https://identity.fixture.test", "clientId": "cluster-fixture",
+           "clientSecret": {"environment": first}, "scopes": ["email"]}
+    desired = {**cluster_manifest, "auth": {"sso": sso}}
+    paths = {f"/auth/sso/{field}" for field in sso}
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "auth": {"sso": sso}})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, manifest):
+        def preview():
+            result = node.call("settings/config/plan", manifest=manifest)
+            if result["status"] == "error" and "has not advertised support for declarative SSO" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm SSO support")
+        assert all(os.environ[var] not in json.dumps(plan) for var in (first, rotated))
+        operation = ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"])).get("operationId")
+        if operation is not None:
+            def operation_state():
+                try:
+                    status = ok(node.call(f"settings/config/status?operationId={operation}"))
+                except (urllib.error.URLError, TimeoutError):
+                    return None
+                return None if status["state"] == "pending" else status["state"]
+            assert wait_for(operation_state, "the Primary SSO web restart") == "applied"
+        return plan
+
+    def matches(enabled, secret, owned):
+        try:
+            config = ok(secondary.call("admin/sso/get"))
+        except (urllib.error.URLError, TimeoutError):
+            return False
+        return (config["ssoEnabled"] is enabled and config["ssoClientId"] == sso["clientId"]
+                and "email" in config["ssoScopes"] and set(config["managedSettings"]) == owned
+                and config["ssoClientSecret"] == "************"
+                and os.environ[secret].encode() in (secondary.folder / "auth.config").read_bytes())
+
+    restarted = "Web service was restarted successfully."
+    before = log_message_count(secondary, restarted)
+    plan = apply(primary, desired)
+    assert any(change["path"] == "/auth/sso/enabled" and change["restartWebService"] for change in plan["changes"]), plan
+    wait_for(lambda: matches(True, first, paths) and log_message_count(secondary, restarted) > before,
+             "the Secondary to apply SSO and restart its web service")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(True, first, paths)
+    apply(secondary, local_web)
+    assert matches(True, first, paths)
+    denied = secondary.call("admin/sso/set?ssoClientId=changed")
+    assert denied["status"] == "error" and "/auth/sso/clientId" in denied["errorMessage"], denied
+    exported = ok(primary.call("settings/config/export"))
+    assert exported["manifest"]["auth"]["sso"]["clientId"] == sso["clientId"]
+    assert "/auth/sso/clientSecret" in exported["missingInputs"]
+    assert os.environ[first] not in json.dumps(exported)
+
+    before = log_message_count(secondary, restarted)
+    sso["clientSecret"] = {"environment": rotated}
+    apply(primary, desired)
+    wait_for(lambda: matches(True, rotated, paths) and log_message_count(secondary, restarted) > before,
+             "the Secondary to activate the rotated SSO credential")
+    assert not apply(primary, desired)["changes"]
+
+    before = log_message_count(secondary, restarted)
+    sso["enabled"] = False
+    apply(primary, desired)
+    wait_for(lambda: matches(False, rotated, paths) and log_message_count(secondary, restarted) > before,
+             "the Secondary to disable SSO and restart its web service")
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(False, rotated, set()), "the Secondary to release SSO ownership")
 
 
 def assert_promoted_policy(state):
