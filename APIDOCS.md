@@ -5337,6 +5337,8 @@ The response contains a versioned `manifest` and a sorted `missingInputs` array 
 
 Entries in `blocklists.sources` can be strings or environment references. Preview and apply resolve the references on the server, and a change to the effective source list invalidates the preview revision. Use a local startup manifest for file references.
 
+The Primary exports Forwarder, Secondary, and Stub members of its cluster catalog with their `catalog.name` declarations. The destination cluster catalog must already exist before applying those zones.
+
 ### Apply Declarative Configuration
 
 Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header. A stale revision returns `status: error` with `errorCode: stale-preview` before applying any changes.

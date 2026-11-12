@@ -595,6 +595,7 @@ namespace DnsServerCore
                     var zones = ConfigurationZoneExport.Export(dns,
                         name => cluster.ClusterInitialized && (cluster.IsClusterPrimaryZone(name) || cluster.IsClusterCatalogZone(name)),
                         name => _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.View),
+                        zone => cluster.IsClusterCatalogZone(zone.CatalogZoneName) && ConfigurationPlan.CanManageClusterCatalogMember(cluster, zone.Type),
                         _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify)
                             ? name => _dnsWebService._authManager.GetPermission(PermissionSection.Zones, name) : null, missingInputs);
                     if (zones.Count > 0)
@@ -1402,7 +1403,7 @@ namespace DnsServerCore
                             string before = zone?.CatalogZoneName ?? "";
                             foreach (string affected in new[] { before, catalog }.Where(value => value.Length != 0).Distinct(StringComparer.Ordinal))
                             {
-                                ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, affected, zonePath + "/catalog/name");
+                                ConfigurationPlan.CheckClusterCatalogMembershipTarget(_dnsWebService._clusterManager, affected, type, zonePath + "/catalog/name");
                                 if (_dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(affected) is not null &&
                                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, affected, sessionUser, PermissionFlag.Modify))
                                     throw new DnsWebServiceException("Access was denied to use the catalog zone.");

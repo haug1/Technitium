@@ -103,12 +103,18 @@ namespace DnsServerCore.Tests
             Assert.Equal(120, second.GetProperty("configRefreshIntervalSeconds").GetInt32());
 
             LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=600", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/create?zone=route.test&type=Forwarder&catalog=cluster-catalog.cluster.test&forwarder=192.0.2.53",
+                server.AdminToken));
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
             JsonElement response = export.GetProperty("response");
             JsonElement cluster = response.GetProperty("manifest").GetProperty("cluster");
             Assert.DoesNotContain(response.GetProperty("missingInputs").EnumerateArray(),
-                path => path.ValueEquals("/zones/cluster.test") || path.ValueEquals("/zones/cluster-catalog.cluster.test"));
+                path => path.ValueEquals("/zones/cluster.test") || path.ValueEquals("/zones/cluster-catalog.cluster.test") ||
+                    path.ValueEquals("/zones/route.test"));
+            Assert.Equal("cluster-catalog.cluster.test", response.GetProperty("manifest").GetProperty("zones")
+                .GetProperty("route.test").GetProperty("catalog").GetProperty("name").GetString());
             Assert.Equal("Primary", cluster.GetProperty("bootstrap").GetProperty("role").GetString());
             string bootstrapManifest = JsonSerializer.Serialize(new { schemaVersion = 1, cluster });
             await using var restored = await LoopbackWebService.StartAsync("restored.cluster.test", enableTls: true, startupManifest: bootstrapManifest);
@@ -130,6 +136,13 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await restored.CallAsync("settings/config/apply", restored.AdminToken, applyBody,
                 preview.GetProperty("response").GetProperty("revision").GetString()));
             Assert.Equal(600, (await restored.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+            JsonElement zone = await restored.CallAsync("zones/options/get?zone=route.test", restored.AdminToken);
+            LoopbackWebService.AssertOk(zone);
+            Assert.Equal("cluster-catalog.cluster.test", zone.GetProperty("response").GetProperty("catalog").GetString());
+            JsonElement restoredZones = await restored.CallAsync("settings/config/export", restored.AdminToken);
+            LoopbackWebService.AssertOk(restoredZones);
+            Assert.True(JsonElement.DeepEquals(response.GetProperty("manifest").GetProperty("zones").GetProperty("route.test"),
+                restoredZones.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("route.test")));
             await AssertMigrationReapplyAsync(restored, migration.ToJsonString());
 
             migration["dns"]!["serverDomain"] = "different.cluster.test";

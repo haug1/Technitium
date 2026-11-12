@@ -17,7 +17,7 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationZoneExport
     {
         internal static JsonObject Export(DnsServer dns, Func<string, bool> isClusterInfrastructure, Func<string, bool> canView,
-            Func<string, Permission> getPermission, ISet<string> missingInputs)
+            Func<AuthZoneInfo, bool> canExportClusterCatalogMember, Func<string, Permission> getPermission, ISet<string> missingInputs)
         {
             var result = new JsonObject();
             foreach (AuthZoneInfo zone in dns.AuthZoneManager.GetAllZones().OrderBy(zone => zone.Name, StringComparer.Ordinal))
@@ -35,7 +35,8 @@ namespace DnsServerCore.Configuration
                 if ((zone.ApexZone is not (PrimaryZone or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
                     (catalog is not null && (!AuthZoneManager.SupportsManifestCatalogMembership(zone.Type) ||
-                        isClusterInfrastructure(catalog) || !canView(catalog) || catalogType != AuthZoneType.Catalog)))
+                        (isClusterInfrastructure(catalog) && !canExportClusterCatalogMember(zone)) ||
+                        !canView(catalog) || catalogType != AuthZoneType.Catalog)))
                 {
                     missingInputs.Add(path);
                     continue;

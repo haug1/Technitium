@@ -9,6 +9,8 @@ using System.Threading.Tasks;
 using DnsServerCore.Cluster;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ResourceRecords;
+using DnsServerCore.Dns.ZoneManagers;
+using DnsServerCore.Dns.Zones;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -898,11 +900,16 @@ namespace DnsServerCore.Configuration
                     string path = AppendPath("/zones", zone.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(zone.Name, path, allowRoot: true);
                     CheckClusterZoneTarget(cluster, name, path);
-                    if (cluster.DnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(name)?.CatalogZoneName is string currentCatalog)
-                        CheckClusterZoneTarget(cluster, currentCatalog, path + "/catalog/name");
+                    AuthZoneInfo current = cluster.DnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(name);
+                    AuthZoneType type = current?.Type ?? AuthZoneType.Primary;
+                    if (current is null && zone.Value.ValueKind == JsonValueKind.Object &&
+                        zone.Value.TryGetProperty("type", out JsonElement declaredType))
+                        type = Enum.Parse<AuthZoneType>(declaredType.GetString());
+                    if (current?.CatalogZoneName is string currentCatalog)
+                        CheckClusterCatalogMembershipTarget(cluster, currentCatalog, type, path + "/catalog/name");
                     if (zone.Value.ValueKind == JsonValueKind.Object && zone.Value.TryGetProperty("catalog", out JsonElement catalog) &&
                         catalog.TryGetProperty("name", out JsonElement target) && target.ValueKind == JsonValueKind.String)
-                        CheckClusterZoneTarget(cluster, ConfigurationManifest.CanonicalDnsName(target.GetString(), path + "/catalog/name", allowRoot: false), path + "/catalog/name");
+                        CheckClusterCatalogMembershipTarget(cluster, ConfigurationManifest.CanonicalDnsName(target.GetString(), path + "/catalog/name", allowRoot: false), type, path + "/catalog/name");
                 }
             }
             CheckClusterDomainListSupport(manifest, cluster);
@@ -923,6 +930,17 @@ namespace DnsServerCore.Configuration
         {
             if (cluster.ClusterInitialized && (cluster.IsClusterPrimaryZone(name) || cluster.IsClusterCatalogZone(name)))
                 throw new InvalidDataException($"{path}: Cluster infrastructure zones are managed by the cluster.");
+        }
+
+        internal static bool CanManageClusterCatalogMember(ClusterManager cluster, AuthZoneType type) =>
+            cluster.GetSelfNode().Type == ClusterNodeType.Primary && type != AuthZoneType.Primary &&
+            AuthZoneManager.SupportsManifestCatalogMembership(type);
+
+        internal static void CheckClusterCatalogMembershipTarget(ClusterManager cluster, string catalog, AuthZoneType type, string path)
+        {
+            if (cluster.ClusterInitialized && cluster.IsClusterCatalogZone(catalog) && CanManageClusterCatalogMember(cluster, type))
+                return;
+            CheckClusterZoneTarget(cluster, catalog, path);
         }
 
         private static void CheckClusterAppRole(ConfigurationManifest manifest, ClusterManager cluster)
