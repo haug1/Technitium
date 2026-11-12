@@ -63,6 +63,25 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public void OfflineForwarderValidationChecksTheResolvedAddressAndTransport()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"zones":{"example.test":{"type":"Forwarder","records":[
+                    {"owner":"@","type":"FWD","data":{"forwarder":{"transport":"Https","address":{"file":"upstream"}}}}
+                ]}}}
+                """);
+            ConfigurationManifest manifest = ConfigurationManifest.Load(path);
+            string input = Path.Combine(_directory.FullName, "upstream");
+            File.WriteAllText(input, "invalid fixture-address");
+            var error = Assert.Throws<InvalidDataException>(manifest.ValidateReferences);
+            Assert.Contains("/zones/example.test/records/0/data/forwarder/address", error.Message);
+            Assert.DoesNotContain("fixture-address", error.Message);
+
+            File.WriteAllText(input, "https://example.test/dns-query?token=fixture-address");
+            manifest.ValidateReferences();
+        }
+
+        [Fact]
         public void BlockListFileReferenceValidatesItsSourceWithoutEchoingIt()
         {
             string path = WriteManifest("""{"schemaVersion":1,"blocklists":{"sources":[{"file":"list-url"}]}}""");

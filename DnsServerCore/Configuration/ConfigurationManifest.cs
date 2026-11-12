@@ -421,6 +421,45 @@ namespace DnsServerCore.Configuration
             return servers;
         }
 
+        internal DnsForwarderRecordData ReadForwarderRecord(JsonElement record, string path)
+        {
+            JsonElement addressValue = record.GetProperty("address");
+            string address = addressValue.ValueKind == JsonValueKind.String ? addressValue.GetString() :
+                ResolveReference(addressValue, path + "/address");
+            var protocol = record.TryGetProperty("transport", out JsonElement transport)
+                ? Enum.Parse<DnsTransportProtocol>(transport.GetString()) : DnsTransportProtocol.Udp;
+            byte priority = record.TryGetProperty("priority", out JsonElement priorityValue) ? decimal.ToByte(priorityValue.GetDecimal()) : (byte)0;
+            bool dnssec = record.TryGetProperty("dnssecValidation", out JsonElement dnssecValue) && dnssecValue.GetBoolean();
+            var proxyType = DnsForwarderRecordProxyType.DefaultProxy;
+            string proxyAddress = null, username = null, password = null;
+            ushort port = 0;
+            if (record.TryGetProperty("proxy", out JsonElement proxy))
+            {
+                proxyType = Enum.Parse<DnsForwarderRecordProxyType>(proxy.GetProperty("type").GetString());
+                if (address == "this-server" && proxyType != DnsForwarderRecordProxyType.DefaultProxy)
+                    throw new InvalidDataException($"{path}/proxy: this-server uses the server's resolver.");
+                if (proxyType is DnsForwarderRecordProxyType.Http or DnsForwarderRecordProxyType.Socks5)
+                {
+                    if (!proxy.TryGetProperty("address", out JsonElement host) || string.IsNullOrWhiteSpace(proxyAddress = host.GetString()) ||
+                        !proxy.TryGetProperty("port", out JsonElement portValue) || (port = decimal.ToUInt16(portValue.GetDecimal())) == 0)
+                        throw new InvalidDataException($"{path}/proxy: A proxy address and nonzero port are required.");
+                    username = proxy.TryGetProperty("username", out JsonElement user) ? user.GetString() : null;
+                    if (proxy.TryGetProperty("password", out JsonElement secret))
+                        password = ResolveReference(secret, path + "/proxy/password");
+                }
+                else if (proxy.EnumerateObject().Count() != 1)
+                    throw new InvalidDataException($"{path}/proxy: Only HTTP and SOCKS5 accept proxy connection settings.");
+            }
+            try
+            {
+                return new DnsForwarderRecordData(protocol, address, dnssec, proxyType, proxyAddress, port, username, password, priority);
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException or DnsClientException or NotSupportedException)
+            {
+                throw new InvalidDataException($"{path}/address: Invalid forwarder address or transport.");
+            }
+        }
+
         internal static NetworkAddress[] ReadNetworks(JsonElement value, string path, AddressFamily? family = null)
         {
             if (value.ValueKind == JsonValueKind.Null)
@@ -531,6 +570,12 @@ namespace DnsServerCore.Configuration
                     return;
                 }
 
+                if (path.Split('/') is ["", "zones", _, "records", _, "data", "forwarder"])
+                {
+                    ReadForwarderRecord(element, path);
+                    return;
+                }
+
                 bool appPackage = path.Split('/') is ["", "apps", "packages", _];
                 if (appPackage)
                     ConfigurationApplications.ValidatePackageReferences(this, element, path);
@@ -626,8 +671,6 @@ namespace DnsServerCore.Configuration
                 ["", "auth", "ldap", "bindPassword"] => true,
                 ["", "cluster", "bootstrap", "password" or "totp"] => true,
                 ["", "zones", _, "dnssec", "keys", _, "privateKey"] => true,
-                ["", "zones", _, "records", _, "data", "forwarder", "proxy", "password"] => true,
-                ["", "zones", _, "records", _, "data", "forwarder", "address"] => true,
                 ["", "zones", _, "records", _, "data", "app", "configuration", ..] => true,
                 ["", "apps", "packages", _, "source"] => true,
                 ["", "apps", "packages", _, "configuration", ..] => true,

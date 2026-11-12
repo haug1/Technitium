@@ -1557,7 +1557,12 @@ namespace DnsServerCore.Configuration
                 else if (data.TryGetProperty("app", out JsonElement app))
                     rdata = ReadApplicationRecord(manifest, app, recordPath + "/data/app");
                 else if (data.TryGetProperty("forwarder", out JsonElement forwarder))
-                    rdata = ReadForwarderRecord(manifest, forwarder, recordPath + "/data/forwarder");
+                {
+                    DnsForwarderRecordData parsed = manifest.ReadForwarderRecord(forwarder, recordPath + "/data/forwarder");
+                    if (parsed.Protocol == DnsTransportProtocol.Quic)
+                        DnsServer.ValidateQuicSupport();
+                    rdata = parsed;
+                }
                 else
                     throw new InvalidDataException($"{recordPath}/data: Planning for this record data format is not implemented.");
 
@@ -1673,47 +1678,6 @@ namespace DnsServerCore.Configuration
                 current.Refresh != desired.Refresh || current.Retry != desired.Retry || current.Expire != desired.Expire ||
                 current.Minimum != desired.Minimum ||
                 !usesDateScheme && desired.Serial > current.Serial;
-        }
-
-        private static DnsForwarderRecordData ReadForwarderRecord(ConfigurationManifest manifest, JsonElement record, string path)
-        {
-            JsonElement addressValue = record.GetProperty("address");
-            string address = addressValue.ValueKind == JsonValueKind.String ? addressValue.GetString() :
-                manifest.ResolveReference(addressValue, path + "/address");
-            var protocol = record.TryGetProperty("transport", out JsonElement transport)
-                ? Enum.Parse<DnsTransportProtocol>(transport.GetString()) : DnsTransportProtocol.Udp;
-            byte priority = record.TryGetProperty("priority", out JsonElement priorityValue) ? decimal.ToByte(priorityValue.GetDecimal()) : (byte)0;
-            bool dnssec = record.TryGetProperty("dnssecValidation", out JsonElement dnssecValue) && dnssecValue.GetBoolean();
-            var proxyType = DnsForwarderRecordProxyType.DefaultProxy;
-            string proxyAddress = null, username = null, password = null;
-            ushort port = 0;
-            if (record.TryGetProperty("proxy", out JsonElement proxy))
-            {
-                proxyType = Enum.Parse<DnsForwarderRecordProxyType>(proxy.GetProperty("type").GetString());
-                if (address == "this-server" && proxyType != DnsForwarderRecordProxyType.DefaultProxy)
-                    throw new InvalidDataException($"{path}/proxy: this-server uses the server's resolver.");
-                if (proxyType is DnsForwarderRecordProxyType.Http or DnsForwarderRecordProxyType.Socks5)
-                {
-                    if (!proxy.TryGetProperty("address", out JsonElement host) || string.IsNullOrWhiteSpace(proxyAddress = host.GetString()) ||
-                        !proxy.TryGetProperty("port", out JsonElement portValue) || (port = decimal.ToUInt16(portValue.GetDecimal())) == 0)
-                        throw new InvalidDataException($"{path}/proxy: A proxy address and nonzero port are required.");
-                    username = proxy.TryGetProperty("username", out JsonElement user) ? user.GetString() : null;
-                    if (proxy.TryGetProperty("password", out JsonElement secret))
-                        password = manifest.ResolveReference(secret, path + "/proxy/password");
-                }
-                else if (proxy.EnumerateObject().Count() != 1)
-                    throw new InvalidDataException($"{path}/proxy: Only HTTP and SOCKS5 accept proxy connection settings.");
-            }
-            if (protocol == DnsTransportProtocol.Quic)
-                DnsServer.ValidateQuicSupport();
-            try
-            {
-                return new DnsForwarderRecordData(protocol, address, dnssec, proxyType, proxyAddress, port, username, password, priority);
-            }
-            catch (Exception ex) when (ex is ArgumentException or FormatException or NotSupportedException)
-            {
-                throw new InvalidDataException($"{path}/address: Invalid forwarder address or transport.");
-            }
         }
 
         private static DnsApplicationRecordData ReadApplicationRecord(ConfigurationManifest manifest, JsonElement app, string path)
