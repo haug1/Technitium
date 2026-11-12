@@ -35,6 +35,16 @@ dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj
 
 To collect C# line and branch coverage by assembly, add `--settings DnsServerCore.Tests/coverage.runsettings --collect "XPlat Code Coverage"`. The test runner prints the path to the Cobertura report. The GitHub Actions regression workflow publishes the report and test results as an artifact.
 
+### Mixed-build cluster check
+
+Publish the current console build and a build from before the interval capability was introduced (for example, revision `281fcffd`) into separate directories. With the pinned .NET SDK and Python 3 available, run the fixture using those published DLLs.
+
+```sh
+python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll /path/to/previous/DnsServerApp.dll
+```
+
+The fixture starts a current Primary and an older Secondary on loopback ports with disposable configuration directories. It verifies that the older node can join, preview and apply reject an interval change before assigning ownership, and the previous value survives a Primary restart. The command prints the temporary directory for inspecting server logs.
+
 ## For Windows
 
 To build the Technitium DNS Server Windows Setup, you need to install [Microsoft Visual Studio Community](https://visualstudio.microsoft.com/vs/) and [Inno Setup](https://jrsoftware.org/isinfo.php) on your computer. Once you have it installed, follow the steps below:
