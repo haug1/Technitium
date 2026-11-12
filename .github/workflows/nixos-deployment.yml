@@ -1,0 +1,41 @@
+name: NixOS deployment tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - name: Build and smoke-test the ARM64 package
+        run: |
+          test "$(uname -m)" = aarch64
+          package=$(nix build .#technitium-dns-server --no-link --print-out-paths -L)
+          server="$package/bin/technitium-dns-server"
+          "$server" config validate configuration/examples/minimal.json
+          state=$(mktemp -d)
+          cp configuration/examples/minimal.json "$state/technitium.json"
+          sudo unshare --net bash -se -- "$server" "$state" <<'SCRIPT'
+          ip link set lo up
+          "$1" --portable-app --stop-if-bind-fails "$2" &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" || true' EXIT
+          curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:5380/ > /dev/null
+          SCRIPT
+
+  deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - name: Grant the Nix build users access to KVM
+        run: sudo chmod a+rw /dev/kvm
+      - name: Test the NixOS service in a VM
+        run: nix build .#checks.x86_64-linux.nixos-deployment --no-link -L

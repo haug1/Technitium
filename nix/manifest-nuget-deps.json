@@ -1,0 +1,22 @@
+[
+  {
+    "pname": "Humanizer.Core",
+    "version": "3.0.10",
+    "hash": "sha256-mflSENjDof1Av9M9RLGEQcl4V4keVfH3qIxy/uxJ6FE="
+  },
+  {
+    "pname": "Json.More.Net",
+    "version": "3.0.1",
+    "hash": "sha256-U4Ers0TkbNsrC8TBJsuQcm9IHirf2BRCOf+9uaOhQSs="
+  },
+  {
+    "pname": "JsonPointer.Net",
+    "version": "7.0.4",
+    "hash": "sha256-e6SbPybWHNhmubILzNWVKKOIEU8De/CHIVrbiG2FP3o="
+  },
+  {
+    "pname": "JsonSchema.Net",
+    "version": "9.6.0",
+    "hash": "sha256-AxYvHQ3EHEDVTw9sAqnbyrML7zNlHG+HHfeJo87wWDc="
+  }
+]
