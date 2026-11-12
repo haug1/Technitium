@@ -706,7 +706,7 @@ namespace DnsServerCore.Dns.Zones
         }
 
         internal void UpdateStagedSigning(AuthZoneTree tree, bool disable, bool changeProof, bool useNsec3,
-            ushort iterations, byte[] salt, bool changeTtl, uint ttl)
+            ushort iterations, byte[] salt, bool changeTtl, uint ttl, bool refreshRecords = false)
         {
             base.UpdateDnssecStatus();
             if (disable)
@@ -715,13 +715,27 @@ namespace DnsServerCore.Dns.Zones
                 return;
             }
 
-            if (changeProof)
+            if (changeProof || refreshRecords)
             {
+                if (!changeProof)
+                {
+                    useNsec3 = _dnssecStatus == AuthZoneDnssecStatus.SignedWithNSEC3;
+                    if (useNsec3)
+                    {
+                        var parameters = (DnsNSEC3PARAMRecordData)GetRecords(DnsResourceRecordType.NSEC3PARAM)[0].RDATA;
+                        iterations = parameters.Iterations;
+                        salt = parameters.Salt;
+                    }
+                }
+
                 IReadOnlyList<AuthZone> zones = tree.GetApexZoneWithSubDomainZones(_name);
                 if (_dnssecStatus == AuthZoneDnssecStatus.SignedWithNSEC3)
                     DisableNSec3(zones, tree);
                 else
                     DisableNSec(zones);
+
+                if (refreshRecords)
+                    ResignStagedRecords(zones);
 
                 var remaining = new List<AuthZone>(zones.Count);
                 foreach (AuthZone zone in zones)
@@ -739,6 +753,32 @@ namespace DnsServerCore.Dns.Zones
 
             if (changeTtl)
                 UpdateDnsKeyTtl(ttl, notify: false);
+        }
+
+        private void ResignStagedRecords(IReadOnlyList<AuthZone> zones)
+        {
+            var deleted = new List<DnsResourceRecord>();
+            var added = new List<DnsResourceRecord>();
+            foreach (AuthZone zone in zones)
+            {
+                var obsolete = new List<DnsResourceRecord>();
+                foreach (DnsResourceRecord record in zone.GetRecords(DnsResourceRecordType.RRSIG))
+                {
+                    if (((DnsRRSIGRecordData)record.RDATA).TypeCovered != DnsResourceRecordType.SOA)
+                        obsolete.Add(record);
+                }
+                if (obsolete.Count > 0 && zone.TryDeleteRecords(DnsResourceRecordType.RRSIG, obsolete, out var removed))
+                    deleted.AddRange(removed);
+
+                var signatures = zone.SignAllRRSets(includeSoa: false);
+                if (signatures.Count > 0)
+                {
+                    zone.AddOrUpdateRRSigRecords(signatures, out var replaced);
+                    deleted.AddRange(replaced);
+                    added.AddRange(signatures);
+                }
+            }
+            CommitAndIncrementSerial(deleted, added);
         }
 
         public void UnsignZone() => UnsignZone(stagedTree: null);

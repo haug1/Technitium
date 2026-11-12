@@ -409,13 +409,13 @@ namespace DnsServerCore.Dns.Zones
 
         #region DNSSEC
 
-        internal IReadOnlyList<DnsResourceRecord> SignAllRRSets()
+        internal IReadOnlyList<DnsResourceRecord> SignAllRRSets(bool includeSoa = true)
         {
             List<DnsResourceRecord> rrsigRecords = new List<DnsResourceRecord>(_entries.Count);
 
             foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
             {
-                if (entry.Key == DnsResourceRecordType.RRSIG)
+                if (entry.Key == DnsResourceRecordType.RRSIG || (!includeSoa && entry.Key == DnsResourceRecordType.SOA))
                     continue;
 
                 rrsigRecords.AddRange(SignRRSet(entry.Value));

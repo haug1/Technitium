@@ -1072,6 +1072,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         ApexZone zone;
                         signingChanges.TryGetValue(name, out var signing);
+                        bool refreshSignedRecords = records.ValueKind != JsonValueKind.Undefined && signing?.Disable != true &&
+                            current?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned };
                         var allRecords = new List<DnsResourceRecord>();
                         if (current is null)
                         {
@@ -1097,9 +1099,6 @@ namespace DnsServerCore.Dns.ZoneManagers
                         }
                         else
                         {
-                            if (records.ValueKind != JsonValueKind.Undefined && signing?.Disable != true &&
-                                current.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned })
-                                throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}/records: Applying records requires an unsigned primary zone.");
                             AuthZoneInfo previous = GetAuthZoneInfo(name, loadHistory: true);
                             zone = type switch
                             {
@@ -1126,9 +1125,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                             changedSets = recordSets;
                         }
 
-                        if (signing is { Disable: false })
+                        if (signing is { Disable: false } || refreshSignedRecords)
                         {
-                            var signedSets = StageManifestSigning((PrimaryZone)zone, allRecords, signing);
+                            var signedSets = StageManifestSigning((PrimaryZone)zone, allRecords, signing, refreshSignedRecords);
                             signedSets.UnionWith(changedSets ?? []);
                             changedSets = signedSets;
                         }
@@ -1264,7 +1263,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                                             node.RemoveManifestRecordSet(type);
                                             if (node is SubDomainZone subdomain)
                                             {
-                                                if (node.IsEmpty && signingChanges.ContainsKey(name))
+                                                if (node.IsEmpty && (signingChanges.ContainsKey(name) ||
+                                                    live is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned }))
                                                     RemoveSubDomainZone(owner);
                                                 else
                                                     subdomain.AutoUpdateState();
@@ -1528,7 +1528,7 @@ namespace DnsServerCore.Dns.ZoneManagers
         }
 
         private static HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestSigning(
-            PrimaryZone zone, List<DnsResourceRecord> records, ConfigurationZoneDnssec.Signing signing)
+            PrimaryZone zone, List<DnsResourceRecord> records, ConfigurationZoneDnssec.Signing signing, bool refreshRecords = false)
         {
             var tree = new AuthZoneTree();
             tree.TryAdd(zone);
@@ -1541,11 +1541,11 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
 
             var changedSets = GetSigningRecordSets(records);
-            if (signing.Keys.Length == 0)
+            if (signing?.Keys.Length is not > 0)
             {
-                byte[] salt = signing.ChangeProof && signing.UseNsec3 ? RandomNumberGenerator.GetBytes(signing.SaltLength) : [];
-                zone.UpdateStagedSigning(tree, signing.Disable, signing.ChangeProof, signing.UseNsec3,
-                    signing.Iterations, salt, signing.ChangeTtl, signing.Ttl);
+                byte[] salt = signing is { ChangeProof: true, UseNsec3: true } ? RandomNumberGenerator.GetBytes(signing.SaltLength) : [];
+                zone.UpdateStagedSigning(tree, signing?.Disable ?? false, signing?.ChangeProof ?? false, signing?.UseNsec3 ?? false,
+                    signing?.Iterations ?? 0, salt, signing?.ChangeTtl ?? false, signing?.Ttl ?? 0, refreshRecords);
             }
             else
             {
@@ -1568,8 +1568,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             return changedSets;
 
             static HashSet<(string Owner, DnsResourceRecordType Type)> GetSigningRecordSets(IEnumerable<DnsResourceRecord> source) =>
-                source.Where(record => record.Type is DnsResourceRecordType.SOA or DnsResourceRecordType.DNSKEY or
-                    DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM)
+                source.Where(record => record.Type == DnsResourceRecordType.SOA || ConfigurationPlan.IsSigningRecord(record.Type))
                     .Select(record => (record.Name.ToLowerInvariant(), record.Type)).ToHashSet();
         }
 
@@ -1609,7 +1608,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     owners.Add(group.Key, rrsets = new Dictionary<DnsResourceRecordType, List<DnsResourceRecord>>());
                 foreach (var (type, existing) in rrsets)
                 {
-                    if (!apex || type != DnsResourceRecordType.SOA)
+                    if ((!apex || type != DnsResourceRecordType.SOA) && !ConfigurationPlan.IsSigningRecord(type))
                         node.LoadRecords(type, existing);
                 }
 

@@ -1462,9 +1462,11 @@ namespace DnsServerCore
                             _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
                             _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"),
                             type == AuthZoneType.Forwarder);
-                        if (signing?.Disable != true && zone?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned } &&
-                            edits.Any(edit => edit.Kind.HasValue))
-                            throw new InvalidDataException($"{zonePath}/records: Applying records requires an unsigned primary zone.");
+                        if (signing?.Disable != true && (signing is not null ||
+                            zone?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned }) &&
+                            edits.Any(edit => edit.Kind is ConfigurationChangeKind.Add or ConfigurationChangeKind.Update &&
+                                (edit.Type is DnsResourceRecordType.ANAME or DnsResourceRecordType.APP || edit.Disabled == true)))
+                            throw new InvalidDataException($"{zonePath}/records: Signed primary zones require enabled records and do not support ANAME or APP records.");
                         writer.WriteStartArray("recordChanges");
                         foreach (var edit in edits)
                         {

@@ -3189,6 +3189,75 @@ namespace DnsServerCore.Tests
                 .Where(record => record.Type == DnsResourceRecordType.DNSKEY).Select(record => record.RDATA.ToString()).Order().ToArray());
         }
 
+        [Theory]
+        [InlineData("NSEC", DnsResourceRecordType.NSEC)]
+        [InlineData("NSEC3", DnsResourceRecordType.NSEC3)]
+        public async Task ManifestRecordEditsKeepTheZoneSigned(string proof, DnsResourceRecordType proofType)
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "signed-records.test";
+            string initial = $$"""
+                {"schemaVersion":1,"zones":{"signed-records.test":{"type":"Primary",
+                  "dnssec":{"enabled":true,"proof":{"type":"{{proof}}"},"keys":{
+                    "ksk":{"role":"KeySigningKey","algorithm":"ECDSA","curve":"P256"},
+                    "zsk":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P256"}
+                  } },
+                  "records":[
+                    {"owner":"old.signed-records.test","type":"A","data":{"zoneFile":"192.0.2.70"} },
+                    {"owner":"alias.signed-records.test","type":"A","data":{"zoneFile":"192.0.2.70"} }
+                  ]
+                } } }
+                """;
+            const string update = """
+                {"schemaVersion":1,"zones":{"signed-records.test":{
+                  "dnssec":{"enabled":true},
+                  "records":[
+                    {"owner":"new.signed-records.test","type":"A","data":{"zoneFile":"192.0.2.71"}},
+                    {"owner":"alias.signed-records.test","type":"CNAME","data":{"zoneFile":"new.signed-records.test."}}
+                  ]
+                }}}
+                """;
+            string revision = (await PreviewAsync(server, initial)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, initial, revision));
+
+            var dnsKeys = (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer.ToArray();
+            Assert.Equal(2, dnsKeys.Length);
+            revision = (await PreviewAsync(server, update)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, update, revision));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, update)).GetProperty("changes").EnumerateArray());
+            Assert.Equal(dnsKeys.Select(key => key.RDATA.ToString()).Order(),
+                (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer.Select(key => key.RDATA.ToString()).Order());
+
+            IPEndPoint endpoint = IPEndPoint.Parse((await server.GetSettingsAsync()).GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
+            var client = new DnsClient(endpoint) { Timeout = 2000, Retries = 1 };
+            DnsDatagram answer = await QuerySignedAsync("new.signed-records.test");
+            var data = answer.Answer.Where(record => record.Type == DnsResourceRecordType.A).ToArray();
+            Assert.Equal("192.0.2.71", Assert.IsType<DnsARecordData>(Assert.Single(data).RDATA).Address.ToString());
+            var signature = Assert.IsType<DnsRRSIGRecordData>(
+                Assert.Single(answer.Answer, record => record.Type == DnsResourceRecordType.RRSIG).RDATA);
+            Assert.True(signature.IsSignatureValid(data, dnsKeys, out _));
+
+            DnsDatagram alias = await QuerySignedAsync("alias.signed-records.test");
+            Assert.Contains(alias.Answer, record => record.RDATA is DnsCNAMERecordData cname &&
+                cname.Domain == "new.signed-records.test");
+
+            DnsDatagram removed = await QuerySignedAsync("old.signed-records.test");
+            Assert.Equal(DnsResponseCode.NxDomain, removed.RCODE);
+            var proofs = removed.Authority.Where(record => record.Type == proofType).ToArray();
+            Assert.NotEmpty(proofs);
+            Assert.All(proofs, record =>
+            {
+                var denialSignature = Assert.IsType<DnsRRSIGRecordData>(Assert.Single(removed.Authority, candidate =>
+                    candidate.Name == record.Name && candidate.RDATA is DnsRRSIGRecordData sig && sig.TypeCovered == proofType).RDATA);
+                Assert.True(denialSignature.IsSignatureValid([record], dnsKeys, out _));
+            });
+
+            Task<DnsDatagram> QuerySignedAsync(string owner) => client.RawResolveAsync(new DnsDatagram(
+                1, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError,
+                [new DnsQuestionRecord(owner, DnsResourceRecordType.A, DnsClass.IN)], udpPayloadSize: 1232, ednsFlags: EDnsHeaderFlags.DNSSEC_OK));
+        }
+
         [Fact]
         public async Task ManifestChangesDenialProofAndDisablesSigningWithoutLosingOperatorRecords()
         {

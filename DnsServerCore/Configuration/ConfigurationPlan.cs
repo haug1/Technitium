@@ -1785,10 +1785,13 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal static bool IsSigningRecord(DnsResourceRecordType type) =>
+            type is DnsResourceRecordType.DNSKEY or DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or
+                DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM;
+
         internal static bool IsGeneratedRecord(string zoneName, string serverDomain, string owner, DnsResourceRecordType type, DnsResourceRecordData data)
         {
-            if (type is DnsResourceRecordType.DNSKEY or DnsResourceRecordType.RRSIG or DnsResourceRecordType.NSEC or
-                DnsResourceRecordType.NSEC3 or DnsResourceRecordType.NSEC3PARAM)
+            if (IsSigningRecord(type))
                 return true;
 
             return owner.Equals(zoneName, StringComparison.OrdinalIgnoreCase) &&
