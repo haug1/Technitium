@@ -611,6 +611,12 @@ namespace DnsServerCore.Configuration
                 {
                     string recordPath = $"{zonePath}/records/{index++}";
                     (string owner, DnsResourceRecordType type) = ReadZoneRecordIdentity(zoneName, record, recordPath);
+                    if (type == DnsResourceRecordType.SOA &&
+                        (owner != zoneName || record.TryGetProperty("disabled", out JsonElement disabled) && disabled.GetBoolean() ||
+                        record.TryGetProperty("expiryTtl", out JsonElement expiry) && expiry.GetDecimal() != 0))
+                        throw new InvalidDataException($"{DisplayPath(recordPath)}: SOA must be an enabled apex record without expiry.");
+                    if (record.TryGetProperty("useSerialDateScheme", out _) && type != DnsResourceRecordType.SOA)
+                        throw new InvalidDataException($"{DisplayPath(recordPath + "/useSerialDateScheme")}: A serial date scheme requires an SOA record.");
                     if (record.TryGetProperty("glue", out _) && type != DnsResourceRecordType.NS)
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/glue")}: Glue addresses require an NS record.");
                     JsonElement data = record.GetProperty("data");

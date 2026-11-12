@@ -72,11 +72,12 @@ namespace DnsServerCore.Configuration
 
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
-            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl, string[] Glue)>();
+            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl, string[] Glue, bool? UseSerialDateScheme)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
-                    ConfigurationPlan.IsGeneratedRecord(zone, serverDomain, record.Name, record.Type, record.RDATA))
+                    (record.Type != DnsResourceRecordType.SOA &&
+                        ConfigurationPlan.IsGeneratedRecord(zone, serverDomain, record.Name, record.Type, record.RDATA)))
                     continue;
 
                 var info = record.Tag as GenericRecordInfo;
@@ -88,12 +89,15 @@ namespace DnsServerCore.Configuration
                 }
 
                 using var wire = new MemoryStream();
-                record.RDATA.WriteTo(wire);
+                DnsResourceRecordData data = record.RDATA;
+                if (data is DnsSOARecordData soa)
+                    data = new DnsSOARecordData(soa.PrimaryNameServer, soa.ResponsiblePerson, 0, soa.Refresh, soa.Retry, soa.Expire, soa.Minimum);
+                data.WriteTo(wire);
                 string hex = Convert.ToHexString(wire.GetBuffer().AsSpan(sizeof(ushort), (int)wire.Length - sizeof(ushort)));
                 string owner = record.Name.ToLowerInvariant();
                 try
                 {
-                    if (!ConfigurationManifest.ReadRawZoneRecordData(zone, owner, record.Type, hex, path + "/records").RDATA.Equals(record.RDATA))
+                    if (!ConfigurationManifest.ReadRawZoneRecordData(zone, owner, record.Type, hex, path + "/records").RDATA.Equals(data))
                     {
                         missingInputs.Add(path + "/records");
                         return null;
@@ -123,7 +127,8 @@ namespace DnsServerCore.Configuration
                 }
 
                 entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false,
-                    info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue));
+                    info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue,
+                    record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null));
             }
 
             var exported = new JsonArray();
@@ -142,6 +147,8 @@ namespace DnsServerCore.Configuration
                 };
                 if (entry.Glue is not null)
                     record["glue"] = JsonSerializer.SerializeToNode(entry.Glue);
+                if (entry.UseSerialDateScheme.HasValue)
+                    record["useSerialDateScheme"] = entry.UseSerialDateScheme.Value;
                 exported.Add(record);
             }
             return exported;

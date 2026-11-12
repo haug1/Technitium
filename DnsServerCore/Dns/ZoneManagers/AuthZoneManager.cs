@@ -1145,7 +1145,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             zone.Disabled = true;
             DnsResourceRecord soa = owners[zone.Name][DnsResourceRecordType.SOA][0];
             zone.LoadRecords(DnsResourceRecordType.SOA, [CopyRecord(soa, soa.OriginalTtlValue)]);
-            foreach (var group in edits.GroupBy(edit => edit.Owner, StringComparer.OrdinalIgnoreCase))
+            foreach (var group in edits.GroupBy(edit => edit.Owner, StringComparer.OrdinalIgnoreCase).OrderBy(group => group.Key != zone.Name))
             {
                 if (!group.Any(edit => edit.Kind.HasValue))
                     continue;
@@ -1172,7 +1172,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                         node.LoadRecords(type, existing);
                 }
 
-                foreach (var rrset in group.GroupBy(edit => edit.Type).OrderBy(set => set.All(edit => edit.Kind == ConfigurationChangeKind.Remove) ? 0 : 1))
+                foreach (var rrset in group.GroupBy(edit => edit.Type)
+                    .OrderBy(set => set.Key == DnsResourceRecordType.SOA ? 0 : set.All(edit => edit.Kind == ConfigurationChangeKind.Remove) ? 1 : 2))
                 {
                     if (!rrset.Any(edit => edit.Kind.HasValue))
                         continue;
@@ -1180,8 +1181,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                     uint[] explicitTtls = rrset.Where(edit => edit.Ttl.HasValue).Select(edit => edit.Ttl.Value).Distinct().ToArray();
                     if (explicitTtls.Length > 1)
                         throw new InvalidDataException($"{path}: Records in an RRset must have the same TTL.");
+                    uint defaultTtl = rrset.Key == DnsResourceRecordType.NS ? DefaultNsRecordTtl : DefaultRecordTtl;
                     uint ttl = explicitTtls.Length == 1 ? explicitTtls[0] :
-                        previous?.FirstOrDefault()?.OriginalTtlValue ?? DefaultRecordTtl;
+                        previous?.FirstOrDefault()?.OriginalTtlValue ?? defaultTtl;
                     var replacement = new List<DnsResourceRecord>();
                     foreach (DnsResourceRecord record in previous ?? [])
                     {
@@ -1196,7 +1198,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         DnsResourceRecord record = edit.Existing is null
                             ? new DnsResourceRecord(edit.Owner, edit.Type, DnsClass.IN, ttl, edit.Data)
-                            : CopyRecord(edit.Existing, ttl);
+                            : CopyRecord(edit.Existing, ttl, edit.Type == DnsResourceRecordType.SOA ? edit.Data : null);
                         GenericRecordInfo info = record.GetAuthGenericRecordInfo();
                         if (edit.Disabled.HasValue)
                             info.Disabled = edit.Disabled.Value;
@@ -1209,6 +1211,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                             info.ExpiryTtl = edit.ExpiryTtl.Value;
                         if (edit.Glue is not null)
                             record.SetGlueRecords(edit.Glue);
+                        if (edit.UseSerialDateScheme.HasValue)
+                            record.GetAuthSOARecordInfo().UseSoaSerialDateScheme = edit.UseSerialDateScheme.Value;
                         replacement.Add(record);
                     }
                     if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count > 1)
@@ -1245,13 +1249,13 @@ namespace DnsServerCore.Dns.ZoneManagers
             return changed;
         }
 
-        private static DnsResourceRecord CopyRecord(DnsResourceRecord record, uint ttl)
+        private static DnsResourceRecord CopyRecord(DnsResourceRecord record, uint ttl, DnsResourceRecordData dataOverride = null)
         {
             using var data = new MemoryStream();
             var writer = new BinaryWriter(data);
             record.GetAuthGenericRecordInfo().WriteTo(writer);
             data.Position = 0;
-            return new DnsResourceRecord(record.Name, record.Type, record.Class, ttl, record.RDATA)
+            return new DnsResourceRecord(record.Name, record.Type, record.Class, ttl, dataOverride ?? record.RDATA)
             {
                 Tag = AuthRecordInfo.ReadGenericRecordInfoFrom(new BinaryReader(data), record.Type)
             };

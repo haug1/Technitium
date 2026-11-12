@@ -1474,7 +1474,8 @@ namespace DnsServerCore.Configuration
         }
 
         internal sealed record ZoneRecordEdit(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data,
-            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, IPAddress[] Glue, ConfigurationChangeKind? Kind);
+            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, IPAddress[] Glue,
+            bool? UseSerialDateScheme, ConfigurationChangeKind? Kind);
 
         internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
             JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords) =>
@@ -1488,13 +1489,14 @@ namespace DnsServerCore.Configuration
             var current = currentRecords.ToLookup(record => (record.Name.ToLowerInvariant(), record.Type));
             var matched = new HashSet<DnsResourceRecord>(ReferenceEqualityComparer.Instance);
             var declared = new HashSet<(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data)>();
+            bool declaresSoa = false;
             int index = 0;
             foreach (JsonElement record in records.ValueKind == JsonValueKind.Null ? [] : records.EnumerateArray().ToArray())
             {
                 string recordPath = $"{path}/{index}";
                 foreach (JsonProperty field in record.EnumerateObject())
                 {
-                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments" or "expiryTtl" or "glue"))
+                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments" or "expiryTtl" or "glue" or "useSerialDateScheme"))
                         throw new InvalidDataException($"{AppendPath(recordPath, field.Name)}: Planning for this record setting is not implemented.");
                 }
 
@@ -1515,16 +1517,25 @@ namespace DnsServerCore.Configuration
                 else
                     throw new InvalidDataException($"{recordPath}/data: Planning for this record data format is not implemented.");
 
-                if (IsGeneratedRecord(zoneName, serverDomain, owner, type, rdata))
+                bool isSoa = type == DnsResourceRecordType.SOA;
+                if (isSoa && declaresSoa)
+                    throw new InvalidDataException($"{recordPath}: Declare at most one apex SOA record.");
+                declaresSoa |= isSoa;
+                if (!isSoa && IsGeneratedRecord(zoneName, serverDomain, owner, type, rdata))
                     throw new InvalidDataException($"{recordPath}: This record is managed by the zone lifecycle.");
                 if (!declared.Add((owner, type, rdata)))
                     throw new InvalidDataException($"{recordPath}: Duplicate record.");
 
-                DnsResourceRecord existing = current[(owner, type)].FirstOrDefault(candidate => candidate.Class == DnsClass.IN && candidate.RDATA.Equals(rdata));
+                DnsResourceRecord existing = current[(owner, type)].FirstOrDefault(candidate => candidate.Class == DnsClass.IN &&
+                    (isSoa || candidate.RDATA.Equals(rdata)));
                 uint? ttl = record.TryGetProperty("ttl", out JsonElement ttlValue) ? decimal.ToUInt32(ttlValue.GetDecimal()) : null;
+                if (rdata is DnsSOARecordData soa &&
+                    (soa.Retry > soa.Refresh || soa.Refresh > soa.Expire || (ttl ?? existing?.OriginalTtlValue) > soa.Expire))
+                    throw new InvalidDataException($"{recordPath}: SOA requires retry ≤ refresh ≤ expire and TTL ≤ expire.");
                 bool? disabled = record.TryGetProperty("disabled", out JsonElement disabledValue) ? disabledValue.GetBoolean() : null;
                 string comments = record.TryGetProperty("comments", out JsonElement commentsValue) ? commentsValue.GetString() : null;
                 uint? expiry = record.TryGetProperty("expiryTtl", out JsonElement expiryValue) ? decimal.ToUInt32(expiryValue.GetDecimal()) : null;
+                bool? useSerialDateScheme = record.TryGetProperty("useSerialDateScheme", out JsonElement scheme) ? scheme.GetBoolean() : null;
                 IPAddress[] glue = null;
                 if (record.TryGetProperty("glue", out JsonElement glueValue))
                 {
@@ -1548,7 +1559,10 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{recordPath}: This record is maintained by DHCP.");
                     matched.Add(existing);
                     var metadata = existing.Tag as GenericRecordInfo;
-                    if ((ttl.HasValue && ttl.Value != existing.OriginalTtlValue) ||
+                    bool usesDateScheme = metadata is SOARecordInfo { UseSoaSerialDateScheme: true };
+                    if ((isSoa && SoaNeedsUpdate((DnsSOARecordData)existing.RDATA, (DnsSOARecordData)rdata, useSerialDateScheme ?? usesDateScheme)) ||
+                        (useSerialDateScheme.HasValue && useSerialDateScheme.Value != usesDateScheme) ||
+                        (ttl.HasValue && ttl.Value != existing.OriginalTtlValue) ||
                         (disabled.HasValue && disabled.Value != (metadata?.Disabled ?? false)) ||
                         (comments is not null && comments != (metadata?.Comments ?? string.Empty)) ||
                         (expiry.HasValue && expiry.Value != (metadata?.ExpiryTtl ?? 0u)) ||
@@ -1556,7 +1570,7 @@ namespace DnsServerCore.Configuration
                             (metadata as NSRecordInfo)?.GlueRecords?.Select(address => address.RDATA.ToString()) ?? [], StringComparer.Ordinal)))
                         kind = ConfigurationChangeKind.Update;
                 }
-                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, expiry, glue, kind));
+                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, expiry, glue, useSerialDateScheme, kind));
                 index++;
             }
 
@@ -1569,11 +1583,18 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
 
                     changes.Add(new ZoneRecordEdit(record.Name.ToLowerInvariant(), record.Type, record.RDATA,
-                        record, null, null, null, null, null, ConfigurationChangeKind.Remove));
+                        record, null, null, null, null, null, null, ConfigurationChangeKind.Remove));
                 }
             }
 
             return changes;
+
+            static bool SoaNeedsUpdate(DnsSOARecordData current, DnsSOARecordData desired, bool usesDateScheme) =>
+                !current.PrimaryNameServer.Equals(desired.PrimaryNameServer, StringComparison.OrdinalIgnoreCase) ||
+                !current.ResponsiblePerson.Equals(desired.ResponsiblePerson, StringComparison.OrdinalIgnoreCase) ||
+                current.Refresh != desired.Refresh || current.Retry != desired.Retry || current.Expire != desired.Expire ||
+                current.Minimum != desired.Minimum ||
+                !usesDateScheme && desired.Serial > current.Serial;
         }
 
         internal static bool IsGeneratedRecord(string zoneName, string serverDomain, string owner, DnsResourceRecordType type, DnsResourceRecordData data)

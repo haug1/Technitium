@@ -4421,7 +4421,8 @@ namespace DnsServerCore.Tests
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
             JsonElement zone = export.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("glue.test");
-            JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray());
+            JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray(),
+                entry => entry.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.NS);
             Assert.Collection(record.GetProperty("glue").EnumerateArray(),
                 address => Assert.Equal("192.0.2.42", address.GetString()),
                 address => Assert.Equal("2001:db8::42", address.GetString()));
@@ -4923,8 +4924,11 @@ namespace DnsServerCore.Tests
             const string manifest = """
                 {"schemaVersion":1,"zones":{"migration.test":{"type":"Primary",
                     "transfer":{"mode":"Deny"},
-                    "records":[{"owner":"www.migration.test","type":"A","ttl":600,"comments":"fixture",
-                        "data":{"zoneFile":"192.0.2.42"}}]
+                    "records":[
+                      {"owner":"www.migration.test","type":"A","ttl":600,"comments":"fixture","data":{"zoneFile":"192.0.2.42"}},
+                      {"owner":"@","type":"SOA","ttl":120,"useSerialDateScheme":true,
+                        "data":{"zoneFile":"ns.migration.test. hostmaster.migration.test. 0 3600 600 86400 120"}}
+                    ]
                 }}}
                 """;
             string revision = (await PreviewAsync(source, manifest)).GetProperty("revision").GetString()!;
@@ -4939,11 +4943,13 @@ namespace DnsServerCore.Tests
             JsonElement response = export.GetProperty("response");
             JsonElement zones = response.GetProperty("manifest").GetProperty("zones");
             Assert.DoesNotContain(response.GetProperty("missingInputs").EnumerateArray(), entry => entry.ValueEquals("/zones/expiring.test/records"));
-            JsonElement expiring = Assert.Single(zones.GetProperty("expiring.test").GetProperty("records").EnumerateArray());
+            JsonElement expiring = Assert.Single(zones.GetProperty("expiring.test").GetProperty("records").EnumerateArray(),
+                entry => entry.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.A);
             Assert.Equal(3600u, expiring.GetProperty("expiryTtl").GetUInt32());
             JsonElement zone = zones.GetProperty("migration.test");
             Assert.Equal("Deny", zone.GetProperty("transfer").GetProperty("mode").GetString());
-            JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray());
+            JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray(),
+                entry => entry.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.A);
             Assert.Equal("C000022A", record.GetProperty("data").GetProperty("rawHex").GetString());
             Assert.Equal("fixture", record.GetProperty("comments").GetString());
 
@@ -4967,6 +4973,17 @@ namespace DnsServerCore.Tests
             DnsResourceRecord answer = Assert.Single((await destination.QueryAsync("www.migration.test", DnsResourceRecordType.A)).Answer);
             Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
             Assert.Equal(600u, answer.OriginalTtlValue);
+            DnsResourceRecord soaRecord = Assert.Single((await destination.QueryAsync("migration.test", DnsResourceRecordType.SOA)).Answer);
+            var soa = Assert.IsType<DnsSOARecordData>(soaRecord.RDATA);
+            Assert.Equal("ns.migration.test", soa.PrimaryNameServer);
+            Assert.Equal("hostmaster@migration.test", soa.ResponsiblePerson);
+            Assert.Equal(3600u, soa.Refresh);
+            Assert.Equal(600u, soa.Retry);
+            Assert.Equal(86400u, soa.Expire);
+            Assert.Equal(120u, soa.Minimum);
+            Assert.Equal(120u, soaRecord.OriginalTtlValue);
+            Assert.True(Assert.Single(zone.GetProperty("records").EnumerateArray(),
+                entry => entry.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.SOA).GetProperty("useSerialDateScheme").GetBoolean());
             Assert.Empty((await PreviewAsync(destination, exported)).GetProperty("changes").EnumerateArray());
             JsonElement repeat = await destination.CallAsync("settings/config/export", destination.AdminToken);
             LoopbackWebService.AssertOk(repeat);
