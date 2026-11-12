@@ -705,6 +705,11 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
+        internal bool TryStageAdditionalKey(DnssecPrivateKey key)
+        {
+            return _dnssecPrivateKeys.TryAdd(key.KeyTag, key);
+        }
+
         internal void StageRolloverDays(ushort keyTag, ushort rolloverDays)
         {
             _dnssecPrivateKeys[keyTag] = _dnssecPrivateKeys[keyTag].WithRolloverDays(rolloverDays);

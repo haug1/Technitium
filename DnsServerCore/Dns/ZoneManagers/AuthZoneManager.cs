@@ -909,6 +909,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             var catalogEdits = new Dictionary<string, List<ManifestCatalogMemberEdit>>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
             var signingChanges = new Dictionary<string, ConfigurationZoneDnssec.Signing>(StringComparer.Ordinal);
+            var stagedKeyAdditions = new Dictionary<string, List<DnssecPrivateKey>>(StringComparer.Ordinal);
             var ownedZones = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
             string serverDomain = _dnsServer.ServerDomain;
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
@@ -1132,6 +1133,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                             changedSets = signedSets;
                         }
 
+                        if (signing?.Additions is { Length: > 0 } additions)
+                            stagedKeyAdditions.Add(name, StageManifestKeyAdditions((PrimaryZone)zone, additions));
+
                         if (changedSets is not null)
                             stagedRecords[name] = (zone, allRecords, changedSets);
 
@@ -1287,6 +1291,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     primaryZone.ActivateManifestSigning((PrimaryZone)stage.Zone);
                                     foreach (var rollover in signing.Rollovers ?? [])
                                         primaryZone.UpdatePrivateKey(rollover.Tag, rollover.After);
+                                    if (stagedKeyAdditions.TryGetValue(name, out var additions))
+                                    {
+                                        foreach (DnssecPrivateKey key in additions)
+                                            primaryZone.AddPrivateKey(key);
+                                    }
                                 }
                                 if (current is not null)
                                 {
@@ -1532,13 +1541,35 @@ namespace DnsServerCore.Dns.ZoneManagers
             File.Move(temporary, path, true);
         }
 
+        private static List<DnssecPrivateKey> StageManifestKeyAdditions(PrimaryZone zone, ConfigurationZoneDnssec.Key[] declarations)
+        {
+            var additions = new List<DnssecPrivateKey>(declarations.Length);
+            foreach (var declaration in declarations.OrderBy(key => key.Imported is null))
+            {
+                int attempts = declaration.Imported is null ? 5 : 1;
+                while (true)
+                {
+                    DnssecPrivateKey key = declaration.Create();
+                    if (zone.TryStageAdditionalKey(key))
+                    {
+                        additions.Add(key);
+                        break;
+                    }
+
+                    if (--attempts == 0)
+                        throw new InvalidDataException($"{declaration.Path}: The DNSSEC key tag is already in use.");
+                }
+            }
+            return additions;
+        }
+
         private static HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestSigning(
             PrimaryZone zone, List<DnsResourceRecord> records, ConfigurationZoneDnssec.Signing signing, bool refreshRecords = false)
         {
             foreach (var rollover in signing?.Rollovers ?? [])
                 zone.StageRolloverDays(rollover.Tag, rollover.After);
 
-            if (signing is { Rollovers.Length: > 0, ChangeProof: false, ChangeTtl: false } && !refreshRecords)
+            if (signing is { Keys.Length: 0, Disable: false, ChangeProof: false, ChangeTtl: false } && !refreshRecords)
                 return [];
 
             var tree = new AuthZoneTree();

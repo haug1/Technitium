@@ -1432,7 +1432,7 @@ namespace DnsServerCore
                             if (zone is not null)
                                 writer.WriteString("dnssecRevision", zone.LastModified);
                             writer.WriteStartArray("dnssecKeyIdentities");
-                            foreach (var key in signing.Keys.Where(key => key.Imported is not null))
+                            foreach (var key in signing.Keys.Concat(signing.Additions ?? []).Where(key => key.Imported is not null))
                                 writer.WriteStringValue(Convert.ToHexString(SHA256.HashData(key.Imported.DnsKey.PublicKey.RawPublicKey)));
                             writer.WriteEndArray();
                             if (signing.Rollovers is { Length: > 0 })

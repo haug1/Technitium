@@ -40,7 +40,7 @@ namespace DnsServerCore.Configuration
         }
 
         internal sealed record Signing(uint Ttl, bool UseNsec3, ushort Iterations, int SaltLength, Key[] Keys,
-            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false, RolloverChange[] Rollovers = null);
+            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false, RolloverChange[] Rollovers = null, Key[] Additions = null);
 
         internal sealed record RolloverChange(ushort Tag, ushort Before, ushort After);
 
@@ -83,15 +83,27 @@ namespace DnsServerCore.Configuration
             Key[] parsed = keys.ValueKind == JsonValueKind.Object
                 ? keys.EnumerateObject().Select(key => ReadKey(manifest, key.Value, ConfigurationPlan.AppendPath(path + "/keys", key.Name))).ToArray()
                 : [];
+            if (parsed.Where(key => key.Imported is not null).GroupBy(key => key.Imported.KeyTag).Any(group => group.Count() > 1))
+                throw new InvalidDataException($"{path}/keys: Imported DNSSEC key tags must be distinct.");
+
             if (signed)
             {
-                var remaining = (current.DnssecPrivateKeys ?? []).Where(key => !key.IsRetiring).ToList();
+                var existingKeys = (current.DnssecPrivateKeys ?? []).ToArray();
+                var additions = new List<Key>();
+                var remaining = existingKeys.Where(key => !key.IsRetiring).ToList();
                 var rollovers = new List<RolloverChange>();
                 foreach (Key expected in parsed.OrderBy(key => key.Imported is null))
                 {
                     var matches = remaining.Where(expected.Matches).ToList();
                     if (matches.Count == 0)
-                        throw new InvalidDataException($"{expected.Path}: No existing signing key matches the declaration.");
+                    {
+                        if (expected.Imported is DnssecPrivateKey imported && existingKeys.Any(key => key.KeyTag == imported.KeyTag ||
+                            (key.KeyType == imported.KeyType && key.Algorithm == imported.Algorithm &&
+                            key.DnsKey.PublicKey.RawPublicKey.AsSpan().SequenceEqual(imported.DnsKey.PublicKey.RawPublicKey))))
+                            throw new InvalidDataException($"{expected.Path}/privateKey: The key or its tag is already in use.");
+                        additions.Add(expected);
+                        continue;
+                    }
 
                     // Keep an already matching interval, or require an unambiguous key for an update.
                     DnssecPrivateKey key = expected.HasRolloverDays
@@ -116,7 +128,7 @@ namespace DnsServerCore.Configuration
                 bool changeTtl = ttl != current.DnsKeyTtl;
                 bool changeProof = useNsec3 != currentNsec3 || (useNsec3 &&
                     (iterations != (parameters?.Iterations ?? 0) || saltLength != (parameters?.Salt.Length ?? 0)));
-                if (!changeProof && !changeTtl && rollovers.Count == 0)
+                if (!changeProof && !changeTtl && rollovers.Count == 0 && additions.Count == 0)
                     return null;
                 if (changeTtl)
                 {
@@ -129,14 +141,12 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}/dnsKeyTtl: {ex.Message}");
                     }
                 }
-                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl, Rollovers: rollovers.ToArray());
+                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl, Rollovers: rollovers.ToArray(), Additions: additions.ToArray());
             }
 
             if (!parsed.Any(key => key.Role == DnssecPrivateKeyType.KeySigningKey) ||
                 !parsed.Any(key => key.Role == DnssecPrivateKeyType.ZoneSigningKey))
                 throw new InvalidDataException($"{path}/keys: Specify both a key signing key and a zone signing key.");
-            if (parsed.Where(key => key.Imported is not null).GroupBy(key => key.Imported.KeyTag).Any(group => group.Count() > 1))
-                throw new InvalidDataException($"{path}/keys: Imported DNSSEC key tags must be distinct.");
             return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, parsed);
         }
 

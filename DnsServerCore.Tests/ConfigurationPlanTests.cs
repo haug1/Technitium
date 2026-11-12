@@ -3259,6 +3259,46 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestStagesAdditionalSigningKeysWithoutPublishingThem()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "pending-key.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256", server.AdminToken));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"pending-key.test":{"dnssec":{"keys":{
+                  "next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P384","rolloverDays":60}
+                }}}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            Assert.Equal(2, (await GetKeysAsync()).GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+
+            var pending = await CheckPendingKeyAsync();
+            await server.RestartAsync();
+            Assert.Equal(pending.GetProperty("keyTag").GetInt32(), (await CheckPendingKeyAsync()).GetProperty("keyTag").GetInt32());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            async Task<JsonElement> GetKeysAsync()
+            {
+                JsonElement result = await server.CallAsync($"zones/dnssec/properties/get?zone={name}", server.AdminToken);
+                LoopbackWebService.AssertOk(result);
+                return result.GetProperty("response").GetProperty("dnssecPrivateKeys");
+            }
+
+            async Task<JsonElement> CheckPendingKeyAsync()
+            {
+                var keys = await GetKeysAsync();
+                Assert.Equal(3, keys.GetArrayLength());
+                JsonElement key = Assert.Single(keys.EnumerateArray(), key => key.GetProperty("state").ValueEquals("Generated"));
+                Assert.Equal(60, key.GetProperty("rolloverDays").GetInt32());
+                Assert.Equal(2, (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer.Count);
+                return key;
+            }
+        }
+
+        [Fact]
         public async Task ManifestUpdatesSigningKeyRolloverWithoutChangingTheKeyOrSoaSerial()
         {
             await using var server = await LoopbackWebService.StartAsync();
