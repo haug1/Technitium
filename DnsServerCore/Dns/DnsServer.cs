@@ -126,7 +126,7 @@ namespace DnsServerCore.Dns
         ManagedDnsSettings _managedDnsSettings;
 
         [Flags]
-        private enum ManagedDnsSettings : uint
+        private enum ManagedDnsSettings : ulong
         {
             LocalEndPoints = 1,
             RecordTtl = 2,
@@ -158,7 +158,14 @@ namespace DnsServerCore.Dns
             IgnoreResolverLogs = 134217728,
             LogQueries = 268435456,
             RecursionMode = 536870912,
-            RecursionAcl = 1073741824
+            RecursionAcl = 1073741824,
+            RandomizeName = 1UL << 31,
+            QnameMinimization = 1UL << 32,
+            LocallyServedDnsZones = 1UL << 33,
+            ResolverRetries = 1UL << 34,
+            ResolverTimeout = 1UL << 35,
+            ResolverConcurrency = 1UL << 36,
+            ResolverMaxStackCount = 1UL << 37
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -173,7 +180,9 @@ namespace DnsServerCore.Dns
         internal readonly record struct ClientSubnetSettings(bool? Enabled, byte? Ipv4Prefix, byte? Ipv6Prefix,
             bool HasIpv4Override, NetworkAddress Ipv4Override, bool HasIpv6Override, NetworkAddress Ipv6Override);
 
-        internal readonly record struct RecursionPolicy(DnsServerRecursion? Mode, IReadOnlyCollection<NetworkAccessControl> NetworkAcl);
+        internal readonly record struct RecursionPolicy(DnsServerRecursion? Mode, IReadOnlyCollection<NetworkAccessControl> NetworkAcl,
+            bool? RandomizeName = null, bool? QnameMinimization = null, bool? LocallyServedDnsZones = null,
+            int? ResolverRetries = null, int? ResolverTimeout = null, int? ResolverConcurrency = null, int? ResolverMaxStackCount = null);
 
         internal readonly record struct DnsLoggingSettings(bool? IgnoreResolverLogs, bool? LogQueries);
 
@@ -790,7 +799,9 @@ namespace DnsServerCore.Dns
         internal bool ManifestOwnsRecursionMode => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecursionMode);
         internal bool ManifestOwnsRecursionAcl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecursionAcl);
         internal bool HasManagedRecursionPolicy => (_managedDnsSettings & RecursionOwnership) != 0;
-        private const ManagedDnsSettings RecursionOwnership = ManagedDnsSettings.RecursionMode | ManagedDnsSettings.RecursionAcl;
+        private const ManagedDnsSettings RecursionOwnership = ManagedDnsSettings.RecursionMode | ManagedDnsSettings.RecursionAcl |
+            ManagedDnsSettings.RandomizeName | ManagedDnsSettings.QnameMinimization | ManagedDnsSettings.LocallyServedDnsZones |
+            ManagedDnsSettings.ResolverRetries | ManagedDnsSettings.ResolverTimeout | ManagedDnsSettings.ResolverConcurrency | ManagedDnsSettings.ResolverMaxStackCount;
 
         internal bool HasManagedAuthoritativeDefaults =>
             (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership)) != 0;
@@ -807,6 +818,20 @@ namespace DnsServerCore.Dns
                 yield return "/dns/recursion/mode";
             if (ManifestOwnsRecursionAcl)
                 yield return "/dns/recursion/networkAcl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.RandomizeName))
+                yield return "/dns/recursion/randomizeName";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.QnameMinimization))
+                yield return "/dns/recursion/qnameMinimization";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.LocallyServedDnsZones))
+                yield return "/dns/recursion/locallyServedDnsZones";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverRetries))
+                yield return "/dns/recursion/retries";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverTimeout))
+                yield return "/dns/recursion/timeoutMs";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverConcurrency))
+                yield return "/dns/recursion/concurrency";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverMaxStackCount))
+                yield return "/dns/recursion/maxStackCount";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1079,6 +1104,42 @@ namespace DnsServerCore.Dns
                     throw new DnsWebServiceException("/dns/recursion/networkAcl: A maximum of 255 rules is allowed.");
                 if (ManifestOwnsRecursionAcl && !policy.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? []))
                     throw new DnsWebServiceException("/dns/recursion/networkAcl: Setting is managed by the configuration manifest.");
+            }
+        }
+
+        internal RecursionPolicy CheckManifestResolverOptions(RecursionPolicy policy, bool validateRanges = true)
+        {
+            if (validateRanges)
+            {
+                ValidateRange(policy.ResolverRetries, 1, 10, "retries");
+                ValidateRange(policy.ResolverTimeout, 1000, 10000, "timeoutMs");
+                ValidateRange(policy.ResolverConcurrency, 1, 4, "concurrency");
+                ValidateRange(policy.ResolverMaxStackCount, 10, 30, "maxStackCount");
+            }
+            return policy with
+            {
+                RandomizeName = Check(ManagedDnsSettings.RandomizeName, policy.RandomizeName, _randomizeName, "randomizeName"),
+                QnameMinimization = Check(ManagedDnsSettings.QnameMinimization, policy.QnameMinimization, _qnameMinimization, "qnameMinimization"),
+                LocallyServedDnsZones = Check(ManagedDnsSettings.LocallyServedDnsZones, policy.LocallyServedDnsZones, _locallyServedDnsZones, "locallyServedDnsZones"),
+                ResolverRetries = Check(ManagedDnsSettings.ResolverRetries, policy.ResolverRetries, _resolverRetries, "retries"),
+                ResolverTimeout = Check(ManagedDnsSettings.ResolverTimeout, policy.ResolverTimeout, _resolverTimeout, "timeoutMs"),
+                ResolverConcurrency = Check(ManagedDnsSettings.ResolverConcurrency, policy.ResolverConcurrency, _resolverConcurrency, "concurrency"),
+                ResolverMaxStackCount = Check(ManagedDnsSettings.ResolverMaxStackCount, policy.ResolverMaxStackCount, _resolverMaxStackCount, "maxStackCount")
+            };
+
+            T? Check<T>(ManagedDnsSettings flag, T? candidate, T current, string field) where T : struct
+            {
+                if (!_managedDnsSettings.HasFlag(flag))
+                    return candidate;
+                if (candidate.HasValue && !candidate.Value.Equals(current))
+                    throw new DnsWebServiceException($"/dns/recursion/{field}: Setting is managed by the configuration manifest.");
+                return null;
+            }
+
+            static void ValidateRange(int? value, int minimum, int maximum, string field)
+            {
+                if (value < minimum || value > maximum)
+                    throw new DnsWebServiceException($"/dns/recursion/{field}: Valid range is from {minimum} to {maximum}.");
             }
         }
 
@@ -1603,28 +1664,29 @@ namespace DnsServerCore.Dns
                 CheckManifestRecursionPolicy(new RecursionPolicy(recursion, recursionAcl ?? []));
 
             bool randomizeName = bR.ReadBoolean();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.RandomizeName)))
                 _randomizeName = randomizeName;
             bool qnameMinimization = bR.ReadBoolean();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.QnameMinimization)))
                 _qnameMinimization = qnameMinimization;
-
             bool locallyServedDnsZones = version < 4 || bR.ReadBoolean();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.LocallyServedDnsZones)))
                 _locallyServedDnsZones = locallyServedDnsZones;
-
             int resolverRetries = bR.ReadInt32();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverRetries)))
                 _resolverRetries = resolverRetries;
             int resolverTimeout = bR.ReadInt32();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverTimeout)))
                 _resolverTimeout = resolverTimeout;
             int resolverConcurrency = bR.ReadInt32();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverConcurrency)))
                 _resolverConcurrency = resolverConcurrency;
             int resolverMaxStackCount = bR.ReadInt32();
-            if (apply)
+            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverMaxStackCount)))
                 _resolverMaxStackCount = resolverMaxStackCount;
+            if (!apply)
+                CheckManifestResolverOptions(new RecursionPolicy(null, null, randomizeName, qnameMinimization, locallyServedDnsZones,
+                    resolverRetries, resolverTimeout, resolverConcurrency, resolverMaxStackCount), validateRanges: false);
 
             //cache
             bool saveCacheToDisk = bR.ReadBoolean();
@@ -1861,19 +1923,18 @@ namespace DnsServerCore.Dns
 
             if (readOwnership)
             {
-                int ownership = version == 7 ? s.ReadByte() : -1;
-                if (ownership < 0)
+                ulong ownership = 0;
+                if (version == 7)
                 {
-                    _managedDnsSettings = 0;
+                    for (int shift = 0; shift < sizeof(ulong) * 8; shift += 8)
+                    {
+                        int value = s.ReadByte();
+                        if (value < 0)
+                            break;
+                        ownership |= (ulong)value << shift;
+                    }
                 }
-                else
-                {
-                    int extendedOwnership = s.ReadByte();
-                    int extraOwnership = extendedOwnership < 0 ? -1 : s.ReadByte();
-                    int highOwnership = extraOwnership < 0 ? -1 : s.ReadByte();
-                    _managedDnsSettings = (ManagedDnsSettings)(ownership | (Math.Max(0, extendedOwnership) << 8) |
-                        (Math.Max(0, extraOwnership) << 16) | (Math.Max(0, highOwnership) << 24));
-                }
+                _managedDnsSettings = (ManagedDnsSettings)ownership;
             }
         }
 
@@ -2050,14 +2111,14 @@ namespace DnsServerCore.Dns
             bW.Write((byte)(recursion.Mode ?? _recursion));
             AuthZoneInfo.WriteNetworkACLTo(recursion.NetworkAcl ?? _recursionNetworkACL, bW);
 
-            bW.Write(_randomizeName);
-            bW.Write(_qnameMinimization);
-            bW.Write(_locallyServedDnsZones);
+            bW.Write(recursion.RandomizeName ?? _randomizeName);
+            bW.Write(recursion.QnameMinimization ?? _qnameMinimization);
+            bW.Write(recursion.LocallyServedDnsZones ?? _locallyServedDnsZones);
 
-            bW.Write(_resolverRetries);
-            bW.Write(_resolverTimeout);
-            bW.Write(_resolverConcurrency);
-            bW.Write(_resolverMaxStackCount);
+            bW.Write(recursion.ResolverRetries ?? _resolverRetries);
+            bW.Write(recursion.ResolverTimeout ?? _resolverTimeout);
+            bW.Write(recursion.ResolverConcurrency ?? _resolverConcurrency);
+            bW.Write(recursion.ResolverMaxStackCount ?? _resolverMaxStackCount);
 
             //cache
             bW.Write(_saveCacheToDisk);
@@ -2152,17 +2213,9 @@ namespace DnsServerCore.Dns
             bW.Write(dnsLogging.LogQueries ?? (_queryLog is not null));
             bW.Write(statistics.InMemory ?? _statsManager.EnableInMemoryStats);
             bW.Write(statistics.RetentionDays ?? _statsManager.MaxStatFileDays);
-            // Existing version 7 readers stop after maxStatFileDays.
-            if (_managedDnsSettings != 0)
-            {
-                bW.Write((byte)_managedDnsSettings);
-                if ((uint)_managedDnsSettings > byte.MaxValue)
-                    bW.Write((byte)((uint)_managedDnsSettings >> 8));
-                if ((uint)_managedDnsSettings > ushort.MaxValue)
-                    bW.Write((byte)((uint)_managedDnsSettings >> 16));
-                if ((uint)_managedDnsSettings > 0xFFFFFF)
-                    bW.Write((byte)((uint)_managedDnsSettings >> 24));
-            }
+            // The optional little-endian ownership trailer follows the original version 7 payload.
+            for (ulong ownership = (ulong)_managedDnsSettings; ownership != 0; ownership >>= 8)
+                bW.Write((byte)ownership);
         }
 
         #endregion
@@ -7751,8 +7804,30 @@ namespace DnsServerCore.Dns
                     if (recursion.NetworkAcl is not null)
                         ownership |= ManagedDnsSettings.RecursionAcl;
 
+                    if (recursion.RandomizeName.HasValue)
+                        ownership |= ManagedDnsSettings.RandomizeName;
+                    if (recursion.QnameMinimization.HasValue)
+                        ownership |= ManagedDnsSettings.QnameMinimization;
+                    if (recursion.LocallyServedDnsZones.HasValue)
+                        ownership |= ManagedDnsSettings.LocallyServedDnsZones;
+                    if (recursion.ResolverRetries.HasValue)
+                        ownership |= ManagedDnsSettings.ResolverRetries;
+                    if (recursion.ResolverTimeout.HasValue)
+                        ownership |= ManagedDnsSettings.ResolverTimeout;
+                    if (recursion.ResolverConcurrency.HasValue)
+                        ownership |= ManagedDnsSettings.ResolverConcurrency;
+                    if (recursion.ResolverMaxStackCount.HasValue)
+                        ownership |= ManagedDnsSettings.ResolverMaxStackCount;
+
                     bool recursionChanged = (recursion.Mode.HasValue && recursion.Mode != _recursion) ||
-                        (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? []));
+                        (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? [])) ||
+                        (recursion.RandomizeName.HasValue && recursion.RandomizeName != _randomizeName) ||
+                        (recursion.QnameMinimization.HasValue && recursion.QnameMinimization != _qnameMinimization) ||
+                        (recursion.LocallyServedDnsZones.HasValue && recursion.LocallyServedDnsZones != _locallyServedDnsZones) ||
+                        (recursion.ResolverRetries.HasValue && recursion.ResolverRetries != _resolverRetries) ||
+                        (recursion.ResolverTimeout.HasValue && recursion.ResolverTimeout != _resolverTimeout) ||
+                        (recursion.ResolverConcurrency.HasValue && recursion.ResolverConcurrency != _resolverConcurrency) ||
+                        (recursion.ResolverMaxStackCount.HasValue && recursion.ResolverMaxStackCount != _resolverMaxStackCount);
                     bool dnsLoggingChanged = (dnsLogging.IgnoreResolverLogs.HasValue && dnsLogging.IgnoreResolverLogs != (_resolverLog is null)) ||
                         (dnsLogging.LogQueries.HasValue && dnsLogging.LogQueries != (_queryLog is not null));
                     bool excludedPortsChanged = outbound.ExcludedPorts is not null && !HaveSameSocketPoolExcludedPorts(outbound.ExcludedPorts);
@@ -7814,6 +7889,13 @@ namespace DnsServerCore.Dns
                         RecursionNetworkACL = recursion.NetworkAcl;
                     if (recursion.Mode.HasValue)
                         Recursion = recursion.Mode.Value;
+                    _randomizeName = recursion.RandomizeName ?? _randomizeName;
+                    _qnameMinimization = recursion.QnameMinimization ?? _qnameMinimization;
+                    _locallyServedDnsZones = recursion.LocallyServedDnsZones ?? _locallyServedDnsZones;
+                    _resolverRetries = recursion.ResolverRetries ?? _resolverRetries;
+                    _resolverTimeout = recursion.ResolverTimeout ?? _resolverTimeout;
+                    _resolverConcurrency = recursion.ResolverConcurrency ?? _resolverConcurrency;
+                    _resolverMaxStackCount = recursion.ResolverMaxStackCount ?? _resolverMaxStackCount;
 
                     if (appAutoUpdateChanged)
                         _dnsApplicationManager.EnableAutomaticUpdate = appAutoUpdate.Value;

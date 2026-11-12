@@ -949,6 +949,16 @@ namespace DnsServerCore
                 _dnsWebService._dnsServer.CheckManifestRecursionPolicy(new DnsServer.RecursionPolicy(
                     hasRecursionMode ? recursion : null, hasRecursionAcl ? recursionNetworkACL : null));
 
+                DnsServer.RecursionPolicy resolverOptions = _dnsWebService._dnsServer.CheckManifestResolverOptions(new DnsServer.RecursionPolicy(
+                    null, null,
+                    request.TryGetQueryOrForm("randomizeName", bool.Parse, out bool randomizeName) ? randomizeName : null,
+                    request.TryGetQueryOrForm("qnameMinimization", bool.Parse, out bool qnameMinimization) ? qnameMinimization : null,
+                    request.TryGetQueryOrForm("locallyServedDnsZones", bool.Parse, out bool locallyServedDnsZones) ? locallyServedDnsZones : null,
+                    request.TryGetQueryOrForm("resolverRetries", int.Parse, out int resolverRetries) ? resolverRetries : null,
+                    request.TryGetQueryOrForm("resolverTimeout", int.Parse, out int resolverTimeout) ? resolverTimeout : null,
+                    request.TryGetQueryOrForm("resolverConcurrency", int.Parse, out int resolverConcurrency) ? resolverConcurrency : null,
+                    request.TryGetQueryOrForm("resolverMaxStackCount", int.Parse, out int resolverMaxStackCount) ? resolverMaxStackCount : null));
+
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
                 _dnsWebService._dnsServer.CheckManifestDnsLogging(new DnsServer.DnsLoggingSettings(
@@ -1681,52 +1691,45 @@ namespace DnsServerCore
                             clusterParameters.Add("recursionNetworkACL", recursionNetworkACL.Join());
                         }
 
-                        if (request.TryGetQueryOrForm("randomizeName", bool.Parse, out bool randomizeName))
+                        if (resolverOptions.RandomizeName.HasValue)
                         {
                             _dnsWebService._dnsServer.RandomizeName = randomizeName;
-
                             clusterParameters.Add("randomizeName", randomizeName.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("qnameMinimization", bool.Parse, out bool qnameMinimization))
+                        if (resolverOptions.QnameMinimization.HasValue)
                         {
                             _dnsWebService._dnsServer.QnameMinimization = qnameMinimization;
-
                             clusterParameters.Add("qnameMinimization", qnameMinimization.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("locallyServedDnsZones", bool.Parse, out bool locallyServedDnsZones))
+                        if (resolverOptions.LocallyServedDnsZones.HasValue)
                         {
                             _dnsWebService._dnsServer.LocallyServedDnsZones = locallyServedDnsZones;
-
                             clusterParameters.Add("locallyServedDnsZones", locallyServedDnsZones.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("resolverRetries", int.Parse, out int resolverRetries))
+                        if (resolverOptions.ResolverRetries.HasValue)
                         {
                             _dnsWebService._dnsServer.ResolverRetries = resolverRetries;
-
                             clusterParameters.Add("resolverRetries", resolverRetries.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("resolverTimeout", int.Parse, out int resolverTimeout))
+                        if (resolverOptions.ResolverTimeout.HasValue)
                         {
                             _dnsWebService._dnsServer.ResolverTimeout = resolverTimeout;
-
                             clusterParameters.Add("resolverTimeout", resolverTimeout.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("resolverConcurrency", int.Parse, out int resolverConcurrency))
+                        if (resolverOptions.ResolverConcurrency.HasValue)
                         {
                             _dnsWebService._dnsServer.ResolverConcurrency = resolverConcurrency;
-
                             clusterParameters.Add("resolverConcurrency", resolverConcurrency.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("resolverMaxStackCount", int.Parse, out int resolverMaxStackCount))
+                        if (resolverOptions.ResolverMaxStackCount.HasValue)
                         {
                             _dnsWebService._dnsServer.ResolverMaxStackCount = resolverMaxStackCount;
-
                             clusterParameters.Add("resolverMaxStackCount", resolverMaxStackCount.ToString());
                         }
 

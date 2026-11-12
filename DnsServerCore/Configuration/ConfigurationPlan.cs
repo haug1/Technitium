@@ -63,6 +63,13 @@ namespace DnsServerCore.Configuration
             ["/dns/clientSubnet/ipv6Override"] = Field<string>("eDnsClientSubnetIpv6Override", null, canApply: true),
             ["/dns/recursion/mode"] = Field("recursion", nameof(DnsServerRecursion.AllowOnlyForPrivateNetworks), canApply: true),
             ["/dns/recursion/networkAcl"] = Field("recursionNetworkACL", Array.Empty<string>(), canApply: true),
+            ["/dns/recursion/randomizeName"] = Field("randomizeName", false, canApply: true),
+            ["/dns/recursion/qnameMinimization"] = Field("qnameMinimization", true, canApply: true),
+            ["/dns/recursion/locallyServedDnsZones"] = Field("locallyServedDnsZones", true, canApply: true),
+            ["/dns/recursion/retries"] = Field("resolverRetries", 2, canApply: true),
+            ["/dns/recursion/timeoutMs"] = Field("resolverTimeout", 1500, canApply: true),
+            ["/dns/recursion/concurrency"] = Field("resolverConcurrency", 2, canApply: true),
+            ["/dns/recursion/maxStackCount"] = Field("resolverMaxStackCount", 16, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -292,7 +299,22 @@ namespace DnsServerCore.Configuration
                 : null;
             NetworkAccessControl[] acl = recursion.TryGetProperty("networkAcl", out JsonElement rules)
                 ? ConfigurationManifest.ReadNetworkAcl(rules, "/dns/recursion/networkAcl") : null;
-            return new DnsServer.RecursionPolicy(mode, acl);
+            return new DnsServer.RecursionPolicy(mode, acl,
+                Read("randomizeName")?.GetBoolean(), Read("qnameMinimization")?.GetBoolean(), Read("locallyServedDnsZones")?.GetBoolean(),
+                ReadInt("retries"), ReadInt("timeoutMs"), ReadInt("concurrency"), ReadInt("maxStackCount"));
+
+            JsonElement? Read(string field)
+            {
+                if (!recursion.TryGetProperty(field, out JsonElement setting))
+                    return null;
+                return setting.ValueKind == JsonValueKind.Null ? _settings["/dns/recursion/" + field].Default : setting;
+            }
+
+            int? ReadInt(string field)
+            {
+                JsonElement? setting = Read(field);
+                return setting.HasValue ? decimal.ToInt32(setting.Value.GetDecimal()) : null;
+            }
         }
 
         private static DnsServer.ClientSubnetSettings GetClientSubnetSettings(ConfigurationManifest manifest)

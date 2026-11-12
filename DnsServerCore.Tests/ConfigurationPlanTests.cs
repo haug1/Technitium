@@ -466,6 +466,55 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ResolverOptionsPersistOwnershipAndRejectConflictingBackup()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"recursion":{"randomizeName":true,"qnameMinimization":false,"locallyServedDnsZones":false,
+                    "retries":3,"timeoutMs":2500,"concurrency":4,"maxStackCount":20}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(7, preview.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(7, settings.GetProperty("managedSettings").GetArrayLength());
+            JsonNode declared = JsonNode.Parse(manifest)!["dns"]!["recursion"]!;
+            JsonNode exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["recursion"]!;
+            foreach ((string field, JsonNode? value) in declared.AsObject())
+                Assert.True(JsonNode.DeepEquals(value, exported[field]));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            int ttl = settings.GetProperty("defaultRecordTtl").GetInt32();
+            JsonElement edit = await server.CallAsync("settings/set?resolverMaxStackCount=16&defaultRecordTtl=123", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/dns/recursion/maxStackCount", edit.GetProperty("errorMessage").GetString());
+            Assert.Equal(ttl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?resolverMaxStackCount=20", server.AdminToken));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/recursion/", restored.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"dns":{"recursion":{"maxStackCount":null}}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            settings = await server.GetSettingsAsync();
+            Assert.Equal(16, settings.GetProperty("resolverMaxStackCount").GetInt32());
+            Assert.Equal(3, settings.GetProperty("resolverRetries").GetInt32());
+            Assert.Equal("/dns/recursion/maxStackCount", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+        }
+
+        [Fact]
         public async Task RecursionPolicyAppliesAndProtectsAclOrder()
         {
             await using var server = await LoopbackWebService.StartAsync();
