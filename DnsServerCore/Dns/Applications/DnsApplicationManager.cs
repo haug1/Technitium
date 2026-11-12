@@ -630,8 +630,7 @@ namespace DnsServerCore.Dns.Applications
                     after = await reader.ReadToEndAsync();
                 }
                 bool hasConfig = transfer.ClearConfiguration || transfer.Configuration is not null;
-                if (transfer.Package is not null && (app is null ||
-                    !MatchesFile(Path.Combine(app.DnsServer.ApplicationFolder, name + ".zip"), transfer.Package)))
+                if (transfer.Package is not null && !MatchesInstalledPackage(app, transfer.Package))
                 {
                     using Stream source = transfer.Package.Open();
                     using var package = new MemoryStream();
@@ -662,11 +661,14 @@ namespace DnsServerCore.Dns.Applications
             {
                 if (transfer.Package is null)
                     continue;
+                _applications.TryGetValue(name, out DnsApplication app);
+                if (MatchesInstalledPackage(app, transfer.Package))
+                    continue;
                 await using Stream stream = transfer.Package.Open();
-                if (_applications.ContainsKey(name))
-                    await UpdateApplicationAsync(name, stream);
-                else
+                if (app is null)
                     await InstallApplicationAsync(name, stream);
+                else
+                    await UpdateApplicationAsync(name, stream);
             }
 
             foreach (var (name, transfer) in transfers)
@@ -719,8 +721,11 @@ namespace DnsServerCore.Dns.Applications
                     continue;
                 if (!transfers.TryGetValue(app.Name, out ClusterAppTransfer transfer))
                     throw new InvalidDataException($"{path}: Cluster transfer would replace manifest-managed app membership.");
-                if (transfer.Package is not null && IsPackageUpdateManaged(app.Name))
-                    throw new InvalidDataException($"{path}: Cluster transfer would update a managed package.");
+                if (transfer.Package is not null && IsPackageUpdateManaged(app.Name) && !MatchesInstalledPackage(app, transfer.Package))
+                {
+                    string conflict = paths.Contains(path + "/packageSha256") ? path + "/packageSha256" : path;
+                    throw new InvalidDataException($"{conflict}: Cluster transfer would update a managed package.");
+                }
                 if (!paths.Contains(path + "/configuration"))
                     continue;
                 if (transfer.ClearConfiguration && app.ReadManifestConfig() is not null)
@@ -779,6 +784,9 @@ namespace DnsServerCore.Dns.Applications
                 }
             }
         }
+
+        private static bool MatchesInstalledPackage(DnsApplication app, ZipArchiveEntry package) =>
+            app is not null && MatchesFile(Path.Combine(app.DnsServer.ApplicationFolder, app.Name + ".zip"), package);
 
         private static bool MatchesFile(string file, ZipArchiveEntry entry)
         {

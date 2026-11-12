@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DnsServerCore.Configuration;
 using DnsServerCore.Dns;
+using DnsServerCore.Dns.Applications;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
@@ -23,6 +24,7 @@ namespace DnsServerCore.Tests
 
         public HttpClient Client { get; private set; } = null!;
         public string ConfigurationDirectory => _configuration.FullName;
+        public DnsApplicationManager Applications => _service!.DnsServer.DnsApplicationManager;
         public int DnsPort => DnsEndPoint.Port;
         public string AdminPassword { get; private init; } = null!;
         public string AdminToken { get; private set; } = null!;

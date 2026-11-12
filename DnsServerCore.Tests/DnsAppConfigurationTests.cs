@@ -1,3 +1,4 @@
+using DnsServerCore.Dns.Applications;
 using System;
 using System.IO;
 using System.IO.Compression;
@@ -267,6 +268,28 @@ namespace DnsServerCore.Tests
             Assert.Contains("/apps/packages/FilterAaaa/packageSha256", pinnedConflict.GetProperty("errorMessage").GetString());
             Assert.Equal(packageDigest, Convert.ToHexString(SHA256.HashData(
                 await File.ReadAllBytesAsync(Path.Combine(appFolder, "FilterAaaa.zip")))));
+
+            var appManager = server.Applications;
+            var pinnedApp = appManager.Applications["FilterAaaa"];
+            using var equalTransfer = new MemoryStream();
+            using (var archive = new ZipArchive(equalTransfer, ZipArchiveMode.Create, leaveOpen: true))
+                archive.CreateEntryFromFile(Path.Combine(appFolder, "FilterAaaa.zip"), "apps/FilterAaaa/FilterAaaa.zip");
+            equalTransfer.Position = 0;
+            using (var archive = new ZipArchive(equalTransfer, ZipArchiveMode.Read, leaveOpen: true))
+            {
+                var transfers = DnsApplicationManager.ReadClusterTransfer(archive);
+                appManager.CheckClusterTransfer(transfers);
+                await appManager.ApplyClusterTransferAsync(transfers, []);
+            }
+            Assert.Same(pinnedApp, appManager.Applications["FilterAaaa"]);
+
+            differentPackageBackup.Position = 0;
+            using (var archive = new ZipArchive(differentPackageBackup, ZipArchiveMode.Read, leaveOpen: true))
+            {
+                var transfers = DnsApplicationManager.ReadClusterTransfer(archive);
+                var conflict = Assert.Throws<InvalidDataException>(() => appManager.CheckClusterTransfer(transfers));
+                Assert.Contains("/apps/packages/FilterAaaa/packageSha256", conflict.Message);
+            }
             Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
 
             async Task<string> PreviewAsync(string input, bool expectChanges = true, string changePath = "/apps/packages/FilterAaaa/configuration")
