@@ -26,7 +26,7 @@ jobs:
         working-directory: TechnitiumLibrary
         shell: bash
         run: |
-          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Net.Firewall TechnitiumLibrary.Security.OTP; do
+          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
             dotnet build "$project/$project.csproj" -c Release
           done
       - name: Run manifest validation tests on Windows
@@ -35,6 +35,14 @@ jobs:
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer
         run: dotnet run --no-build --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json
+      - name: Build the Windows firewall library with Visual Studio MSBuild
+        working-directory: TechnitiumLibrary
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild\Current\Bin\amd64\MSBuild.exe'
+          if (!$msbuild) { throw 'Visual Studio MSBuild was not found.' }
+          & $msbuild TechnitiumLibrary.Net.Firewall/TechnitiumLibrary.Net.Firewall.csproj -restore -p:Configuration=Release
       - name: Build the Windows service host
         working-directory: DnsServer
         run: dotnet build DnsServerWindowsService/DnsServerWindowsService.csproj
