@@ -26,6 +26,11 @@ namespace DnsServerCore.Configuration
             }
 
             byte[] data = File.ReadAllBytes(tlsCertificatePath);
+            return Load(data, tlsCertificatePassword, keyStorage, fileInfo.LastWriteTimeUtc);
+        }
+
+        internal static Pkcs12Certificate Load(byte[] data, string tlsCertificatePassword, X509KeyStorageFlags keyStorage, DateTime modified)
+        {
             X509Certificate2Collection certificateCollection = X509CertificateLoader.LoadPkcs12Collection(data, tlsCertificatePassword, keyStorage);
             X509Certificate2 serverCertificate = null;
 
@@ -43,7 +48,7 @@ namespace DnsServerCore.Configuration
 
             SslStreamCertificateContext certificateContext = SslStreamCertificateContext.Create(serverCertificate, certificateCollection,
                 offline: keyStorage == X509KeyStorageFlags.EphemeralKeySet);
-            return new Pkcs12Certificate(certificateContext, fileInfo.LastWriteTimeUtc, Convert.ToHexString(SHA256.HashData(data)));
+            return new Pkcs12Certificate(certificateContext, modified, Convert.ToHexString(SHA256.HashData(data)));
         }
     }
 }

@@ -148,8 +148,8 @@ namespace DnsServerCore.Configuration
             ["/dns/listeners/http/helpRedirect"] = Field("enableDnsOverHttpHelpRedirect", true, canApply: true),
             ["/dns/listeners/http/realIpHeader"] = Field("dnsOverHttpRealIpHeader", "X-Real-IP", canApply: true),
             ["/dns/listeners/reverseProxyAcl"] = Field("dnsReverseProxyNetworkACL", Array.Empty<string>(), canApply: true),
-            ["/web/useSelfSignedCertificate"] = Field("webServiceUseSelfSignedTlsCertificate", false, restartWebService: true),
-            [ConfigurationWebCertificate.Path + "/path"] = Field<string>("webServiceTlsCertificatePath", null),
+            ["/web/useSelfSignedCertificate"] = Field("webServiceUseSelfSignedTlsCertificate", false, restartWebService: true, canApply: true),
+            [ConfigurationWebCertificate.Path + "/path"] = Field<string>("webServiceTlsCertificatePath", null, canApply: true),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
@@ -770,6 +770,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (ConfigurationWebCertificate.IsDeclared(manifest))
+                throw new InvalidDataException("/web/certificate: Applying web certificate settings to a cluster is not implemented.");
             if (GetWebListeners(manifest).HasValues)
                 throw new InvalidDataException("/web: Applying web listener settings to a cluster is not implemented.");
             if (manifest.GetServerDomain() is not null)
@@ -812,7 +814,7 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (path is "/dns/proxy" or ConfigurationDnsCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 

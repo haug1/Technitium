@@ -726,15 +726,19 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task WebCertificatePreviewValidatesTheFileAndTracksItsRevision()
+        public async Task WebCertificateApplyChecksTheRevisionAndRecoversHttps()
         {
             await using var server = await LoopbackWebService.StartAsync();
             const string variable = "TECHNITIUM_TEST_WEB_CERTIFICATE_PASSWORD";
             const string password = "fixture-web-pfx-password";
-            const string manifest = """
+            string manifest = """
                 {"schemaVersion":1,"web":{"tlsEnabled":true,
                   "certificate":{"path":"console.pfx","password":{"environment":"TECHNITIUM_TEST_WEB_CERTIFICATE_PASSWORD"}}}}
                 """;
+            int tlsPort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+            JsonNode candidate = JsonNode.Parse(manifest)!;
+            candidate["web"]!["tlsPort"] = tlsPort;
+            manifest = candidate.ToJsonString();
             string? original = Environment.GetEnvironmentVariable(variable);
             try
             {
@@ -747,9 +751,13 @@ namespace DnsServerCore.Tests
                     change => change.GetProperty("path").GetString() == "/web/certificate/path" &&
                         change.GetProperty("restartWebService").GetBoolean());
 
-                WriteCertificate(path);
+                string thumbprint = WriteCertificate(path);
                 JsonElement rotated = await PreviewAsync(server, manifest);
                 Assert.NotEqual(first.GetProperty("revision").GetString(), rotated.GetProperty("revision").GetString());
+
+                JsonElement stale = await ApplyAsync(server, manifest, first.GetProperty("revision").GetString()!);
+                Assert.Equal("error", stale.GetProperty("status").GetString());
+                Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
 
                 Environment.SetEnvironmentVariable(variable, "incorrect-fixture-password");
                 using var content = new StringContent(manifest, Encoding.UTF8, "application/json");
@@ -761,19 +769,65 @@ namespace DnsServerCore.Tests
                 JsonElement settings = await server.GetSettingsAsync();
                 Assert.False(settings.GetProperty("webServiceEnableTls").GetBoolean());
                 Assert.Equal(JsonValueKind.Null, settings.GetProperty("webServiceTlsCertificatePath").ValueKind);
+
+                Environment.SetEnvironmentVariable(variable, password);
+                int httpPort = settings.GetProperty("webServiceHttpPort").GetInt32();
+                JsonElement applied = await ApplyAsync(server, manifest, rotated.GetProperty("revision").GetString()!);
+                LoopbackWebService.AssertOk(applied);
+                string operation = applied.GetProperty("response").GetProperty("operationId").GetString()!;
+                Assert.Equal("applied", await WaitForWebApplyAsync(httpPort, server.AdminToken, operation));
+                Assert.Equal(thumbprint, await ReadThumbprintAsync(tlsPort));
+
+                using var occupied = new TcpListener(IPAddress.Loopback, 0);
+                occupied.Start();
+                WriteCertificate(Path.Combine(server.ConfigurationDirectory, "replacement.pfx"));
+                candidate["web"]!["tlsPort"] = ((IPEndPoint)occupied.LocalEndpoint).Port;
+                candidate["web"]!["certificate"]!["path"] = "replacement.pfx";
+                string replacement = candidate.ToJsonString();
+                JsonElement replacementPreview = await PreviewAsync(server, replacement);
+                JsonElement queued = await ApplyAsync(server, replacement, replacementPreview.GetProperty("revision").GetString()!);
+                LoopbackWebService.AssertOk(queued);
+                operation = queued.GetProperty("response").GetProperty("operationId").GetString()!;
+                Assert.Equal("failed", await WaitForWebApplyAsync(httpPort, server.AdminToken, operation));
+                Assert.Equal(thumbprint, await ReadThumbprintAsync(tlsPort));
+                await server.RestartAsync();
+                Assert.Equal(thumbprint, await ReadThumbprintAsync(tlsPort));
+
+                JsonElement conflict = await server.CallAsync("settings/set?webServiceTlsCertificatePath=replacement.pfx", server.AdminToken);
+                Assert.Equal("error", conflict.GetProperty("status").GetString());
+                Assert.Contains("/web/certificate/path", conflict.GetProperty("errorMessage").GetString());
+
+                string startup = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+                await File.WriteAllTextAsync(startup, """{"schemaVersion":1,"web":{"useSelfSignedCertificate":true,"certificate":null}}""");
+                await server.RestartAsync();
+                string generatedThumbprint = await ReadThumbprintAsync(tlsPort);
+                Assert.NotEqual(thumbprint, generatedThumbprint);
+                File.Delete(startup);
+                await server.RestartAsync();
+                Assert.Equal(generatedThumbprint, await ReadThumbprintAsync(tlsPort));
             }
             finally
             {
                 Environment.SetEnvironmentVariable(variable, original);
             }
 
-            static void WriteCertificate(string path)
+            static string WriteCertificate(string path)
             {
                 using var key = System.Security.Cryptography.RSA.Create(2048);
                 var request = new CertificateRequest("CN=console.test", key, System.Security.Cryptography.HashAlgorithmName.SHA256,
                     System.Security.Cryptography.RSASignaturePadding.Pkcs1);
                 using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
                 File.WriteAllBytes(path, certificate.Export(X509ContentType.Pkcs12, password));
+                return certificate.Thumbprint;
+            }
+
+            static async Task<string> ReadThumbprintAsync(int port)
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, port);
+                using var stream = new System.Net.Security.SslStream(client.GetStream(), false, (_, _, _, _) => true);
+                await stream.AuthenticateAsClientAsync("console.test");
+                return stream.RemoteCertificate!.GetCertHashString();
             }
         }
 

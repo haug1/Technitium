@@ -12,25 +12,28 @@ namespace DnsServerCore.Configuration
     {
         internal const string Path = "/web/certificate";
         internal readonly record struct State(bool SelfSigned, string Path, string Password, string FileHash);
-        internal readonly record struct Preview(State Current, State Desired)
+        internal readonly record struct Candidate(State Current, State Desired, Pkcs12Certificate Certificate, bool OwnsSelfSigned, bool OwnsPath, bool OwnsPassword)
         {
+            internal bool Changed => Current.SelfSigned != Desired.SelfSigned || Current.Path != Desired.Path ||
+                (Current.Password ?? "") != (Desired.Password ?? "") || (Current.Path is not null ? Current.FileHash : null) != Desired.FileHash;
+
             internal bool HasCertificate => Desired.SelfSigned || Desired.FileHash is not null;
         }
 
         internal static bool IsDeclared(ConfigurationManifest manifest)
         {
-            return manifest.Settings.TryGetProperty("web", out JsonElement web) &&
+            return manifest is not null && manifest.Settings.TryGetProperty("web", out JsonElement web) &&
                 (web.TryGetProperty("useSelfSignedCertificate", out _) ||
                  web.TryGetProperty("certificate", out JsonElement certificate) &&
                  (certificate.ValueKind == JsonValueKind.Null || certificate.TryGetProperty("path", out _) ||
                   certificate.TryGetProperty("password", out _)));
         }
 
-        internal static Preview PreparePreview(ConfigurationManifest manifest, State current, LogManager log)
+        internal static Candidate Prepare(ConfigurationManifest manifest, State current, LogManager log, bool preview = false)
         {
             JsonElement web = manifest.Settings.GetProperty("web");
-            bool selfSigned = web.TryGetProperty("useSelfSignedCertificate", out JsonElement selfSignedValue)
-                ? selfSignedValue.ValueKind == JsonValueKind.True : current.SelfSigned;
+            bool ownsSelfSigned = web.TryGetProperty("useSelfSignedCertificate", out JsonElement selfSignedValue);
+            bool selfSigned = ownsSelfSigned ? selfSignedValue.ValueKind == JsonValueKind.True : current.SelfSigned;
 
             bool hasCertificate = web.TryGetProperty("certificate", out JsonElement certificate);
             bool reset = hasCertificate && certificate.ValueKind == JsonValueKind.Null;
@@ -58,12 +61,12 @@ namespace DnsServerCore.Configuration
             if (path is null && !string.IsNullOrEmpty(password))
                 throw new InvalidDataException($"{Path}/password: A password requires a web certificate path.");
 
-            string fileHash = null;
+            Pkcs12Certificate loaded = null;
             if (path is not null)
             {
                 try
                 {
-                    fileHash = Pkcs12Certificate.Read(log.ConvertToAbsolutePath(path), password, X509KeyStorageFlags.EphemeralKeySet).FileHash;
+                    loaded = Pkcs12Certificate.Read(log.ConvertToAbsolutePath(path), password, preview ? X509KeyStorageFlags.EphemeralKeySet : X509KeyStorageFlags.DefaultKeySet);
                 }
                 catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or CryptographicException or NotSupportedException)
                 {
@@ -71,10 +74,10 @@ namespace DnsServerCore.Configuration
                 }
             }
 
-            return new Preview(current, new State(selfSigned, path, password, fileHash));
+            return new Candidate(current, new State(selfSigned, path, password, loaded?.FileHash), loaded, ownsSelfSigned, reset || hasPath, reset || hasPassword);
         }
 
-        internal static void WriteSnapshot(Utf8JsonWriter writer, Preview preview, byte[] key)
+        internal static void WriteSnapshot(Utf8JsonWriter writer, Candidate preview, byte[] key)
         {
             writer.WriteStartObject("manifestWebCertificate");
             writer.WriteString("currentFile", preview.Current.Path is null ? null : preview.Current.FileHash);

@@ -260,6 +260,7 @@ namespace DnsServerCore
                 {
                     LegacyWebConfiguration web = ReadLegacyWebConfiguration(reader, version);
                     CheckManifestWebLiveSettings(new WebLiveSettings(web.RealIpHeader, null, Listeners: new WebListeners(web.Addresses, web.HttpPort, web.TlsPort, web.EnableTls, web.EnableHttp3, web.RedirectToTls)));
+                    CheckManagedWebCertificate(web.UseSelfSignedCertificate, web.CertificatePath, web.CertificatePassword);
                     CheckManifestWebTlsDependencies(web.EnableTls, web.UseSelfSignedCertificate || web.CertificatePath is not null);
                     string domain = stream.ReadShortString();
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
@@ -318,6 +319,8 @@ namespace DnsServerCore
 
                 if (version is >= 2 and <= 27)
                 {
+                    if ((_managedWebListeners & ManagedWebCertificateMask) != 0)
+                        throw new InvalidDataException("/web/certificate: Cannot verify web certificate settings in this combined backup format.");
                     CheckManifestWebLiveSettings(new WebLiveSettings("X-Real-IP", null));
                     if (_managedWebListeners != 0)
                         throw new InvalidDataException("/web: Cannot verify the web listeners in this combined backup format.");

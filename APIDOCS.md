@@ -5317,7 +5317,7 @@ Optional DNS listener bindings support UDP and TCP PROXY, HTTP, HTTPS, TLS, QUIC
 
 The DNS listener certificate path and password reference can be declared alongside secure bindings. Preview with Settings modify permission loads and validates the PKCS #12 certificate and private key. The revision covers the certificate contents and resolved password. A failed apply restores the previous TLS configuration. Export includes the path and reports a configured password in `missingInputs`.
 
-Web certificate preview validates the PKCS #12 file and private key against the candidate web TLS settings. It requires Settings modify permission and incorporates the certificate contents and resolved password into the preview revision. Inspection export includes the certificate path and self-signed certificate setting. Web certificate apply is pending.
+Web certificate preview validates the PKCS #12 file and private key against the candidate web TLS settings. It requires Settings modify permission and incorporates the certificate contents and resolved password into the preview revision. Export includes the certificate path and self-signed certificate setting. Standalone servers can apply a web certificate or enable self-signed generation. Live changes use the web apply operation status endpoint and restore the previous HTTPS configuration if activation fails.
 
 DNS listener policy can be applied live. It covers ECS client source selection, the ordered DNS reverse-proxy ACL, and the DNS-over-HTTP real-IP header and help redirect. These settings are node-local. The server rejects conflicting edits and backup restores while the fields are managed by a manifest.
 

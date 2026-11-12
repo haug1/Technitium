@@ -156,8 +156,12 @@ namespace DnsServerCore
         private const ushort ManagedWebTlsSocketPath = 4096;
         private const ushort ManagedWebHttpSocket = ManagedWebHttpSocketEnabled | ManagedWebHttpSocketPath;
         private const ushort ManagedWebTlsSocket = ManagedWebTlsSocketEnabled | ManagedWebTlsSocketPath;
+        private const ushort ManagedWebSelfSigned = 8192;
+        private const ushort ManagedWebCertificatePath = 16384;
+        private const ushort ManagedWebCertificatePassword = 32768;
+        private const ushort ManagedWebCertificateMask = ManagedWebSelfSigned | ManagedWebCertificatePath | ManagedWebCertificatePassword;
         private const ushort ManagedWebListenerMask = ManagedWebAddresses | ManagedWebHttpPort | ManagedWebTlsPort |
-            ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect | ManagedWebHttpSocket | ManagedWebTlsSocket;
+            ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect | ManagedWebHttpSocket | ManagedWebTlsSocket | ManagedWebCertificateMask;
         internal readonly record struct WebUnixSocket(bool? Enabled, string Path)
         {
             internal bool HasValues => Enabled.HasValue || Path is not null;
@@ -540,6 +544,8 @@ namespace DnsServerCore
             string certificatePassword = s.ReadShortString();
             var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses, new WebListeners(addresses, httpPort, tlsPort, tlsEnabled, http3Enabled, redirectToTls,
                 new WebUnixSocket(httpSocketEnabled, httpSocket), new WebUnixSocket(tlsSocketEnabled, tlsSocket)));
+            if (!readOwnership)
+                CheckManagedWebCertificate(selfSignedCertificate, certificatePath, certificatePassword);
             if (!apply)
             {
                 CheckManifestWebTlsDependencies(tlsEnabled, selfSignedCertificate || certificatePath.Length > 0);
@@ -2726,26 +2732,28 @@ namespace DnsServerCore
             {
                 _tlsCertificateUpdateTimer = new Timer(delegate (object state)
                 {
-                    if (!string.IsNullOrEmpty(_webServiceTlsCertificatePath))
+                    string certificatePath = null;
+                    try
                     {
-                        string webServiceTlsCertificatePath = _log.ConvertToAbsolutePath(_webServiceTlsCertificatePath);
-
-                        try
+                        lock (_saveLock)
                         {
-                            FileInfo fileInfo = new FileInfo(webServiceTlsCertificatePath);
+                            if (_manifestWebRestart || string.IsNullOrEmpty(_webServiceTlsCertificatePath))
+                                return;
 
-                            if (fileInfo.Exists && (fileInfo.LastWriteTimeUtc != _webServiceCertificateLastModifiedOn))
-                            {
-                                LoadWebServiceTlsCertificate(webServiceTlsCertificatePath, _webServiceTlsCertificatePassword);
+                            certificatePath = _log.ConvertToAbsolutePath(_webServiceTlsCertificatePath);
+                            var file = new FileInfo(certificatePath);
+                            if (!file.Exists || file.LastWriteTimeUtc == _webServiceCertificateLastModifiedOn)
+                                return;
 
-                                if (_clusterManager.ClusterInitialized)
-                                    _clusterManager.UpdateSelfNodeUrlAndCertificate();
-                            }
+                            LoadWebServiceTlsCertificate(certificatePath, _webServiceTlsCertificatePassword);
                         }
-                        catch (Exception ex)
-                        {
-                            _log.Write("DNS Server encountered an error while updating Web Service TLS Certificate: " + webServiceTlsCertificatePath, ex);
-                        }
+
+                        if (_clusterManager?.ClusterInitialized == true)
+                            _clusterManager.UpdateSelfNodeUrlAndCertificate();
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Write("DNS Server encountered an error while updating Web Service TLS Certificate: " + certificatePath, ex);
                     }
                 }, null, TLS_CERTIFICATE_UPDATE_TIMER_INITIAL_INTERVAL, TLS_CERTIFICATE_UPDATE_TIMER_INTERVAL);
             }
@@ -2774,8 +2782,59 @@ namespace DnsServerCore
 
         private ConfigurationWebCertificate.State CaptureWebCertificate()
         {
-            return new ConfigurationWebCertificate.State(_webServiceUseSelfSignedTlsCertificate,
-                _webServiceTlsCertificatePath, _webServiceTlsCertificatePassword, _webServiceCertificateFileHash);
+            lock (_saveLock)
+                return new ConfigurationWebCertificate.State(_webServiceUseSelfSignedTlsCertificate,
+                    _webServiceTlsCertificatePath, _webServiceTlsCertificatePassword, _webServiceCertificateFileHash);
+        }
+
+        private ConfigurationWebCertificate.Candidate? PrepareWebCertificate(ConfigurationManifest manifest, bool preview = false)
+        {
+            return ConfigurationWebCertificate.IsDeclared(manifest)
+                ? ConfigurationWebCertificate.Prepare(manifest, CaptureWebCertificate(), _log, preview) : null;
+        }
+
+        private void CheckManagedWebCertificate(bool selfSigned, string path, string password)
+        {
+            if ((_managedWebListeners & ManagedWebSelfSigned) != 0 && selfSigned != _webServiceUseSelfSignedTlsCertificate)
+                throw new InvalidDataException("/web/useSelfSignedCertificate: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebCertificatePath) != 0 &&
+                (string.IsNullOrWhiteSpace(path) ? null : _log.ConvertToRelativePath(_log.ConvertToAbsolutePath(path))) != _webServiceTlsCertificatePath)
+                throw new InvalidDataException("/web/certificate/path: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebCertificatePassword) != 0 &&
+                (password ?? "") != (_webServiceTlsCertificatePassword ?? ""))
+                throw new InvalidDataException("/web/certificate/password: Setting is managed by the configuration manifest.");
+        }
+
+        private byte[] StageWebCertificate(ConfigurationWebCertificate.Candidate candidate, string serverDomain)
+        {
+            _webServiceUseSelfSignedTlsCertificate = candidate.Desired.SelfSigned;
+            _webServiceTlsCertificatePath = candidate.Desired.Path;
+            _webServiceTlsCertificatePassword = candidate.Desired.Password;
+            Pkcs12Certificate certificate = candidate.Certificate;
+            byte[] generated = null;
+            if (certificate is null && candidate.Desired.SelfSigned)
+            {
+                generated = CreateSelfSignedWebCertificate(serverDomain ?? _dnsServer.ServerDomain);
+                certificate = Pkcs12Certificate.Load(generated, null, X509KeyStorageFlags.DefaultKeySet, default);
+            }
+
+            if (certificate is null)
+                _webServiceSslServerAuthenticationOptions = null;
+            else
+                ConfigureWebTlsOptions(certificate.Context);
+            _webServiceCertificateLastModifiedOn = certificate?.LastModified ?? default;
+            _webServiceCertificateFileHash = certificate?.FileHash;
+            return generated;
+        }
+
+        private void RestoreWebCertificate(ConfigurationWebCertificate.State previous, SslServerAuthenticationOptions options, DateTime lastModified)
+        {
+            _webServiceUseSelfSignedTlsCertificate = previous.SelfSigned;
+            _webServiceTlsCertificatePath = previous.Path;
+            _webServiceTlsCertificatePassword = previous.Password;
+            _webServiceCertificateFileHash = previous.FileHash;
+            _webServiceSslServerAuthenticationOptions = options;
+            _webServiceCertificateLastModifiedOn = lastModified;
         }
 
         private void ConfigureWebTlsOptions(SslStreamCertificateContext certificate)
@@ -2964,29 +3023,37 @@ namespace DnsServerCore
             return changed;
         }
 
-        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate)
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate)
         {
             WebListeners previous = CaptureWebListeners();
-            SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
+            SslServerAuthenticationOptions previousTlsOptions;
+            ConfigurationWebCertificate.State previousCertificate;
+            DateTime previousCertificateTime;
             lock (_saveLock)
+            {
                 _manifestWebRestart = true;
+                previousTlsOptions = _webServiceSslServerAuthenticationOptions;
+                previousCertificate = CaptureWebCertificate();
+                previousCertificateTime = _webServiceCertificateLastModifiedOn;
+            }
 
             try
             {
                 await StopWebServiceAsync();
                 StageWebListeners(listeners);
-                if (previous.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
+                byte[] generated = webCertificate is { Changed: true } candidate ? StageWebCertificate(candidate, manifest.GetServerDomain()) : null;
+                if (webCertificate is not { Changed: true } && previous.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                     ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
                 await StartWebServiceAsync(false, listeners);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
                 await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, listeners: listeners,
-                    listenersChanged: true, webAddressesChanged: addressesChanged);
+                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated);
             }
             catch
             {
                 await StopWebServiceAsync();
                 StageWebListeners(previous);
-                _webServiceSslServerAuthenticationOptions = previousTlsOptions;
+                RestoreWebCertificate(previousCertificate, previousTlsOptions, previousCertificateTime);
                 await StartWebServiceAsync(false);
                 throw;
             }
@@ -3052,7 +3119,7 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/reverseProxyAcl: Setting is managed by the configuration manifest.");
         }
 
-        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, WebListeners listeners, bool listenersChanged, Action<Action> persist)
+        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, WebListeners listeners, bool listenersChanged, ConfigurationWebCertificate.Candidate? certificate, Action<Action> persist)
         {
             lock (_saveLock)
             {
@@ -3070,11 +3137,14 @@ namespace DnsServerCore
                     (listeners.HttpSocket.Enabled.HasValue ? ManagedWebHttpSocketEnabled : 0) |
                     (listeners.HttpSocket.Path is not null ? ManagedWebHttpSocketPath : 0) |
                     (listeners.TlsSocket.Enabled.HasValue ? ManagedWebTlsSocketEnabled : 0) |
-                    (listeners.TlsSocket.Path is not null ? ManagedWebTlsSocketPath : 0));
+                    (listeners.TlsSocket.Path is not null ? ManagedWebTlsSocketPath : 0) |
+                    (certificate?.OwnsSelfSigned == true ? ManagedWebSelfSigned : 0) |
+                    (certificate?.OwnsPath == true ? ManagedWebCertificatePath : 0) |
+                    (certificate?.OwnsPassword == true ? ManagedWebCertificatePassword : 0));
                 bool aclChanged = headers.ReverseProxyAcl is not null && !headers.ReverseProxyAcl.SequenceEqual(oldAcl ?? []);
                 string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
                 string ancestors = headers.FrameAncestors ?? oldAncestors;
-                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged && !listenersChanged && managedListeners == oldManagedListeners &&
+                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged && !listenersChanged && certificate is not { Changed: true } && managedListeners == oldManagedListeners &&
                     (headers.ReverseProxyAcl is not null) == oldAclOwned &&
                     (headers.RealIp is not null) == oldRealIpOwned && (headers.FrameAncestors is not null) == oldAncestorsOwned)
                 {
@@ -3109,12 +3179,21 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null)
         {
             string domain = manifest.GetServerDomain();
-            bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate &&
+            bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
                 (webAddressesChanged || (domain is not null && !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase)));
             Action writeCertificate = regenerateCertificate ? () => CheckAndLoadSelfSignedCertificate(true, true, domain ?? _dnsServer.ServerDomain) : null;
+            if (generatedWebCertificate is not null)
+            {
+                writeCertificate = () =>
+                {
+                    using var file = new FileStream(Path.Combine(_configFolder, "self-signed-cert.pfx"), FileMode.Create, FileAccess.Write);
+                    file.Write(generatedWebCertificate);
+                    file.Flush(flushToDisk: true);
+                };
+            }
 
             SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
             DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
@@ -3122,7 +3201,7 @@ namespace DnsServerCore
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate);
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate);
             }
             catch
             {
@@ -3136,11 +3215,44 @@ namespace DnsServerCore
                 throw;
             }
 
+            if (webCertificate is { Changed: true })
+            {
+                if (_webServiceTlsCertificatePath is null)
+                    StopTlsCertificateUpdateTimer();
+                else
+                    StartTlsCertificateUpdateTimer();
+            }
+
             if (_ssoHttpHandler is not null)
             {
                 _ssoHttpHandler.Proxy = _dnsServer.Proxy;
                 _ssoHttpHandler.NetworkType = HttpClientNetworkHandler.GetNetworkType(_dnsServer.IPv6Mode);
             }
+        }
+
+        private byte[] CreateSelfSignedWebCertificate(string serverDomain)
+        {
+            using RSA rsa = RSA.Create(2048);
+            CertificateRequest req = new CertificateRequest("cn=" + serverDomain, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+            SubjectAlternativeNameBuilder san = new SubjectAlternativeNameBuilder();
+            bool sanAdded = false;
+
+            foreach (IPAddress localAddress in _webServiceLocalAddresses)
+            {
+                if (localAddress.Equals(IPAddress.IPv6Any) || localAddress.Equals(IPAddress.Any))
+                    continue;
+
+                san.AddIpAddress(localAddress);
+                sanAdded = true;
+            }
+
+            if (sanAdded)
+                req.CertificateExtensions.Add(san.Build());
+
+            using X509Certificate2 cert = req.CreateSelfSigned(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddYears(5));
+
+            return cert.Export(X509ContentType.Pkcs12, null as string);
         }
 
         private void CheckAndLoadSelfSignedCertificate(bool forceGenerateNew, bool throwException, string serverDomain = null)
@@ -3156,28 +3268,8 @@ namespace DnsServerCore
 
                 if (forceGenerateNew || !File.Exists(selfSignedCertificateFilePath))
                 {
-                    RSA rsa = RSA.Create(2048);
-                    CertificateRequest req = new CertificateRequest("cn=" + (serverDomain ?? _dnsServer.ServerDomain), rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-
-                    SubjectAlternativeNameBuilder san = new SubjectAlternativeNameBuilder();
-                    bool sanAdded = false;
-
-                    foreach (IPAddress localAddress in _webServiceLocalAddresses)
-                    {
-                        if (localAddress.Equals(IPAddress.IPv6Any) || localAddress.Equals(IPAddress.Any))
-                            continue;
-
-                        san.AddIpAddress(localAddress);
-                        sanAdded = true;
-                    }
-
-                    if (sanAdded)
-                        req.CertificateExtensions.Add(san.Build());
-
-                    X509Certificate2 cert = req.CreateSelfSigned(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddYears(5));
-
                     using var certificateFile = new FileStream(selfSignedCertificateFilePath, FileMode.Create, FileAccess.Write);
-                    certificateFile.Write(cert.Export(X509ContentType.Pkcs12, null as string));
+                    certificateFile.Write(CreateSelfSignedWebCertificate(serverDomain ?? _dnsServer.ServerDomain));
                     certificateFile.Flush(flushToDisk: true);
                 }
 
@@ -3341,22 +3433,31 @@ namespace DnsServerCore
                 ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, dnsBindings, previousDnsBindings, _dnsServer.HasDnsListenerCertificate);
                 bool dnsCertificateStaged = _dnsServer.DnsCertificateChanged(dnsCertificate);
                 bool dnsBindingsStaged = DnsServer.DnsBindingsDiffer(dnsBindings, previousDnsBindings);
+                ConfigurationWebCertificate.Candidate? webCertificate = PrepareWebCertificate(startupManifest);
+                ConfigurationWebCertificate.State previousWebCertificate = CaptureWebCertificate();
+                DateTime previousWebCertificateTime = _webServiceCertificateLastModifiedOn;
                 WebListeners listeners = ConfigurationPlan.GetWebListeners(startupManifest);
                 DnsServer.DnsTuning tuning = ConfigurationPlan.GetDnsTuning(startupManifest);
                 DnsServer.DnsTuning previousListenerTuning = _dnsServer.CaptureListenerTuning();
                 bool listenerTuningStaged = _dnsServer.DnsTuningRequiresRestart(tuning);
                 WebListeners previousWebListeners = CaptureWebListeners();
                 SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
+                if (webCertificate is { Changed: true })
+                {
+                    lock (_saveLock)
+                        _manifestWebRestart = true;
+                }
                 try
                 {
                     await _settingsApi.WithConfigurationLockAsync(async () =>
                     {
                         // Start the web service and bind the DNS candidate before committing the manifest.
-                        ValidateManifestWebListeners(listeners);
+                        ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
                         bool listenersChanged = StageWebListeners(listeners);
-                        if (previousWebListeners.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
+                        byte[] generated = webCertificate is { Changed: true } candidate ? StageWebCertificate(candidate, startupManifest.GetServerDomain()) : null;
+                        if (webCertificate is not { Changed: true } && previousWebListeners.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                             ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
-                        if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0)
+                        if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0 || webCertificate is { Changed: true })
                             await StartWebServiceAsync(false, listeners);
                         else
                             await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
@@ -3374,7 +3475,7 @@ namespace DnsServerCore
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged);
+                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated);
                         }
                     });
                 }
@@ -3388,11 +3489,22 @@ namespace DnsServerCore
                     if (dnsCertificateStaged)
                         _dnsServer.FinishManifestDnsCertificate(committed: false);
                     if (listeners.HasValues)
-                    {
                         StageWebListeners(previousWebListeners);
-                        _webServiceSslServerAuthenticationOptions = previousTlsOptions;
-                    }
+                    RestoreWebCertificate(previousWebCertificate, previousTlsOptions, previousWebCertificateTime);
                     throw;
+                }
+
+                finally
+                {
+                    if (webCertificate is { Changed: true })
+                    {
+                        lock (_saveLock)
+                        {
+                            _manifestWebRestart = false;
+                            if (_pendingSave)
+                                _saveTimer.Change(SAVE_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
+                        }
+                    }
                 }
 
                 _log.Write("DNS Server (v" + _currentVersion.ToString() + ") was started successfully.");
