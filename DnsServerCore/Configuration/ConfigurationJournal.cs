@@ -28,18 +28,24 @@ namespace DnsServerCore.Configuration
             foreach (string fileName in _configurationFiles)
                 Restore(configFolder, pending, fileName);
 
-            string zoneEntries = Path.Combine(pending, "zones");
-            if (Directory.Exists(zoneEntries))
-            {
-                foreach (string entry in Directory.EnumerateDirectories(zoneEntries))
-                {
-                    string name = Path.GetFileName(entry);
-                    if (IsZoneFileName(name))
-                        Restore(configFolder, pending, Path.Combine("zones", name));
-                }
-            }
+            RestoreResourceFiles("zones");
+            RestoreResourceFiles("scopes");
 
             Directory.Move(pending, staging);
+
+            void RestoreResourceFiles(string directory)
+            {
+                string entries = Path.Combine(pending, directory);
+                if (!Directory.Exists(entries))
+                    return;
+
+                foreach (string entry in Directory.EnumerateDirectories(entries))
+                {
+                    string relativePath = Path.Combine(directory, Path.GetFileName(entry));
+                    if (IsResourceFile(relativePath))
+                        Restore(configFolder, pending, relativePath);
+                }
+            }
         }
 
         internal static void Persist(string configFolder, Action write, params string[] fileNames)
@@ -58,8 +64,7 @@ namespace DnsServerCore.Configuration
 
             foreach (string fileName in new HashSet<string>(fileNames, StringComparer.Ordinal))
             {
-                if (!_configurationFiles.Contains(fileName) &&
-                    (!string.Equals(Path.GetDirectoryName(fileName), "zones", StringComparison.Ordinal) || !IsZoneFileName(Path.GetFileName(fileName))))
+                if (!_configurationFiles.Contains(fileName) && !IsResourceFile(fileName))
                     throw new ArgumentException("Unsupported configuration journal path.", nameof(fileNames));
 
                 string entry = Path.Combine(staging, fileName);
@@ -104,11 +109,20 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        private static bool IsZoneFileName(string name)
+        private static bool IsResourceFile(string path)
         {
-            return name.EndsWith(".zone", StringComparison.Ordinal) &&
-                name.IndexOfAny(Path.GetInvalidFileNameChars()) == -1 &&
-                !name.Contains('*') && !name.Contains('\\') && !name.Contains('/');
+            string directory = Path.GetDirectoryName(path);
+            string name = Path.GetFileName(path);
+            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
+                return false;
+
+            return directory switch
+            {
+                "zones" => name.EndsWith(".zone", StringComparison.Ordinal) &&
+                    !name.Contains('*') && !name.Contains('\\') && !name.Contains('/'),
+                "scopes" => name.Length > ".scope".Length && name.EndsWith(".scope", StringComparison.Ordinal),
+                _ => false
+            };
         }
 
         private static void CopyAndFlush(string source, string destination)

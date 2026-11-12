@@ -2956,6 +2956,49 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupRecoversCreatedUpdatedAndDeletedDhcpScopeFiles()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            await SetScopeAsync("Updated", 10, 30);
+            await SetScopeAsync("Deleted", 40, 60);
+
+            string scopes = Path.Combine(server.ConfigurationDirectory, "scopes");
+            byte[] updated = await File.ReadAllBytesAsync(Path.Combine(scopes, "Updated.scope"));
+            byte[] deleted = await File.ReadAllBytesAsync(Path.Combine(scopes, "Deleted.scope"));
+
+            await SetScopeAsync("Updated", 10, 35);
+            LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/delete?name=Deleted", server.AdminToken));
+            await SetScopeAsync("Created", 70, 90);
+
+            string journal = Path.Combine(server.ConfigurationDirectory, ".manifest-pending");
+            string updatedEntry = Directory.CreateDirectory(Path.Combine(journal, "scopes", "Updated.scope")).FullName;
+            string deletedEntry = Directory.CreateDirectory(Path.Combine(journal, "scopes", "Deleted.scope")).FullName;
+            Directory.CreateDirectory(Path.Combine(journal, "scopes", "Created.scope"));
+            await File.WriteAllBytesAsync(Path.Combine(updatedEntry, "previous"), updated);
+            await File.WriteAllBytesAsync(Path.Combine(deletedEntry, "previous"), deleted);
+
+            await server.RestartAsync();
+
+            JsonElement result = await server.CallAsync("dhcp/scopes/list", server.AdminToken);
+            LoopbackWebService.AssertOk(result);
+            JsonElement configured = result.GetProperty("response").GetProperty("scopes");
+            JsonElement restored = Assert.Single(configured.EnumerateArray(), scope => scope.GetProperty("name").ValueEquals("Updated"));
+            Assert.Equal("192.0.2.30", restored.GetProperty("endingAddress").GetString());
+            Assert.Contains(configured.EnumerateArray(), scope => scope.GetProperty("name").ValueEquals("Deleted"));
+            Assert.DoesNotContain(configured.EnumerateArray(), scope => scope.GetProperty("name").ValueEquals("Created"));
+            Assert.False(File.Exists(Path.Combine(scopes, "Created.scope")));
+            Assert.False(Directory.Exists(journal));
+
+            async Task SetScopeAsync(string name, int start, int end)
+            {
+                LoopbackWebService.AssertOk(await server.CallAsync(
+                    $"dhcp/scopes/set?name={name}&startingAddress=192.0.2.{start}&endingAddress=192.0.2.{end}&subnetMask=255.255.255.0",
+                    server.AdminToken));
+                LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/disable?name=" + name, server.AdminToken));
+            }
+        }
+
+        [Fact]
         public async Task StartupRecoversZoneFilesAndPermissionsFromInterruptedApply()
         {
             await using var server = await LoopbackWebService.StartAsync();

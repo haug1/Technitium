@@ -1318,20 +1318,24 @@ namespace DnsServerCore.Dhcp
             }
         }
 
+        private void WriteScopeFile(Scope scope)
+        {
+            string temporary = Path.Combine(_scopesFolder, scope.Name + ".tmp");
+            string destination = Path.Combine(_scopesFolder, scope.Name + ".scope");
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                scope.WriteTo(stream);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, destination, true);
+        }
+
         private void SaveScopeFile(Scope scope)
         {
-            string tmpScopeFile = Path.Combine(_scopesFolder, scope.Name + ".tmp");
             string scopeFile = Path.Combine(_scopesFolder, scope.Name + ".scope");
-
             try
             {
-                using (FileStream fS = new FileStream(tmpScopeFile, FileMode.Create, FileAccess.Write))
-                {
-                    scope.WriteTo(fS);
-                }
-
-                File.Move(tmpScopeFile, scopeFile, true);
-
+                WriteScopeFile(scope);
                 _log.Write("DHCP Server successfully saved scope file: " + scopeFile);
             }
             catch (Exception ex)

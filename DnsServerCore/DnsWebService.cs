@@ -2313,17 +2313,17 @@ namespace DnsServerCore
 
             //dhcp
             _webService.MapGetAndPost("/api/dhcp/leases/list", _dhcpApi.ListDhcpLeases);
-            _webService.MapGetAndPost("/api/dhcp/leases/remove", _dhcpApi.RemoveDhcpLease);
-            _webService.MapGetAndPost("/api/dhcp/leases/convertToReserved", _dhcpApi.ConvertToReservedLease);
-            _webService.MapGetAndPost("/api/dhcp/leases/convertToDynamic", _dhcpApi.ConvertToDynamicLease);
+            _webService.MapGetAndPost("/api/dhcp/leases/remove", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.RemoveDhcpLease));
+            _webService.MapGetAndPost("/api/dhcp/leases/convertToReserved", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.ConvertToReservedLease));
+            _webService.MapGetAndPost("/api/dhcp/leases/convertToDynamic", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.ConvertToDynamicLease));
             _webService.MapGetAndPost("/api/dhcp/scopes/list", _dhcpApi.ListDhcpScopes);
             _webService.MapGetAndPost("/api/dhcp/scopes/get", _dhcpApi.GetDhcpScope);
-            _webService.MapGetAndPost("/api/dhcp/scopes/set", _dhcpApi.SetDhcpScopeAsync);
-            _webService.MapGetAndPost("/api/dhcp/scopes/addReservedLease", _dhcpApi.AddReservedLease);
-            _webService.MapGetAndPost("/api/dhcp/scopes/removeReservedLease", _dhcpApi.RemoveReservedLease);
-            _webService.MapGetAndPost("/api/dhcp/scopes/enable", _dhcpApi.EnableDhcpScopeAsync);
-            _webService.MapGetAndPost("/api/dhcp/scopes/disable", _dhcpApi.DisableDhcpScope);
-            _webService.MapGetAndPost("/api/dhcp/scopes/delete", _dhcpApi.DeleteDhcpScope);
+            _webService.MapGetAndPost("/api/dhcp/scopes/set", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.SetDhcpScopeAsync));
+            _webService.MapGetAndPost("/api/dhcp/scopes/addReservedLease", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.AddReservedLease));
+            _webService.MapGetAndPost("/api/dhcp/scopes/removeReservedLease", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.RemoveReservedLease));
+            _webService.MapGetAndPost("/api/dhcp/scopes/enable", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.EnableDhcpScopeAsync));
+            _webService.MapGetAndPost("/api/dhcp/scopes/disable", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.DisableDhcpScope));
+            _webService.MapGetAndPost("/api/dhcp/scopes/delete", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.DeleteDhcpScope));
 
             //administration
             _webService.MapGetAndPost("/api/admin/sessions/list", _authApi.ListSessions);
