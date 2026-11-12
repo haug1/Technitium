@@ -316,6 +316,18 @@ namespace DnsServerCore
                 if (subItem is not null)
                     jsonWriter.WriteString("subItem", subItem.Length == 0 ? "." : subItem);
 
+                jsonWriter.WriteStartArray("managedSettings");
+                if (subItem is null)
+                {
+                    string sectionPath = $"{ConfigurationPermissions.Path}/{permission.Section}";
+                    foreach (string path in _dnsWebService._authManager.ManagedPermissionPaths)
+                    {
+                        if (path == ConfigurationPermissions.Path || path == sectionPath || path.StartsWith(sectionPath + "/", StringComparison.Ordinal))
+                            jsonWriter.WriteStringValue(path);
+                    }
+                }
+                jsonWriter.WriteEndArray();
+
                 jsonWriter.WritePropertyName("userPermissions");
                 jsonWriter.WriteStartArray();
 
@@ -1778,11 +1790,14 @@ namespace DnsServerCore
                 if (permission is null)
                     throw new DnsWebServiceException("No permissions exists for section: " + section.ToString() + (strSubItem is null ? "" : "/" + strSubItem));
 
+                Dictionary<User, PermissionFlag> userPermissions = null;
+                Dictionary<Group, PermissionFlag> groupPermissions = null;
+
                 string strUserPermissions = request.QueryOrForm("userPermissions");
                 if (strUserPermissions is not null)
                 {
                     string[] parts = strUserPermissions.Split('|');
-                    Dictionary<User, PermissionFlag> userPermissions = new Dictionary<User, PermissionFlag>();
+                    userPermissions = new Dictionary<User, PermissionFlag>();
 
                     for (int i = 0; i < parts.Length; i += 4)
                     {
@@ -1810,15 +1825,13 @@ namespace DnsServerCore
                             userPermissions[user] = permissionFlag;
                         }
                     }
-
-                    permission.SyncPermissions(userPermissions);
                 }
 
                 string strGroupPermissions = request.QueryOrForm("groupPermissions");
                 if (strGroupPermissions is not null)
                 {
                     string[] parts = strGroupPermissions.Split('|');
-                    Dictionary<Group, PermissionFlag> groupPermissions = new Dictionary<Group, PermissionFlag>();
+                    groupPermissions = new Dictionary<Group, PermissionFlag>();
 
                     for (int i = 0; i < parts.Length; i += 4)
                     {
@@ -1865,9 +1878,13 @@ namespace DnsServerCore
                             groupPermissions[dhcpAdmins] = PermissionFlag.ViewModifyDelete;
                             break;
                     }
-
-                    permission.SyncPermissions(groupPermissions);
                 }
+
+                ConfigurationPermissions.CheckWrite(_dnsWebService._authManager.ManagedPermissionPaths, permission, userPermissions, groupPermissions);
+                if (userPermissions is not null)
+                    permission.SyncPermissions(userPermissions);
+                if (groupPermissions is not null)
+                    permission.SyncPermissions(groupPermissions);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Permissions were updated successfully for section: " + section.ToString() + (string.IsNullOrEmpty(strSubItem) ? "" : "/" + strSubItem));
 

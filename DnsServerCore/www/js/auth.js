@@ -2093,6 +2093,7 @@ function showEditSectionPermissionsModal(objMenuItem) {
     var id = mnuItem.attr("data-id");
     var section = mnuItem.attr("data-section");
 
+    $("#lblEditPermissionsManaged").hide();
     $("#lblEditPermissionsName").text(section);
     $("#tbodyEditPermissionsUser").html("");
     $("#tbodyEditPermissionsGroup").html("");
@@ -2112,6 +2113,10 @@ function showEditSectionPermissionsModal(objMenuItem) {
         token: sessionData.token,
         success: function (responseJSON) {
             $("#lblEditPermissionsName").text(responseJSON.response.section);
+
+            var managedSettings = responseJSON.response.managedSettings || [];
+            if (managedSettings.length > 0)
+                $("#lblEditPermissionsManaged").text("Manifest-managed permissions: " + managedSettings.join(", ")).show();
 
             //user permissions
             for (var i = 0; i < responseJSON.response.userPermissions.length; i++) {

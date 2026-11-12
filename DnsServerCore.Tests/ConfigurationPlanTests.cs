@@ -3343,6 +3343,69 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManagedSectionGrantsRejectConflictingEditsAndRestoreUntilReleased()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string password = "fixture-grant-password";
+            using var user = new FormUrlEncodedContent([new("user", "viewer"), new("pass", password)]);
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/create", server.AdminToken, user));
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/groups/create?group=Observers", server.AdminToken));
+            await server.RestartAsync();
+
+            using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+            backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+            backup.EnsureSuccessStatusCode();
+            byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"auth":{"permissions":{"Settings":{"users":{"viewer":["View"]},"groups":{"Observers":["View"]}}}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.CallAsync("admin/permissions/get?section=Settings", server.AdminToken);
+            LoopbackWebService.AssertOk(settings);
+            Assert.Contains(settings.GetProperty("response").GetProperty("managedSettings").EnumerateArray(),
+                path => path.ValueEquals("/auth/permissions/Settings/users/viewer"));
+
+            JsonElement denied = await server.CallAsync("admin/permissions/set?section=Settings&userPermissions=", server.AdminToken);
+            Assert.Equal("error", denied.GetProperty("status").GetString());
+            Assert.Contains("/auth/permissions/Settings/users/viewer", denied.GetProperty("errorMessage").GetString());
+            JsonElement rename = await server.CallAsync("admin/users/set?user=viewer&newUser=renamed", server.AdminToken);
+            Assert.Equal("error", rename.GetProperty("status").GetString());
+            Assert.Contains("/auth/permissions/Settings/users/viewer", rename.GetProperty("errorMessage").GetString());
+
+            JsonElement groupRename = await server.CallAsync("admin/groups/set?group=Observers&newGroup=observers", server.AdminToken);
+            Assert.Equal("error", groupRename.GetProperty("status").GetString());
+            Assert.Contains("/auth/permissions/Settings/groups/observers", groupRename.GetProperty("errorMessage").GetString());
+            JsonElement mixed = await server.CallAsync(
+                "admin/permissions/set?section=Settings&userPermissions=viewer%7Ctrue%7Cfalse%7Cfalse%7Cadmin%7Ctrue%7Cfalse%7Cfalse&groupPermissions=",
+                server.AdminToken);
+            Assert.Equal("error", mixed.GetProperty("status").GetString());
+            Assert.Contains("/auth/permissions/Settings/groups/observers", mixed.GetProperty("errorMessage").GetString());
+            settings = await server.CallAsync("admin/permissions/get?section=Settings", server.AdminToken);
+            Assert.DoesNotContain(settings.GetProperty("response").GetProperty("userPermissions").EnumerateArray(),
+                grant => grant.GetProperty("username").ValueEquals("admin"));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/auth/permissions/Settings/users/viewer", restore.GetProperty("errorMessage").GetString());
+
+            string token = await server.LoginAsync("viewer", password);
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/get", token));
+            const string release = """{"schemaVersion":1}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/get", token));
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/permissions/set?section=Settings&userPermissions=", server.AdminToken));
+            Assert.Equal("error", (await server.CallAsync("settings/get", token)).GetProperty("status").GetString());
+        }
+
+        [Fact]
         public async Task ManifestPermissionGrantsResolveNewPrincipalsAndControlAccessAfterRestart()
         {
             await using var server = await LoopbackWebService.StartAsync();

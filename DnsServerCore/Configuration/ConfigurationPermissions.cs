@@ -15,9 +15,83 @@ namespace DnsServerCore.Configuration
         private static readonly PermissionSection[] _sections = Enum.GetValues<PermissionSection>()
             .Where(section => section != PermissionSection.Unknown).ToArray();
 
+        internal static string GrantPath(PermissionSection section, bool group, string name) =>
+            ConfigurationPlan.AppendPath($"{Path}/{section}/{(group ? "groups" : "users")}", name.ToLowerInvariant());
+
+        internal static string[] GetOwnedPaths(ConfigurationManifest manifest)
+        {
+            if (!TryGetDeclaration(manifest, out JsonElement permissions))
+                return [];
+            if (permissions.ValueKind == JsonValueKind.Null)
+                return [Path];
+
+            var paths = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (JsonProperty entry in permissions.EnumerateObject())
+            {
+                var section = Enum.Parse<PermissionSection>(entry.Name, ignoreCase: true);
+                if (entry.Value.ValueKind == JsonValueKind.Null)
+                {
+                    paths.Add($"{Path}/{section}");
+                    continue;
+                }
+                foreach (JsonProperty map in entry.Value.EnumerateObject())
+                    foreach (JsonProperty grant in map.Value.EnumerateObject())
+                        paths.Add(GrantPath(section, map.NameEquals("groups"), grant.Name));
+            }
+            return paths.ToArray();
+        }
+
+        internal static bool OwnsGrant(IReadOnlyList<string> paths, PermissionSection section, string path) =>
+            paths.Contains(Path) || paths.Contains($"{Path}/{section}") || paths.Contains(path);
+
+        internal static void CheckGrant(IReadOnlyList<string> paths, PermissionSection section, bool group, string name)
+        {
+            string path = GrantPath(section, group, name);
+            if (OwnsGrant(paths, section, path))
+                throw new InvalidDataException($"{path}: This permission grant is managed by the manifest.");
+        }
+
+        internal static void CheckWrite(IReadOnlyList<string> paths, Permission current,
+            IReadOnlyDictionary<User, PermissionFlag> users, IReadOnlyDictionary<Group, PermissionFlag> groups)
+        {
+            if (paths.Count == 0 || current.SubItemName is not null)
+                return;
+            if (users is not null)
+                CheckMap(current.Section, false, current.UserPermissions, users, user => user.Username, paths);
+            if (groups is not null)
+                CheckMap(current.Section, true, current.GroupPermissions, groups, group => group.Name, paths);
+        }
+
+        internal static void CheckRestore(AuthManager auth, IReadOnlyDictionary<PermissionSection, Permission> restored)
+        {
+            foreach (PermissionSection section in _sections)
+            {
+                Permission current = auth.GetPermission(section);
+                restored.TryGetValue(section, out Permission candidate);
+                CheckMap(section, false, current?.UserPermissions, candidate?.UserPermissions, user => user.Username, auth.ManagedPermissionPaths);
+                CheckMap(section, true, current?.GroupPermissions, candidate?.GroupPermissions, group => group.Name, auth.ManagedPermissionPaths);
+            }
+        }
+
+        private static void CheckMap<T>(PermissionSection section, bool group, IReadOnlyDictionary<T, PermissionFlag> current,
+            IReadOnlyDictionary<T, PermissionFlag> candidate, Func<T, string> name, IReadOnlyList<string> paths)
+        {
+            var before = ToMap(current);
+            var after = ToMap(candidate);
+            foreach (string principal in before.Keys.Union(after.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            {
+                if (before.GetValueOrDefault(principal) != after.GetValueOrDefault(principal) ||
+                    before.ContainsKey(principal) != after.ContainsKey(principal))
+                    CheckGrant(paths, section, group, principal);
+            }
+
+            Dictionary<string, PermissionFlag> ToMap(IReadOnlyDictionary<T, PermissionFlag> source) =>
+                source?.ToDictionary(entry => name(entry.Key).ToLowerInvariant(), entry => entry.Value) ?? [];
+        }
+
         internal sealed record Grant(PermissionSection Section, bool Group, string Name, PermissionFlag? Before, PermissionFlag? After)
         {
-            internal string SettingPath => ConfigurationPlan.AppendPath($"{Path}/{Section}/{(Group ? "groups" : "users")}", Name);
+            internal string SettingPath => GrantPath(Section, Group, Name);
         }
 
         internal static bool TryGetDeclaration(ConfigurationManifest manifest, out JsonElement permissions)
@@ -56,6 +130,7 @@ namespace DnsServerCore.Configuration
             {
                 ValidateActor(PermissionSection.Administration, PermissionFlag.Delete);
                 ValidateActor(PermissionSection.Settings, PermissionFlag.Modify);
+                ValidateActor(PermissionSection.Settings, PermissionFlag.View);
             }
             return changes;
 

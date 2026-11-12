@@ -985,6 +985,8 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WritePropertyName("manifestPermissionOwnership");
+                    JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedPermissionPaths);
                     writer.WritePropertyName("manifestUserOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedUserPaths);
                     writer.WritePropertyName("manifestGroupOwnership");

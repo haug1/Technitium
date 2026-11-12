@@ -2637,6 +2637,7 @@ function showZonePermissionsModal(zone) {
     var divEditPermissionsLoader = $("#divEditPermissionsLoader");
     var divEditPermissionsViewer = $("#divEditPermissionsViewer");
 
+    $("#lblEditPermissionsManaged").hide();
     $("#lblEditPermissionsName").text("Zones / " + (zone === "." ? "<root>" : zone));
     $("#tbodyEditPermissionsUser").html("");
     $("#tbodyEditPermissionsGroup").html("");

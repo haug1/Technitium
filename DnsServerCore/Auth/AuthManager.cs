@@ -91,7 +91,11 @@ namespace DnsServerCore.Auth
         internal const string UserOwnershipFile = "user-ownership.config";
         private string[] _managedUserPaths = [];
         internal IReadOnlyList<string> ManagedUserPaths => _managedUserPaths;
-        internal bool HasManagedAuthSettings => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 || _managedUserPaths.Length > 0;
+        internal const string PermissionOwnershipFile = "permission-ownership.config";
+        private string[] _managedPermissionPaths = [];
+        internal IReadOnlyList<string> ManagedPermissionPaths => _managedPermissionPaths;
+        internal bool HasManagedAuthSettings => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 ||
+            _managedUserPaths.Length > 0 || _managedPermissionPaths.Length > 0;
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
@@ -112,6 +116,7 @@ namespace DnsServerCore.Auth
             _managedLdapFields = ReadOwnership(LdapOwnershipFile);
             _managedGroupPaths = ReadOwnership(GroupOwnershipFile);
             _managedUserPaths = ReadOwnership(UserOwnershipFile);
+            _managedPermissionPaths = ReadOwnership(PermissionOwnershipFile);
 
             _saveTimer = new Timer(delegate (object state)
             {
@@ -506,9 +511,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null)
             {
                 persist(null);
                 return;
@@ -619,6 +624,8 @@ namespace DnsServerCore.Auth
                         WriteOwnership(GroupOwnershipFile, groupOwnership);
                     if (userOwnership is not null)
                         WriteOwnership(UserOwnershipFile, userOwnership);
+                    if (permissionOwnership is not null)
+                        WriteOwnership(PermissionOwnershipFile, permissionOwnership);
                 });
                 foreach (var (name, group) in groupChanges)
                 {
@@ -656,6 +663,8 @@ namespace DnsServerCore.Auth
                     _managedGroupPaths = groupOwnership;
                 if (userOwnership is not null)
                     _managedUserPaths = userOwnership;
+                if (permissionOwnership is not null)
+                    _managedPermissionPaths = permissionOwnership;
                 foreach (var (section, permission) in permissions)
                     _permissions[section] = permission;
                 if (ldap is not null)
@@ -691,13 +700,15 @@ namespace DnsServerCore.Auth
         }
 
         internal void CheckManifestRestoreOwnership(Stream stream) =>
-            ReadConfigFrom(stream, false, out _, (ldap, groups, users) =>
+            ReadConfigFrom(stream, false, out _, (ldap, groups, users, permissions) =>
             {
                 ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
                 if (_managedGroupPaths.Length > 0)
                     ConfigurationGroups.CheckRestore(this, groups);
                 if (_managedUserPaths.Length > 0)
                     ConfigurationUsers.CheckRestore(this, users);
+                if (_managedPermissionPaths.Length > 0)
+                    ConfigurationPermissions.CheckRestore(this, permissions);
             });
 
         internal ConfigurationLdap.Settings GetManifestLdapSettings() => new(
@@ -732,7 +743,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>> inspect = null)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>> inspect = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -910,14 +921,14 @@ namespace DnsServerCore.Auth
                         ConfigurationLdap.Settings ldap = ReadLdapSettings(bR);
                         if (inspect is not null)
                         {
-                            inspect(ldap, groups, users);
+                            inspect(ldap, groups, users, permissions);
                             return;
                         }
                         SetLdapSettings(ldap);
                     }
                     else if (inspect is not null)
                     {
-                        inspect(GetManifestLdapSettings(), groups, users);
+                        inspect(GetManifestLdapSettings(), groups, users, permissions);
                         return;
                     }
 
@@ -1532,6 +1543,7 @@ namespace DnsServerCore.Auth
 
                 ConfigurationUsers.CheckMembership(_managedUserPaths, user.Username, user.Type);
                 ConfigurationUsers.CheckMembership(_managedUserPaths, newUsername, user.Type);
+                CheckPrincipalGrantChanges(user, newUsername);
                 string oldUsername = user.Username;
                 user.SetUsername(newUsername);
 
@@ -1558,7 +1570,10 @@ namespace DnsServerCore.Auth
         public bool DeleteUser(string username)
         {
             if (GetUser(username) is User current)
+            {
                 ConfigurationUsers.CheckMembership(_managedUserPaths, username, current.Type);
+                CheckPrincipalGrantChanges(current);
+            }
             if (_users.TryRemove(username.ToLowerInvariant(), out User deletedUser))
             {
                 //delete all sessions
@@ -1651,6 +1666,8 @@ namespace DnsServerCore.Auth
 
         public void RenameGroup(Group group, string newGroupName)
         {
+            if (group.Name != newGroupName)
+                CheckPrincipalGrantChanges(group, newGroupName);
             if (group.Name.Equals(newGroupName, StringComparison.OrdinalIgnoreCase))
             {
                 group.Name = newGroupName;
@@ -1688,7 +1705,10 @@ namespace DnsServerCore.Auth
 
                 default:
                     if (_groups.TryGetValue(name, out Group group))
+                    {
                         CheckGroupIdentityChanges(group);
+                        CheckPrincipalGrantChanges(group);
+                    }
                     if (_groups.TryRemove(name, out Group deletedGroup))
                     {
                         //remove all users from deleted group
@@ -1721,6 +1741,24 @@ namespace DnsServerCore.Auth
             }
 
             return null;
+        }
+
+        private void CheckPrincipalGrantChanges(User user, string newName = null) =>
+            CheckPrincipalGrantChanges(false, user.Username, newName, permission => permission.UserPermissions.ContainsKey(user));
+
+        private void CheckPrincipalGrantChanges(Group group, string newName = null) =>
+            CheckPrincipalGrantChanges(true, group.Name, newName, permission => permission.GroupPermissions.ContainsKey(group));
+
+        private void CheckPrincipalGrantChanges(bool group, string name, string newName, Func<Permission, bool> hasGrant)
+        {
+            if (_managedPermissionPaths.Length == 0)
+                return;
+            foreach (Permission permission in _permissions.Values.Where(hasGrant))
+            {
+                ConfigurationPermissions.CheckGrant(_managedPermissionPaths, permission.Section, group, name);
+                if (newName is not null)
+                    ConfigurationPermissions.CheckGrant(_managedPermissionPaths, permission.Section, group, newName);
+            }
         }
 
         internal bool HasStaticSession(User user) =>

@@ -310,6 +310,8 @@ namespace DnsServerCore.Configuration
                     userOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestUsers", out JsonElement users))
                     users.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestPermissionOwnership", out JsonElement permissionOwnership))
+                    permissionOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestPermissions", out JsonElement permissions))
                     permissions.WriteTo(writer);
                 writer.WriteEndArray();
