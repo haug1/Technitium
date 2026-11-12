@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DnsServerCore.Cluster;
 
 namespace DnsServerCore.Configuration
@@ -189,6 +190,37 @@ namespace DnsServerCore.Configuration
 
             ushort Read(string field, ushort value, ushort defaultValue) => section.ValueKind == JsonValueKind.Object && section.TryGetProperty(field, out JsonElement setting)
                 ? setting.ValueKind == JsonValueKind.Null ? defaultValue : setting.GetUInt16() : value;
+        }
+
+        internal static JsonObject ExportTopology(ClusterManager cluster, ISet<string> missingInputs)
+        {
+            ClusterNode self = cluster.GetSelfNode();
+            var bootstrap = new JsonObject { ["role"] = self.Type.ToString() };
+            JsonObject result;
+            if (self.Type == ClusterNodeType.Primary)
+            {
+                result = JsonSerializer.SerializeToNode(Export(cluster.GetManifestOptions())).AsObject();
+            }
+            else
+            {
+                result = new JsonObject();
+                ClusterNode primary = cluster.GetPrimaryNode();
+                bootstrap["primaryUrl"] = primary.Url.AbsoluteUri;
+                if (primary.IPAddresses.Count == 1)
+                    bootstrap["primaryAddress"] = primary.IPAddresses[0].ToString();
+
+                missingInputs.Add(Path + "/bootstrap/username");
+                missingInputs.Add(Path + "/bootstrap/password");
+            }
+
+            result["domain"] = cluster.ClusterDomain;
+            result["bootstrap"] = bootstrap;
+            result["node"] = new JsonObject
+            {
+                ["addresses"] = JsonSerializer.SerializeToNode(self.IPAddresses.Select(address => address.ToString())
+                    .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            };
+            return result;
         }
 
         internal static JsonElement Export(Settings options) => JsonSerializer.SerializeToElement(new

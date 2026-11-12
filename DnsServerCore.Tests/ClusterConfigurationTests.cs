@@ -4,6 +4,7 @@ using System.IO.Compression;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -33,6 +34,16 @@ namespace DnsServerCore.Tests
             JsonElement second = await ReadStateAsync();
             Assert.Equal(originalNode.GetProperty("id").GetInt32(), Assert.Single(second.GetProperty("clusterNodes").EnumerateArray()).GetProperty("id").GetInt32());
             Assert.Equal(120, second.GetProperty("configRefreshIntervalSeconds").GetInt32());
+
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement cluster = export.GetProperty("response").GetProperty("manifest").GetProperty("cluster");
+            Assert.Equal("Primary", cluster.GetProperty("bootstrap").GetProperty("role").GetString());
+            string bootstrapManifest = JsonSerializer.Serialize(new { schemaVersion = 1, cluster });
+            await using var restored = await LoopbackWebService.StartAsync("restored.cluster.test", enableTls: true, startupManifest: bootstrapManifest);
+            JsonElement restoredExport = await restored.CallAsync("settings/config/export", restored.AdminToken);
+            LoopbackWebService.AssertOk(restoredExport);
+            Assert.True(JsonElement.DeepEquals(cluster, restoredExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")));
 
             async Task<JsonElement> ReadStateAsync()
             {
@@ -134,6 +145,33 @@ namespace DnsServerCore.Tests
 
             await secondary.RestartAsync(null, () => File.Delete(passwordFile));
             Assert.Equal(joinedId, await GetSecondaryIdAsync());
+
+            JsonElement exported = await secondary.CallAsync("settings/config/export", secondary.AdminToken);
+            LoopbackWebService.AssertOk(exported);
+            JsonElement response = exported.GetProperty("response");
+            JsonElement cluster = response.GetProperty("manifest").GetProperty("cluster");
+            Assert.Equal("cluster.test", cluster.GetProperty("domain").GetString());
+            JsonElement bootstrap = cluster.GetProperty("bootstrap");
+            Assert.Equal("Secondary", bootstrap.GetProperty("role").GetString());
+            Assert.Equal(primaryUrl, bootstrap.GetProperty("primaryUrl").GetString());
+            Assert.False(bootstrap.TryGetProperty("password", out _));
+            Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/cluster/bootstrap/password"));
+
+            await using var restored = await LoopbackWebService.StartAsync("restored.cluster.test", enableTls: true, adminPassword: primary.AdminPassword);
+            await restored.RestartAsync(null, () =>
+            {
+                var topology = JsonNode.Parse(cluster.GetRawText())!.AsObject();
+                JsonNode join = topology["bootstrap"]!;
+                join["username"] = "admin";
+                join["password"] = new JsonObject { ["file"] = "join-password" };
+                join["ignoreCertificateErrors"] = true;
+                var manifest = new JsonObject { ["schemaVersion"] = 1, ["cluster"] = topology };
+                File.WriteAllText(Path.Combine(restored.ConfigurationDirectory, "join-password"), primary.AdminPassword);
+                File.WriteAllText(Path.Combine(restored.ConfigurationDirectory, "technitium.json"), manifest.ToJsonString());
+            });
+            JsonElement restoredExport = await restored.CallAsync("settings/config/export", restored.AdminToken);
+            LoopbackWebService.AssertOk(restoredExport);
+            Assert.True(JsonElement.DeepEquals(cluster, restoredExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")));
 
             void WriteManifest(string domain)
             {

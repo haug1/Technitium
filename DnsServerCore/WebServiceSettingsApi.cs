@@ -630,10 +630,8 @@ namespace DnsServerCore
                 }
 
                 if (_dnsWebService._clusterManager.ClusterInitialized &&
-                    _dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary &&
                     _dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.View))
-                    manifest["cluster"] = System.Text.Json.Nodes.JsonNode.Parse(
-                        ConfigurationClusterOptions.Export(_dnsWebService._clusterManager.GetManifestOptions()).GetRawText());
+                    manifest["cluster"] = ConfigurationClusterOptions.ExportTopology(_dnsWebService._clusterManager, missingInputs);
 
                 if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
