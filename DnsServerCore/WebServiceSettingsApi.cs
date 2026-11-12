@@ -1025,6 +1025,7 @@ namespace DnsServerCore
                     var groups = ConfigurationGroups.Prepare(manifest, auth);
                     var users = preparedUsers ?? PrepareUsersForSession(manifest, sessionUser, groups);
                     var staticSessions = preparedStaticSessions ?? PrepareStaticSessionsForSession(manifest, sessionUser, users);
+                    ConfigurationStaticSessions.CheckAccountRemovals(auth, users, staticSessions);
                     if (staticSessions is not null)
                         ConfigurationStaticSessions.WriteSnapshot(writer, auth, staticSessions, _configurationRevisionKey);
                     bool declaresGroups = ConfigurationGroups.TryGetDeclaration(manifest, out _);

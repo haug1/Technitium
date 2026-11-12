@@ -331,8 +331,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{path}: The built-in or applying administrator cannot be removed.");
             if (user.Type != UserType.Local)
                 throw new InvalidDataException($"{path}: Only local accounts can be removed through the manifest.");
-            if (auth.HasStaticSession(user) || auth.GetSessions(user).Any(session => session.Type == UserSessionType.ClusterApiToken))
-                throw new InvalidDataException($"{path}: An account with a static or cluster session cannot be removed.");
+            if (auth.HasLegacyStaticSession(user) || auth.GetSessions(user).Any(session => session.Type == UserSessionType.ClusterApiToken))
+                throw new InvalidDataException($"{path}: An account with a legacy static or cluster session cannot be removed.");
         }
 
         private static JsonObject Profile(User user) => new()

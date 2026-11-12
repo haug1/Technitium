@@ -538,6 +538,7 @@ namespace DnsServerCore.Auth
             lock (_saveLock)
             {
                 ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants);
+                ConfigurationStaticSessions.CheckAccountRemovals(this, userChanges, staticSessions);
 
                 Dictionary<string, User> stagedUsers = null;
                 if (userChanges.Count > 0)
@@ -1881,9 +1882,8 @@ namespace DnsServerCore.Auth
             }
         }
 
-        internal bool HasStaticSession(User user) =>
-            _staticSessions?.Values.Any(session => session.User.Equals(user)) == true ||
-            _manifestStaticSessionDefinitions.Values.Any(definition => definition.User == user.Username);
+        internal bool HasLegacyStaticSession(User user) =>
+            _staticSessions?.Values.Any(session => session.User.Equals(user)) == true;
 
         private static bool SessionRemovedByManifest(UserSession session, IReadOnlyDictionary<string, User> stagedUsers) =>
             stagedUsers?.TryGetValue(session.User.Username, out User staged) == true &&

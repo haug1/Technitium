@@ -93,6 +93,20 @@ namespace DnsServerCore.Configuration
             return new Candidate(entries, changes);
         }
 
+        internal static void CheckAccountRemovals(AuthManager auth, IReadOnlyDictionary<string, ConfigurationUsers.Change> users, Candidate candidate)
+        {
+            if (users is null || users.Count == 0)
+                return;
+
+            var definitions = candidate is null ? auth.ManifestStaticSessionDefinitions :
+                candidate.Entries.Select(entry => new KeyValuePair<string, Definition>(entry.Key, entry.Value.Definition));
+            foreach (var (name, definition) in definitions)
+            {
+                if (users.TryGetValue(definition.User, out var user) && user.Remove)
+                    throw new InvalidDataException($"{ConfigurationPlan.AppendPath(Path, name)}/user: The static session still references an account being removed.");
+            }
+        }
+
         internal static void WriteSnapshot(Utf8JsonWriter writer, AuthManager auth, Candidate candidate, byte[] key)
         {
             writer.WriteStartObject("manifestStaticSessions");

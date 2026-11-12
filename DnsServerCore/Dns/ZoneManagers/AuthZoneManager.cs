@@ -802,6 +802,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             var groupChanges = ConfigurationGroups.Prepare(manifest, auth);
             var userChanges = preparedUsers ?? ConfigurationUsers.Prepare(manifest, auth, groupChanges, actor: creator);
             var staticSessions = preparedSessions ?? ConfigurationStaticSessions.Prepare(manifest, auth, userChanges);
+            ConfigurationStaticSessions.CheckAccountRemovals(auth, userChanges, staticSessions);
             if (staticSessions?.Changes.Count == 0)
                 staticSessions = null;
             var grants = ConfigurationPermissions.Prepare(manifest, auth, groupChanges, userChanges, creator);

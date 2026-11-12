@@ -3343,6 +3343,50 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestCanRemoveAStaticSessionAndItsAccountTogether()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_REMOVABLE_STATIC_SESSION";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            string token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            using var user = new FormUrlEncodedContent([new("user", "automation"), new("pass", "fixture-automation-password")]);
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/create", server.AdminToken, user));
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, token);
+                const string add = """
+                    {"schemaVersion":1,"auth":{
+                        "staticSessions":{"job":{"user":"automation","token":{"environment":"TECHNITIUM_TEST_REMOVABLE_STATIC_SESSION"}}},
+                        "permissions":{"Settings":{"users":{"automation":["View"]}}}
+                    }}
+                    """;
+                string revision = (await PreviewAsync(server, add)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, add, revision));
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/get", token));
+
+                const string removeAccountOnly = """{"schemaVersion":1,"auth":{"users":{"automation":null}}}""";
+                using var content = new StringContent(removeAccountOnly, Encoding.UTF8, "application/json");
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/auth/staticSessions/job/user", rejected.GetProperty("errorMessage").GetString());
+
+                const string remove = """
+                    {"schemaVersion":1,"auth":{"users":{"automation":null},"staticSessions":{"job":null}}}
+                    """;
+                revision = (await PreviewAsync(server, remove)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, remove, revision));
+                Assert.Equal("invalid-token", (await server.CallAsync("settings/get", token)).GetProperty("status").GetString());
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, remove)).GetProperty("changes").EnumerateArray());
+                Assert.Equal("error", (await server.CallAsync("admin/users/get?user=automation", server.AdminToken)).GetProperty("status").GetString());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task ManifestStaticSessionPersistsReferencesAndRevokesRotatedTokens()
         {
             await using var server = await LoopbackWebService.StartAsync();
