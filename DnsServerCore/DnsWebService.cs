@@ -61,6 +61,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary;
 using TechnitiumLibrary.IO;
+using TechnitiumLibrary.Net.Proxy;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ClientConnection;
@@ -3323,7 +3324,10 @@ namespace DnsServerCore
                 //init cluster manager and load config file
                 _clusterManager = new ClusterManager(this);
                 if (startupManifest is not null)
+                {
                     ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
+                    ConfigurationPlan.ValidateForwarding(startupManifest, _dnsServer.Proxy?.Type ?? NetProxyType.None);
+                }
 
 
                 //cert may have changed so update cluster certs when loading

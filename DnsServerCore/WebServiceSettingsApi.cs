@@ -458,6 +458,16 @@ namespace DnsServerCore
                     jsonWriter.WriteEndArray();
                 }
 
+                jsonWriter.WriteStartArray("configuredForwarders");
+                foreach (NameServerAddress forwarder in _dnsWebService._dnsServer.Forwarders ?? [])
+                {
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WriteString("address", forwarder.OriginalAddress);
+                    jsonWriter.WriteString("transport", forwarder.Protocol.ToString());
+                    jsonWriter.WriteEndObject();
+                }
+                jsonWriter.WriteEndArray();
+
                 jsonWriter.WriteString("forwarderProtocol", forwarderProtocol.ToString());
                 jsonWriter.WriteBoolean("concurrentForwarding", _dnsWebService._dnsServer.ConcurrentForwarding);
 
@@ -593,6 +603,7 @@ namespace DnsServerCore
                     ConfigurationPlan.CheckApplySupport(manifest);
                     CheckApplyRevision(manifest, expected);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
+                    ConfigurationPlan.ValidateForwarding(manifest, _dnsWebService._dnsServer.Proxy?.Type ?? NetProxyType.None);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners);
 
@@ -643,6 +654,7 @@ namespace DnsServerCore
                     {
                         CheckApplyRevision(manifest, expected);
                         ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
+                        ConfigurationPlan.ValidateForwarding(manifest, _dnsWebService._dnsServer.Proxy?.Type ?? NetProxyType.None);
                         _dnsWebService.ValidateManifestWebListeners(listeners);
                         await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners);
                     });
@@ -997,6 +1009,27 @@ namespace DnsServerCore
                     request.TryGetQueryOrFormEnum("blockingType", out DnsServerBlockingType blockingType) ? blockingType : null,
                     request.TryGetQueryOrForm("blockingAnswerTtl", ZoneFile.ParseTtl, out uint blockingAnswerTtl) ? blockingAnswerTtl : null,
                     blockingAddresses));
+
+                bool hasProxyType = request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType);
+                NetProxyType effectiveProxyType = hasProxyType ? proxyType : _dnsWebService._dnsServer.Proxy?.Type ?? NetProxyType.None;
+                bool hasForwarders = request.TryQueryOrFormArray("forwarders", NameServerAddress.Parse, out NameServerAddress[] forwarders);
+                DnsTransportProtocol forwarderProtocol = DnsTransportProtocol.Udp;
+                if (hasForwarders && forwarders.Length > 0)
+                {
+                    forwarderProtocol = request.GetQueryOrFormEnum("forwarderProtocol", DnsTransportProtocol.Udp);
+                    if (forwarderProtocol == DnsTransportProtocol.HttpsJson)
+                        forwarderProtocol = DnsTransportProtocol.Https;
+                    for (int i = 0; i < forwarders.Length; i++)
+                        forwarders[i] = forwarders[i].Clone(forwarderProtocol);
+                }
+
+                DnsServer.ValidateForwardingServers(hasForwarders ? forwarders : hasProxyType ? _dnsWebService._dnsServer.Forwarders : null, effectiveProxyType);
+                DnsServer.ForwardingPolicy forwardingPolicy = _dnsWebService._dnsServer.CheckManifestForwarding(new DnsServer.ForwardingPolicy(
+                    hasForwarders ? forwarders : null,
+                    request.TryGetQueryOrForm("concurrentForwarding", bool.Parse, out bool concurrentForwarding) ? concurrentForwarding : null,
+                    request.TryGetQueryOrForm("forwarderRetries", int.Parse, out int forwarderRetries) ? forwarderRetries : null,
+                    request.TryGetQueryOrForm("forwarderTimeout", int.Parse, out int forwarderTimeout) ? forwarderTimeout : null,
+                    request.TryGetQueryOrForm("forwarderConcurrency", int.Parse, out int forwarderConcurrency) ? forwarderConcurrency : null));
 
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
@@ -1817,7 +1850,7 @@ namespace DnsServerCore
                         #region proxy & forwarders
 
                         //proxy & forwarders
-                        if (request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType))
+                        if (hasProxyType)
                         {
                             if (proxyType == NetProxyType.None)
                             {
@@ -1861,79 +1894,21 @@ namespace DnsServerCore
                             clusterParameters.Add("proxyType", proxyType.ToString());
                         }
 
-                        if (request.TryQueryOrFormArray("forwarders", NameServerAddress.Parse, out NameServerAddress[] forwarders))
+                        _dnsWebService._dnsServer.SetForwardingPolicy(forwardingPolicy);
+                        if (forwardingPolicy.Servers is not null)
                         {
-                            if (forwarders.Length == 0)
-                            {
-                                _dnsWebService._dnsServer.Forwarders = null;
-                            }
-                            else
-                            {
-                                DnsTransportProtocol forwarderProtocol = request.GetQueryOrFormEnum("forwarderProtocol", DnsTransportProtocol.Udp);
-
-                                switch (forwarderProtocol)
-                                {
-                                    case DnsTransportProtocol.Udp:
-                                        if (proxyType == NetProxyType.Http)
-                                            throw new DnsWebServiceException("HTTP proxy server can transport only DNS-over-TCP, DNS-over-TLS, or DNS-over-HTTPS forwarder protocols. Use SOCKS5 proxy server for DNS-over-UDP or DNS-over-QUIC forwarder protocols.");
-
-                                        break;
-
-                                    case DnsTransportProtocol.HttpsJson:
-                                        forwarderProtocol = DnsTransportProtocol.Https;
-                                        break;
-
-                                    case DnsTransportProtocol.Quic:
-                                        DnsServer.ValidateQuicSupport();
-
-                                        if (proxyType == NetProxyType.Http)
-                                            throw new DnsWebServiceException("HTTP proxy server can transport only DNS-over-TCP, DNS-over-TLS, or DNS-over-HTTPS forwarder protocols. Use SOCKS5 proxy server for DNS-over-UDP or DNS-over-QUIC forwarder protocols.");
-
-                                        break;
-                                }
-
-                                for (int i = 0; i < forwarders.Length; i++)
-                                {
-                                    if (forwarders[i].Protocol != forwarderProtocol)
-                                        forwarders[i] = forwarders[i].Clone(forwarderProtocol);
-                                }
-
-                                if (!_dnsWebService._dnsServer.Forwarders.ListEquals(forwarders))
-                                    _dnsWebService._dnsServer.Forwarders = forwarders;
-
+                            if (forwardingPolicy.Servers.Count > 0)
                                 clusterParameters.Add("forwarderProtocol", forwarderProtocol.ToString());
-                            }
-
-                            clusterParameters.Add("forwarders", forwarders.Join());
+                            clusterParameters.Add("forwarders", forwardingPolicy.Servers.Join());
                         }
-
-                        if (request.TryGetQueryOrForm("concurrentForwarding", bool.Parse, out bool concurrentForwarding))
-                        {
-                            _dnsWebService._dnsServer.ConcurrentForwarding = concurrentForwarding;
-
-                            clusterParameters.Add("concurrentForwarding", concurrentForwarding.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("forwarderRetries", int.Parse, out int forwarderRetries))
-                        {
-                            _dnsWebService._dnsServer.ForwarderRetries = forwarderRetries;
-
-                            clusterParameters.Add("forwarderRetries", forwarderRetries.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("forwarderTimeout", int.Parse, out int forwarderTimeout))
-                        {
-                            _dnsWebService._dnsServer.ForwarderTimeout = forwarderTimeout;
-
-                            clusterParameters.Add("forwarderTimeout", forwarderTimeout.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("forwarderConcurrency", int.Parse, out int forwarderConcurrency))
-                        {
-                            _dnsWebService._dnsServer.ForwarderConcurrency = forwarderConcurrency;
-
-                            clusterParameters.Add("forwarderConcurrency", forwarderConcurrency.ToString());
-                        }
+                        if (forwardingPolicy.Concurrent.HasValue)
+                            clusterParameters.Add("concurrentForwarding", forwardingPolicy.Concurrent.Value.ToString());
+                        if (forwardingPolicy.Retries.HasValue)
+                            clusterParameters.Add("forwarderRetries", forwardingPolicy.Retries.Value.ToString());
+                        if (forwardingPolicy.Timeout.HasValue)
+                            clusterParameters.Add("forwarderTimeout", forwardingPolicy.Timeout.Value.ToString());
+                        if (forwardingPolicy.Concurrency.HasValue)
+                            clusterParameters.Add("forwarderConcurrency", forwardingPolicy.Concurrency.Value.ToString());
 
                         #endregion
 

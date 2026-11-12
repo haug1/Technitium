@@ -185,7 +185,12 @@ namespace DnsServerCore.Dns
             BlockingBypass = 1UL << 54,
             BlockingResponseType = 1UL << 55,
             BlockingAnswerTtl = 1UL << 56,
-            BlockingCustomAddresses = 1UL << 57
+            BlockingCustomAddresses = 1UL << 57,
+            ForwardingServers = 1UL << 58,
+            ForwardingConcurrent = 1UL << 59,
+            ForwardingRetries = 1UL << 60,
+            ForwardingTimeout = 1UL << 61,
+            ForwardingConcurrency = 1UL << 62
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -214,6 +219,9 @@ namespace DnsServerCore.Dns
 
         internal readonly record struct BlockingPolicy(bool? Enabled, bool? AllowTxtReport, IReadOnlyCollection<NetworkAddress> BypassNetworks,
             DnsServerBlockingType? ResponseType, uint? AnswerTtl, IPAddress[] CustomAddresses);
+
+        internal readonly record struct ForwardingPolicy(IReadOnlyList<NameServerAddress> Servers, bool? Concurrent,
+            int? Retries, int? Timeout, int? Concurrency);
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -725,14 +733,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -852,9 +860,13 @@ namespace DnsServerCore.Dns
             ManagedDnsSettings.BlockingBypass | ManagedDnsSettings.BlockingResponseType | ManagedDnsSettings.BlockingAnswerTtl | ManagedDnsSettings.BlockingCustomAddresses;
         internal bool HasManagedBlockingPolicy => (_managedDnsSettings & BlockingOwnership) != 0;
 
+        private const ManagedDnsSettings ForwardingOwnership = ManagedDnsSettings.ForwardingServers | ManagedDnsSettings.ForwardingConcurrent |
+            ManagedDnsSettings.ForwardingRetries | ManagedDnsSettings.ForwardingTimeout | ManagedDnsSettings.ForwardingConcurrency;
+        internal bool HasManagedForwardingPolicy => (_managedDnsSettings & ForwardingOwnership) != 0;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership | BlockingOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership | BlockingOwnership | ForwardingOwnership)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -914,6 +926,16 @@ namespace DnsServerCore.Dns
                 if (_managedDnsSettings.HasFlag(flag))
                     yield return "/dns/blocking/" + path;
             }
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers))
+                yield return "/dns/forwarding/servers";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrent))
+                yield return "/dns/forwarding/concurrent";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingRetries))
+                yield return "/dns/forwarding/retries";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingTimeout))
+                yield return "/dns/forwarding/timeoutMs";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrency))
+                yield return "/dns/forwarding/concurrency";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1380,6 +1402,81 @@ namespace DnsServerCore.Dns
                 .Select(address => new DnsARecordData(address)).ToArray();
             _customBlockingAAAARecords = addresses.Where(address => address.AddressFamily == AddressFamily.InterNetworkV6)
                 .Select(address => new DnsAAAARecordData(address)).ToArray();
+        }
+
+        private bool HaveSameForwarders(IReadOnlyList<NameServerAddress> servers)
+        {
+            return (_forwarders ?? []).Select(ForwarderIdentity).SequenceEqual(servers.Select(ForwarderIdentity));
+
+            static (DnsTransportProtocol, string) ForwarderIdentity(NameServerAddress server)
+            {
+                return (server.Protocol, NameServerAddress.Parse(server.OriginalAddress, server.Protocol).ToString());
+            }
+        }
+
+        internal static void ValidateForwardingServers(IReadOnlyList<NameServerAddress> servers, NetProxyType proxyType)
+        {
+            if (servers is null)
+                return;
+            if (servers.Count > byte.MaxValue)
+                throw new InvalidDataException("/dns/forwarding/servers: A maximum of 255 forwarders is allowed.");
+            if (servers.Any(server => Encoding.UTF8.GetByteCount(server.OriginalAddress) > byte.MaxValue))
+                throw new InvalidDataException("/dns/forwarding/servers: Maximum address length is 255 UTF-8 bytes.");
+            if (proxyType == NetProxyType.Http && servers.Any(server => server.Protocol is DnsTransportProtocol.Udp or DnsTransportProtocol.Quic))
+                throw new InvalidDataException("/dns/forwarding/servers: An HTTP proxy requires TCP, TLS, or HTTPS forwarders.");
+            if (servers.Any(server => server.Protocol == DnsTransportProtocol.Quic))
+            {
+                try
+                {
+                    ValidateQuicSupport();
+                }
+                catch (DnsServerException ex)
+                {
+                    throw new InvalidDataException("/dns/forwarding/servers: " + ex.Message);
+                }
+            }
+        }
+
+        internal ForwardingPolicy CheckManifestForwarding(ForwardingPolicy policy, bool validateRanges = true)
+        {
+            if (validateRanges)
+            {
+                if (policy.Retries is < 1 or > 10)
+                    throw new DnsWebServiceException("/dns/forwarding/retries: Valid range is from 1 to 10.");
+                if (policy.Timeout is < 1000 or > 10000)
+                    throw new DnsWebServiceException("/dns/forwarding/timeoutMs: Valid range is from 1000 to 10000.");
+                if (policy.Concurrency is < 1 or > 10)
+                    throw new DnsWebServiceException("/dns/forwarding/concurrency: Valid range is from 1 to 10.");
+            }
+
+            bool serversOwned = _managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers);
+            if (serversOwned && policy.Servers is not null && !HaveSameForwarders(policy.Servers))
+                throw new DnsWebServiceException("/dns/forwarding/servers: Setting is managed by the configuration manifest.");
+
+            return new ForwardingPolicy(serversOwned ? null : policy.Servers,
+                Check(ManagedDnsSettings.ForwardingConcurrent, policy.Concurrent, _concurrentForwarding, "concurrent"),
+                Check(ManagedDnsSettings.ForwardingRetries, policy.Retries, _forwarderRetries, "retries"),
+                Check(ManagedDnsSettings.ForwardingTimeout, policy.Timeout, _forwarderTimeout, "timeoutMs"),
+                Check(ManagedDnsSettings.ForwardingConcurrency, policy.Concurrency, _forwarderConcurrency, "concurrency"));
+
+            T? Check<T>(ManagedDnsSettings flag, T? candidate, T current, string path) where T : struct
+            {
+                if (!_managedDnsSettings.HasFlag(flag))
+                    return candidate;
+                if (candidate.HasValue && !candidate.Value.Equals(current))
+                    throw new DnsWebServiceException($"/dns/forwarding/{path}: Setting is managed by the configuration manifest.");
+                return null;
+            }
+        }
+
+        internal void SetForwardingPolicy(ForwardingPolicy policy)
+        {
+            if (policy.Servers is not null && !HaveSameForwarders(policy.Servers))
+                _forwarders = policy.Servers.Count == 0 ? null : policy.Servers;
+            _concurrentForwarding = policy.Concurrent ?? _concurrentForwarding;
+            _forwarderRetries = policy.Retries ?? _forwarderRetries;
+            _forwarderTimeout = policy.Timeout ?? _forwarderTimeout;
+            _forwarderConcurrency = policy.Concurrency ?? _forwarderConcurrency;
         }
 
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
@@ -2057,42 +2154,39 @@ namespace DnsServerCore.Dns
                 _proxy = null;
             }
 
+            var forwarders = new NameServerAddress[bR.ReadByte()];
+            for (int i = 0; i < forwarders.Length; i++)
             {
-                int count = bR.ReadByte();
-                if (count > 0)
-                {
-                    NameServerAddress[] forwarders = new NameServerAddress[count];
-
-                    for (int i = 0; i < count; i++)
-                    {
-                        forwarders[i] = new NameServerAddress(bR);
-
-                        if (forwarders[i].Protocol == DnsTransportProtocol.HttpsJson)
-                            forwarders[i] = forwarders[i].Clone(DnsTransportProtocol.Https);
-                    }
-
-                    if (apply)
-                        _forwarders = forwarders;
-                }
-                else
-                {
-                    if (apply)
-                        _forwarders = null;
-                }
+                forwarders[i] = new NameServerAddress(bR);
+                if (forwarders[i].Protocol == DnsTransportProtocol.HttpsJson)
+                    forwarders[i] = forwarders[i].Clone(DnsTransportProtocol.Https);
             }
 
             bool concurrentForwarding = bR.ReadBoolean();
-            if (apply)
-                _concurrentForwarding = concurrentForwarding;
             int forwarderRetries = bR.ReadInt32();
-            if (apply)
-                _forwarderRetries = forwarderRetries;
             int forwarderTimeout = bR.ReadInt32();
-            if (apply)
-                _forwarderTimeout = forwarderTimeout;
             int forwarderConcurrency = bR.ReadInt32();
+
             if (apply)
-                _forwarderConcurrency = forwarderConcurrency;
+            {
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers))
+                    _forwarders = forwarders.Length == 0 ? null : forwarders;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrent))
+                    _concurrentForwarding = concurrentForwarding;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingRetries))
+                    _forwarderRetries = forwarderRetries;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingTimeout))
+                    _forwarderTimeout = forwarderTimeout;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrency))
+                    _forwarderConcurrency = forwarderConcurrency;
+            }
+            else if (HasManagedForwardingPolicy)
+            {
+                CheckManifestForwarding(new ForwardingPolicy(forwarders, concurrentForwarding, forwarderRetries,
+                    forwarderTimeout, forwarderConcurrency), validateRanges: false);
+                if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers))
+                    ValidateForwardingServers(forwarders, proxyType);
+            }
 
             //logging
             bool ignoreResolverLogs = bR.ReadBoolean(); //ignore resolver logs
@@ -2148,7 +2242,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2392,22 +2486,15 @@ namespace DnsServerCore.Dns
                 }
             }
 
-            if (_forwarders == null)
-            {
-                bW.Write((byte)0);
-            }
-            else
-            {
-                bW.Write(Convert.ToByte(_forwarders.Count));
+            IReadOnlyList<NameServerAddress> forwarders = forwarding.Servers ?? _forwarders ?? [];
+            bW.Write(Convert.ToByte(forwarders.Count));
+            foreach (NameServerAddress forwarder in forwarders)
+                forwarder.WriteTo(bW);
 
-                foreach (NameServerAddress forwarder in _forwarders)
-                    forwarder.WriteTo(bW);
-            }
-
-            bW.Write(_concurrentForwarding);
-            bW.Write(_forwarderRetries);
-            bW.Write(_forwarderTimeout);
-            bW.Write(_forwarderConcurrency);
+            bW.Write(forwarding.Concurrent ?? _concurrentForwarding);
+            bW.Write(forwarding.Retries ?? _forwarderRetries);
+            bW.Write(forwarding.Timeout ?? _forwarderTimeout);
+            bW.Write(forwarding.Concurrency ?? _forwarderConcurrency);
 
             //logging
             bW.Write(dnsLogging.IgnoreResolverLogs ?? (_resolverLog is null));
@@ -7911,7 +7998,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8064,6 +8151,23 @@ namespace DnsServerCore.Dns
                     if (blocking.CustomAddresses is not null)
                         ownership |= ManagedDnsSettings.BlockingCustomAddresses;
 
+                    ValidateForwardingServers(forwarding.Servers, _proxy?.Type ?? NetProxyType.None);
+                    if (forwarding.Servers is not null)
+                        ownership |= ManagedDnsSettings.ForwardingServers;
+                    if (forwarding.Concurrent.HasValue)
+                        ownership |= ManagedDnsSettings.ForwardingConcurrent;
+                    if (forwarding.Retries.HasValue)
+                        ownership |= ManagedDnsSettings.ForwardingRetries;
+                    if (forwarding.Timeout.HasValue)
+                        ownership |= ManagedDnsSettings.ForwardingTimeout;
+                    if (forwarding.Concurrency.HasValue)
+                        ownership |= ManagedDnsSettings.ForwardingConcurrency;
+
+                    bool forwardingChanged = (forwarding.Servers is not null && !HaveSameForwarders(forwarding.Servers)) ||
+                        (forwarding.Concurrent.HasValue && forwarding.Concurrent != _concurrentForwarding) ||
+                        (forwarding.Retries.HasValue && forwarding.Retries != _forwarderRetries) ||
+                        (forwarding.Timeout.HasValue && forwarding.Timeout != _forwarderTimeout) ||
+                        (forwarding.Concurrency.HasValue && forwarding.Concurrency != _forwarderConcurrency);
                     bool blockingChanged = (blocking.Enabled.HasValue && blocking.Enabled != _enableBlocking) ||
                         (blocking.AllowTxtReport.HasValue && blocking.AllowTxtReport != _allowTxtBlockingReport) ||
                         (blocking.BypassNetworks is not null && !HaveSameNetworks(blocking.BypassNetworks, _blockingBypassList)) ||
@@ -8120,7 +8224,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !forwardingChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8134,7 +8238,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding));
                         _pendingSave = false;
                     }
                     catch
@@ -8152,6 +8256,7 @@ namespace DnsServerCore.Dns
                     SetDnsLoggingSettings(dnsLogging);
                     SetCachePolicy(cache);
                     SetBlockingPolicy(blocking, cancelPause: false);
+                    SetForwardingPolicy(forwarding);
                     if (recursion.NetworkAcl is not null)
                         RecursionNetworkACL = recursion.NetworkAcl;
                     if (recursion.Mode.HasValue)

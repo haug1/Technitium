@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
+using TechnitiumLibrary.Net.Proxy;
 
 namespace DnsServerCore.Configuration
 {
@@ -36,6 +37,7 @@ namespace DnsServerCore.Configuration
         private const string DnsEndpointsPath = "/dns/localEndpoints";
         private const string Ipv4SourcePath = "/dns/sourceNetworks/ipv4";
         private const string Ipv6SourcePath = "/dns/sourceNetworks/ipv6";
+        private const string ForwardingServersPath = "/dns/forwarding/servers";
         private const string ExcludedPortsPath = "/dns/udpSocketPool/excludedPorts";
         private const string WebAddressesPath = "/web/localAddresses";
 
@@ -90,6 +92,11 @@ namespace DnsServerCore.Configuration
             ["/dns/blocking/responseType"] = Field("blockingType", nameof(DnsServerBlockingType.NxDomain), canApply: true),
             ["/dns/blocking/answerTtl"] = Field("blockingAnswerTtl", 30u, canApply: true),
             ["/dns/blocking/customAddresses"] = Field("customBlockingAddresses", Array.Empty<string>(), canApply: true),
+            [ForwardingServersPath] = Field("configuredForwarders", Array.Empty<object>(), canApply: true),
+            ["/dns/forwarding/concurrent"] = Field("concurrentForwarding", true, canApply: true),
+            ["/dns/forwarding/retries"] = Field("forwarderRetries", 3, canApply: true),
+            ["/dns/forwarding/timeoutMs"] = Field("forwarderTimeout", 2000, canApply: true),
+            ["/dns/forwarding/concurrency"] = Field("forwarderConcurrency", 2, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -167,6 +174,8 @@ namespace DnsServerCore.Configuration
                     GetCurrentSetting(currentSettings, path, setting).WriteTo(writer);
                 }
                 writer.WriteEndObject();
+                if (currentSettings.TryGetProperty("proxy", out JsonElement proxy) && proxy.ValueKind == JsonValueKind.Object)
+                    proxy.GetProperty("type").WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -195,7 +204,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -307,6 +316,34 @@ namespace DnsServerCore.Configuration
             int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
                 ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
             return new DnsServer.StatisticsSettings(inMemory, retention);
+        }
+
+        internal static void ValidateForwarding(ConfigurationManifest manifest, NetProxyType proxyType)
+        {
+            DnsServer.ValidateForwardingServers(GetForwardingPolicy(manifest).Servers, proxyType);
+        }
+
+        private static DnsServer.ForwardingPolicy GetForwardingPolicy(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("forwarding", out JsonElement forwarding))
+                return default;
+
+            return new DnsServer.ForwardingPolicy(forwarding.TryGetProperty("servers", out JsonElement servers)
+                ? ConfigurationManifest.ReadForwardingServers(servers) : null,
+                Read("concurrent")?.GetBoolean(), ReadInt("retries"), ReadInt("timeoutMs"), ReadInt("concurrency"));
+
+            JsonElement? Read(string field)
+            {
+                if (!forwarding.TryGetProperty(field, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/forwarding/" + field].Default : value;
+            }
+
+            int? ReadInt(string field)
+            {
+                JsonElement? value = Read(field);
+                return value.HasValue ? decimal.ToInt32(value.Value.GetDecimal()) : null;
+            }
         }
 
         private static DnsServer.BlockingPolicy GetBlockingPolicy(ConfigurationManifest manifest)
@@ -493,6 +530,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
+            if (GetForwardingPolicy(manifest) != default)
+                throw new InvalidDataException("/dns/forwarding: Applying forwarding policy to a cluster is not implemented.");
             if (GetBlockingPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/blocking: Applying blocking policy to a cluster is not implemented.");
             if (GetRecursionPolicy(manifest) != default)
@@ -598,6 +637,9 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 JsonElement value = GetCurrentSetting(currentSettings, path, setting);
+                if (path == ForwardingServersPath && ConfigurationManifest.ReadForwardingServers(value).Any(server =>
+                    server.DoHEndPoint is Uri uri && (uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0)))
+                    continue;
                 if (path == WebAddressesPath)
                     value = JsonSerializer.SerializeToElement(ReadWebAddresses(value).Select(address => address.ToString()).ToArray());
 
@@ -882,6 +924,15 @@ namespace DnsServerCore.Configuration
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
                     }
+                    else if (path == ForwardingServersPath)
+                    {
+                        NameServerAddress[] servers = ConfigurationManifest.ReadForwardingServers(desired);
+                        NetProxyType proxyType = currentSettings.TryGetProperty("proxy", out JsonElement proxy) && proxy.ValueKind == JsonValueKind.Object
+                            ? Enum.Parse<NetProxyType>(proxy.GetProperty("type").GetString()) : NetProxyType.None;
+                        DnsServer.ValidateForwardingServers(servers, proxyType);
+                        candidate = SerializeForwardingServers(servers);
+                        current = SerializeForwardingServers(ConfigurationManifest.ReadForwardingServers(current));
+                    }
                     else if (path == "/dns/blocking/customAddresses")
                     {
                         candidate = JsonSerializer.SerializeToElement(ReadBlockingAddresses(desired).Select(address => address.ToString()));
@@ -962,6 +1013,11 @@ namespace DnsServerCore.Configuration
             }
 
             throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Planning for this setting is not implemented.");
+        }
+
+        private static JsonElement SerializeForwardingServers(IEnumerable<NameServerAddress> servers)
+        {
+            return JsonSerializer.SerializeToElement(servers.Select(server => new { address = server.ToString(), transport = server.Protocol.ToString() }));
         }
 
         private static IPAddress[] ReadWebAddresses(JsonElement value)

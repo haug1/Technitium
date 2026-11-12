@@ -466,6 +466,72 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DeclarativeForwardingPersistsTransportsAndResolvesThroughTheUpstream()
+        {
+            await using var upstream = new LoopbackDnsServer();
+            upstream.AddPrimaryZone("fixture.net", "www.fixture.net", IPAddress.Parse("192.0.2.42"));
+            await upstream.StartAsync();
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?recursion=AllowOnlyForPrivateNetworks&dnssecValidation=false", server.AdminToken));
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            string manifest = $$"""
+                {"schemaVersion":1,"dns":{"forwarding":{"servers":[{"address":"{{upstream.EndPoint}}","transport":"Tcp"},
+                    {"address":"{{upstream.EndPoint}}","transport":"Udp"}],"concurrent":false,"retries":1,"timeoutMs":1200,"concurrency":1 } } }
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(5, preview.GetProperty("changes").GetArrayLength());
+            Assert.DoesNotContain(upstream.EndPoint.ToString(), preview.GetRawText());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(5, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            JsonArray exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["forwarding"]!["servers"]!.AsArray();
+            Assert.Equal("Tcp", exported[0]!["transport"]!.GetValue<string>());
+            Assert.Equal("Udp", exported[1]!["transport"]!.GetValue<string>());
+            DnsResourceRecord answer = Assert.Single((await server.QueryAsync("www.fixture.net", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
+
+            JsonElement rejected = await server.CallAsync("settings/set?forwarders=192.0.2.53", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/forwarding/servers", rejected.GetProperty("errorMessage").GetString());
+
+            JsonElement proxy = await server.CallAsync("settings/set?proxyType=Http&proxyAddress=localhost&proxyPort=8080", server.AdminToken);
+            Assert.Equal("error", proxy.GetProperty("status").GetString());
+            Assert.Contains("/dns/forwarding/servers", proxy.GetProperty("errorMessage").GetString());
+            Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("proxy").ValueKind);
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/forwarding/servers", restored.GetProperty("errorMessage").GetString());
+
+        }
+
+        [Fact]
+        public async Task ForwardingExportOmitsDohQueryCredentials()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?forwarderProtocol=Https&forwarders=" + Uri.EscapeDataString("https://fixture.net/dns-query?token=fixture-secret"),
+                server.AdminToken));
+
+            JsonObject exported = ConfigurationPlan.Export(await server.GetSettingsAsync(), includePreviewOnly: false);
+
+            Assert.Null(exported["dns"]!["forwarding"]!["servers"]);
+            Assert.DoesNotContain("fixture-secret", exported.ToJsonString());
+        }
+
+        [Fact]
         public async Task BlockingPolicyAppliesAndExportsConfiguredStateDuringTemporaryPause()
         {
             await using var upstream = new LoopbackDnsServer();

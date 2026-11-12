@@ -124,6 +124,8 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException("/dns/cache/prefetch/trigger: Enabled prefetch requires a positive trigger.");
                 if (dns.TryGetProperty("blocking", out JsonElement blocking) && blocking.TryGetProperty("bypassNetworks", out JsonElement bypass))
                     ReadNetworks(bypass, "/dns/blocking/bypassNetworks");
+                if (dns.TryGetProperty("forwarding", out JsonElement forwarding) && forwarding.TryGetProperty("servers", out JsonElement forwarders))
+                    ReadForwardingServers(forwarders);
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
@@ -280,6 +282,34 @@ namespace DnsServerCore.Configuration
             {
                 throw new InvalidDataException("/blocklists/sources: Invalid source URL or comment.");
             }
+        }
+
+        internal static NameServerAddress[] ReadForwardingServers(JsonElement value)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return [];
+
+            var servers = new NameServerAddress[value.GetArrayLength()];
+            for (int i = 0; i < servers.Length; i++)
+            {
+                JsonElement entry = value[i];
+                string address = entry.GetProperty("address").GetString();
+                if (Encoding.UTF8.GetByteCount(address.Trim()) > byte.MaxValue)
+                    throw new InvalidDataException($"/dns/forwarding/servers/{i}/address: Maximum address length is 255 UTF-8 bytes.");
+                try
+                {
+                    servers[i] = entry.TryGetProperty("transport", out JsonElement transport)
+                        ? NameServerAddress.Parse(address, Enum.Parse<DnsTransportProtocol>(transport.GetString()))
+                        : NameServerAddress.Parse(address);
+                }
+                catch (Exception ex) when (ex is ArgumentException or FormatException or DnsClientException or NotSupportedException)
+                {
+                    throw new InvalidDataException($"/dns/forwarding/servers/{i}/address: Invalid forwarder address for the transport.");
+                }
+                if (servers[i].Protocol is not (DnsTransportProtocol.Udp or DnsTransportProtocol.Tcp or DnsTransportProtocol.Tls or DnsTransportProtocol.Https or DnsTransportProtocol.Quic))
+                    throw new InvalidDataException($"/dns/forwarding/servers/{i}/transport: Unsupported forwarder transport.");
+            }
+            return servers;
         }
 
         internal static NetworkAddress[] ReadNetworks(JsonElement value, string path, AddressFamily? family = null)
