@@ -904,15 +904,9 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/rateLimits: Applying query-rate limits to a cluster is not implemented.");
             if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy) && proxy.EnumerateObject().Any())
                 throw new InvalidDataException("/dns/proxy: Applying outbound proxy settings to a cluster is not implemented.");
-            if (GetForwardingPolicy(manifest) != default)
-                throw new InvalidDataException("/dns/forwarding: Applying forwarding policy to a cluster is not implemented.");
-            if (GetBlockingPolicy(manifest) != default)
-                throw new InvalidDataException("/dns/blocking: Applying blocking policy to a cluster is not implemented.");
-            if (GetRecursionPolicy(manifest) != default)
-                throw new InvalidDataException("/dns/recursion: Applying recursion policy to a cluster is not implemented.");
         }
 
-        internal static int[] CheckClusterDnsPolicySupport(ConfigurationManifest manifest, ClusterManager cluster)
+        internal static (int[] Peers, bool RequiresResolverPolicy)? CheckClusterDnsPolicySupport(ConfigurationManifest manifest, ClusterManager cluster)
         {
             if (!cluster.ClusterInitialized)
                 return null;
@@ -921,15 +915,23 @@ namespace DnsServerCore.Configuration
             var resolver = GetResolverSettings(manifest);
             var subnet = GetClientSubnetSettings(manifest);
             bool? autoUpdate = GetAppAutoUpdate(manifest);
+            var recursion = GetRecursionPolicy(manifest);
+            var blocking = GetBlockingPolicy(manifest);
+            var forwarding = GetForwardingPolicy(manifest);
             if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
             {
-                if (defaults.HasValues || resolver.HasValues || subnet != default || autoUpdate.HasValue)
+                if (defaults.HasValues || resolver.HasValues || subnet != default || autoUpdate.HasValue ||
+                    recursion != default || blocking != default || forwarding != default)
                     throw new InvalidDataException("/dns: Only the Primary can apply cluster DNS policy.");
                 return null;
             }
 
-            return cluster.DnsWebService.DnsServer.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet)
-                ? cluster.CheckDeclarativeDnsPolicyPeers() : null;
+            var dns = cluster.DnsWebService.DnsServer;
+            bool resolverPolicyChanges = dns.ClusterResolverPolicyChanges(recursion, blocking, forwarding);
+            if (!resolverPolicyChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
+                return null;
+
+            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges), resolverPolicyChanges);
         }
 
         internal static (string Path, int[] Peers)? CheckClusterDomainListSupport(ConfigurationManifest manifest, ClusterManager cluster)

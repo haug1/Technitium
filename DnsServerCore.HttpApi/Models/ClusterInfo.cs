@@ -29,6 +29,7 @@ namespace DnsServerCore.HttpApi.Models
         public bool SupportsDeclarativeBlockLists { get; set; }
         public bool SupportsDeclarativeDomainLists { get; set; }
         public bool SupportsDeclarativeDnsPolicy { get; set; }
+        public bool SupportsDeclarativeResolverPolicy { get; set; }
         public bool SupportsDeclarativeClusterHandoff { get; set; }
         public string[]? ManagedOptionPaths { get; set; }
         public string? ClusterDomain { get; set; }

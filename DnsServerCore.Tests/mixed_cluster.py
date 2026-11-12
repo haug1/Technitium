@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import socket
 import ssl
+import struct
 import subprocess
 import tempfile
 import time
@@ -138,6 +139,8 @@ def verify(current, previous, folder, propagation, graceful):
         domain_revision = ok(primary.call("settings/config/plan", manifest=domain_lists))["revision"]
         dns_policy = {"schemaVersion": 1, "dns": {"udpPayloadSize": 1300}}
         dns_policy_revision = ok(primary.call("settings/config/plan", manifest=dns_policy))["revision"]
+        resolver_policy = {"schemaVersion": 1, "dns": {"forwarding": {"retries": 5}}}
+        resolver_revision = ok(primary.call("settings/config/plan", manifest=resolver_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -146,12 +149,28 @@ def verify(current, previous, folder, propagation, graceful):
         if propagation:
             assert joined["supportsDeclarativeClusterOptions"] is True
             assert joined["supportsDeclarativeDnsPolicy"] is True
+            assert joined["supportsDeclarativeResolverPolicy"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
-        assert "supportsDeclarativeClusterOptions" not in joined
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
+        assert not joined.get("supportsDeclarativeResolverPolicy"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=resolver_policy),
+            primary.call("settings/config/apply", manifest=resolver_policy, revision=resolver_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative resolver policy" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            settings = ok(node.call("settings/get"))
+            assert settings["forwarderRetries"] != 5 and "/dns/forwarding/retries" not in settings["managedSettings"]
+        if joined.get("supportsDeclarativeDnsPolicy"):
+            plan = ok(primary.call("settings/config/plan", manifest=dns_policy))
+            ok(primary.call("settings/config/apply", manifest=dns_policy, revision=plan["revision"]))
+            assert ok(primary.call("settings/get"))["udpPayloadSize"] == 1300
+            print("Mixed-build check passed. Existing DNS policy support allowed the payload update and rejected resolver policy.")
+            return
+        assert "supportsDeclarativeClusterOptions" not in joined
         for rejected in (
             primary.call("settings/config/plan", manifest=INTERVAL_MANIFEST),
             primary.call("settings/config/apply", manifest=INTERVAL_MANIFEST, revision=revision),
@@ -510,14 +529,19 @@ def verify_domain_lists(primary, secondary, cluster_manifest, local_web, primary
 
 
 def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
-    desired = {**cluster_manifest,
+    blocked_domain = "blocked-resolver.fixture.net"
+    desired = {**cluster_manifest, "blockZones": [blocked_domain],
                "dns": {"authoritative": {"defaultRecordTtl": 450}, "checkForUpdates": False,
                        "udpPayloadSize": 1300, "dnssecValidation": False,
-                       "clientSubnet": {"enabled": True, "ipv4PrefixLength": 23}},
+                       "clientSubnet": {"enabled": True, "ipv4PrefixLength": 23},
+                       "recursion": {"mode": "AllowOnlyForPrivateNetworks", "timeoutMs": 4200},
+                       "blocking": {"answerTtl": 47},
+                       "forwarding": {"retries": 5}},
                "apps": {"autoUpdate": False}}
     paths = {"/dns/authoritative/defaultRecordTtl", "/dns/checkForUpdates", "/dns/udpPayloadSize",
              "/dns/dnssecValidation", "/dns/clientSubnet/enabled", "/dns/clientSubnet/ipv4PrefixLength",
-             "/apps/autoUpdate"}
+             "/apps/autoUpdate", "/dns/recursion/mode", "/dns/recursion/timeoutMs",
+             "/dns/blocking/answerTtl", "/dns/forwarding/retries"}
     denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "dns": desired["dns"]})
     assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
 
@@ -526,32 +550,63 @@ def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
         ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
         return plan
 
-    def matches(node, ttl, prefix, owned):
+    def matches(node, ttl, prefix, timeout, block_ttl, retries, owned):
         state = ok(node.call("settings/get"))
         return (state["defaultRecordTtl"] == ttl and state["dnsServerEnableCheckForUpdate"] is False
                 and state["udpPayloadSize"] == 1300 and state["dnssecValidation"] is False
                 and state["eDnsClientSubnet"] is True and state["eDnsClientSubnetIPv4PrefixLength"] == prefix
                 and state["dnsAppsEnableAutomaticUpdate"] is False
+                and state["recursion"] == "AllowOnlyForPrivateNetworks" and state["resolverTimeout"] == timeout
+                and state["blockingAnswerTtl"] == block_ttl and state["forwarderRetries"] == retries
                 and paths.intersection(state["managedSettings"]) == owned)
 
+    def blocked_soa_minimum():
+        question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in blocked_domain.split("."))
+        query = struct.pack("!6H", 1, 0x0100, 1, 0, 0, 0) + question + b"\x00" + struct.pack("!2H", 1, 1)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(5)
+            client.connect(("127.0.0.1", secondary.dns_port))
+            client.send(query)
+            response = client.recv(4096)
+        identifier, flags, _, answers, authority, additional = struct.unpack_from("!6H", response)
+        assert (identifier, flags & 0x000F, answers, authority, additional) == (1, 3, 0, 1, 0)
+        return struct.unpack_from("!I", response, len(response) - 4)[0]
+
     plan = apply(primary, desired)
-    assert paths - {"/dns/checkForUpdates"} == {change["path"] for change in plan["changes"]}, plan
-    wait_for(lambda: matches(secondary, 450, 23, paths), "the Secondary to inherit DNS policy and ownership")
+    expected = paths - {"/dns/checkForUpdates"} | {f"/blockZones/{blocked_domain}"}
+    assert expected == {change["path"] for change in plan["changes"]}, plan
+    wait_for(lambda: matches(secondary, 450, 23, 4200, 47, 5, paths)
+             and "/blockZones" in ok(secondary.call("settings/get"))["managedSettings"],
+             "the Secondary to inherit DNS policy and ownership")
+    minimum = blocked_soa_minimum()
+    assert minimum == 47, minimum
     secondary.stop()
     secondary.start(release_seed=False)
-    assert matches(secondary, 450, 23, paths)
+    assert matches(secondary, 450, 23, 4200, 47, 5, paths)
     apply(secondary, local_web)
-    assert matches(secondary, 450, 23, paths)
+    assert matches(secondary, 450, 23, 4200, 47, 5, paths)
     denied = secondary.call("settings/set?defaultRecordTtl=451")
     assert denied["status"] == "error" and "/dns/authoritative/defaultRecordTtl" in denied["errorMessage"], denied
 
+    denied = secondary.call("settings/set?resolverTimeout=4300")
+    assert denied["status"] == "error" and "/dns/recursion/timeoutMs" in denied["errorMessage"], denied
+    denied = secondary.call("settings/set?blockingAnswerTtl=48")
+    assert denied["status"] == "error" and "/dns/blocking/answerTtl" in denied["errorMessage"], denied
+    denied = secondary.call("settings/set?forwarderRetries=6")
+    assert denied["status"] == "error" and "/dns/forwarding/retries" in denied["errorMessage"], denied
+
+    desired["dns"]["recursion"]["timeoutMs"] = 4300
+    desired["dns"]["blocking"]["answerTtl"] = 48
+    desired["dns"]["forwarding"]["retries"] = 6
     desired["dns"]["authoritative"]["defaultRecordTtl"] = 460
     desired["dns"]["clientSubnet"]["ipv4PrefixLength"] = 22
     apply(primary, desired)
-    wait_for(lambda: matches(secondary, 460, 22, paths), "the Secondary to apply the next DNS policy")
+    wait_for(lambda: matches(secondary, 460, 22, 4300, 48, 6, paths), "the Secondary to apply the next DNS policy")
+    minimum = blocked_soa_minimum()
+    assert minimum == 48, minimum
     assert not apply(primary, desired)["changes"]
     apply(primary, cluster_manifest)
-    wait_for(lambda: matches(secondary, 460, 22, set()), "the Secondary to release DNS policy ownership")
+    wait_for(lambda: matches(secondary, 460, 22, 4300, 48, 6, set()), "the Secondary to release DNS policy ownership")
 
 
 def assert_promoted_policy(state):

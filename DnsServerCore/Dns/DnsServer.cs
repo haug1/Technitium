@@ -1303,8 +1303,12 @@ namespace DnsServerCore.Dns
         private const ManagedDnsSettings ClusterDnsPolicyOwnership = AuthoritativeOwnership | ResolverOwnership |
             ClientSubnetOwnership | ManagedDnsSettings.AppAutoUpdate;
 
+        private const ManagedDnsSettings ClusterResolverPolicyOwnership = RecursionOwnership | BlockingOwnership | ForwardingOwnership;
+        private const ManagedDnsSettings TransferableDnsPolicyOwnership = ClusterDnsPolicyOwnership | ClusterResolverPolicyOwnership;
+
         internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & AuthoritativeOwnership) != 0;
         internal bool HasManagedClusterDnsPolicy => (_managedDnsSettings & ClusterDnsPolicyOwnership) != 0;
+        internal bool HasManagedClusterResolverPolicy => (_managedDnsSettings & ClusterResolverPolicyOwnership) != 0;
 
         private bool OwnsDnsSetting(ManagedDnsSettings setting, bool isConfigTransfer) =>
             ((_managedDnsSettings & ~(isConfigTransfer ? _inheritedDnsPolicy : 0)) & setting) != 0;
@@ -1359,7 +1363,7 @@ namespace DnsServerCore.Dns
             bool? appAutoUpdate, ClientSubnetSettings subnet)
         {
             var desired = GetClusterDnsPolicyOwnership(defaults, resolverSettings, appAutoUpdate, subnet);
-            if (desired != (_managedDnsSettings & ClusterDnsPolicyOwnership) || _inheritedDnsPolicy != 0)
+            if (desired != (_managedDnsSettings & ClusterDnsPolicyOwnership) || (_inheritedDnsPolicy & ClusterDnsPolicyOwnership) != 0)
                 return true;
 
             subnet = NormalizeClientSubnetSettings(subnet);
@@ -1379,6 +1383,90 @@ namespace DnsServerCore.Dns
                 (appAutoUpdate.HasValue && appAutoUpdate != _dnsApplicationManager.EnableAutomaticUpdate) ||
                 ClientSubnetChanges(subnet);
         }
+
+        private static ManagedDnsSettings GetClusterResolverPolicyOwnership(RecursionPolicy recursion,
+            BlockingPolicy blocking, ForwardingPolicy forwarding)
+        {
+            ManagedDnsSettings ownership = 0;
+            if (recursion.Mode.HasValue)
+                ownership |= ManagedDnsSettings.RecursionMode;
+            if (recursion.NetworkAcl is not null)
+                ownership |= ManagedDnsSettings.RecursionAcl;
+
+            if (recursion.RandomizeName.HasValue)
+                ownership |= ManagedDnsSettings.RandomizeName;
+            if (recursion.QnameMinimization.HasValue)
+                ownership |= ManagedDnsSettings.QnameMinimization;
+            if (recursion.LocallyServedDnsZones.HasValue)
+                ownership |= ManagedDnsSettings.LocallyServedDnsZones;
+            if (recursion.ResolverRetries.HasValue)
+                ownership |= ManagedDnsSettings.ResolverRetries;
+            if (recursion.ResolverTimeout.HasValue)
+                ownership |= ManagedDnsSettings.ResolverTimeout;
+            if (recursion.ResolverConcurrency.HasValue)
+                ownership |= ManagedDnsSettings.ResolverConcurrency;
+            if (recursion.ResolverMaxStackCount.HasValue)
+                ownership |= ManagedDnsSettings.ResolverMaxStackCount;
+
+            if (blocking.Enabled.HasValue)
+                ownership |= ManagedDnsSettings.BlockingEnabled;
+            if (blocking.AllowTxtReport.HasValue)
+                ownership |= ManagedDnsSettings.BlockingTxtReport;
+            if (blocking.BypassNetworks is not null)
+                ownership |= ManagedDnsSettings.BlockingBypass;
+            if (blocking.ResponseType.HasValue)
+                ownership |= ManagedDnsSettings.BlockingResponseType;
+            if (blocking.AnswerTtl.HasValue)
+                ownership |= ManagedDnsSettings.BlockingAnswerTtl;
+            if (blocking.CustomAddresses is not null)
+                ownership |= ManagedDnsSettings.BlockingCustomAddresses;
+
+            if (forwarding.Servers is not null)
+                ownership |= ManagedDnsSettings.ForwardingServers;
+            if (forwarding.Concurrent.HasValue)
+                ownership |= ManagedDnsSettings.ForwardingConcurrent;
+            if (forwarding.Retries.HasValue)
+                ownership |= ManagedDnsSettings.ForwardingRetries;
+            if (forwarding.Timeout.HasValue)
+                ownership |= ManagedDnsSettings.ForwardingTimeout;
+            if (forwarding.Concurrency.HasValue)
+                ownership |= ManagedDnsSettings.ForwardingConcurrency;
+            return ownership;
+        }
+
+        internal bool ClusterResolverPolicyChanges(RecursionPolicy recursion, BlockingPolicy blocking, ForwardingPolicy forwarding)
+        {
+            var desired = GetClusterResolverPolicyOwnership(recursion, blocking, forwarding);
+            return desired != (_managedDnsSettings & ClusterResolverPolicyOwnership) ||
+                (_inheritedDnsPolicy & ClusterResolverPolicyOwnership) != 0 ||
+                RecursionPolicyChanges(recursion) || BlockingPolicyChanges(blocking) || ForwardingPolicyChanges(forwarding);
+        }
+
+        private bool ForwardingPolicyChanges(ForwardingPolicy forwarding) =>
+            (forwarding.Servers is not null && !HaveSameForwarders(forwarding.Servers)) ||
+            (forwarding.Concurrent.HasValue && forwarding.Concurrent != _concurrentForwarding) ||
+            (forwarding.Retries.HasValue && forwarding.Retries != _forwarderRetries) ||
+            (forwarding.Timeout.HasValue && forwarding.Timeout != _forwarderTimeout) ||
+            (forwarding.Concurrency.HasValue && forwarding.Concurrency != _forwarderConcurrency);
+
+        private bool BlockingPolicyChanges(BlockingPolicy blocking) =>
+            (blocking.Enabled.HasValue && blocking.Enabled != _enableBlocking) ||
+            (blocking.AllowTxtReport.HasValue && blocking.AllowTxtReport != _allowTxtBlockingReport) ||
+            (blocking.BypassNetworks is not null && !HaveSameNetworks(blocking.BypassNetworks, _blockingBypassList)) ||
+            (blocking.ResponseType.HasValue && blocking.ResponseType != _blockingType) ||
+            (blocking.AnswerTtl.HasValue && blocking.AnswerTtl != _blockingAnswerTtl) ||
+            (blocking.CustomAddresses is not null && !GetBlockingAddresses().SequenceEqual(blocking.CustomAddresses));
+
+        private bool RecursionPolicyChanges(RecursionPolicy recursion) =>
+            (recursion.Mode.HasValue && recursion.Mode != _recursion) ||
+            (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? [])) ||
+            (recursion.RandomizeName.HasValue && recursion.RandomizeName != _randomizeName) ||
+            (recursion.QnameMinimization.HasValue && recursion.QnameMinimization != _qnameMinimization) ||
+            (recursion.LocallyServedDnsZones.HasValue && recursion.LocallyServedDnsZones != _locallyServedDnsZones) ||
+            (recursion.ResolverRetries.HasValue && recursion.ResolverRetries != _resolverRetries) ||
+            (recursion.ResolverTimeout.HasValue && recursion.ResolverTimeout != _resolverTimeout) ||
+            (recursion.ResolverConcurrency.HasValue && recursion.ResolverConcurrency != _resolverConcurrency) ||
+            (recursion.ResolverMaxStackCount.HasValue && recursion.ResolverMaxStackCount != _resolverMaxStackCount);
 
         private bool ClientSubnetChanges(ClientSubnetSettings subnet) =>
             (subnet.Enabled.HasValue && subnet.Enabled != _eDnsClientSubnet) ||
@@ -1802,20 +1890,20 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/apps/autoUpdate: Setting is managed by the configuration manifest.");
         }
 
-        internal void CheckManifestRecursionPolicy(RecursionPolicy policy)
+        internal void CheckManifestRecursionPolicy(RecursionPolicy policy, bool isConfigTransfer = false)
         {
-            if (ManifestOwnsRecursionMode && policy.Mode.HasValue && policy.Mode != _recursion)
+            if (OwnsDnsSetting(ManagedDnsSettings.RecursionMode, isConfigTransfer) && policy.Mode.HasValue && policy.Mode != _recursion)
                 throw new DnsWebServiceException("/dns/recursion/mode: Setting is managed by the configuration manifest.");
             if (policy.NetworkAcl is not null)
             {
                 if (policy.NetworkAcl.Count > byte.MaxValue)
                     throw new DnsWebServiceException("/dns/recursion/networkAcl: A maximum of 255 rules is allowed.");
-                if (ManifestOwnsRecursionAcl && !policy.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? []))
+                if (OwnsDnsSetting(ManagedDnsSettings.RecursionAcl, isConfigTransfer) && !policy.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? []))
                     throw new DnsWebServiceException("/dns/recursion/networkAcl: Setting is managed by the configuration manifest.");
             }
         }
 
-        internal RecursionPolicy CheckManifestResolverOptions(RecursionPolicy policy, bool validateRanges = true)
+        internal RecursionPolicy CheckManifestResolverOptions(RecursionPolicy policy, bool validateRanges = true, bool isConfigTransfer = false)
         {
             if (validateRanges)
             {
@@ -1837,7 +1925,7 @@ namespace DnsServerCore.Dns
 
             T? Check<T>(ManagedDnsSettings flag, T? candidate, T current, string field) where T : struct
             {
-                if (!_managedDnsSettings.HasFlag(flag))
+                if (!OwnsDnsSetting(flag, isConfigTransfer))
                     return candidate;
                 if (candidate.HasValue && !candidate.Value.Equals(current))
                     throw new DnsWebServiceException($"/dns/recursion/{field}: Setting is managed by the configuration manifest.");
@@ -1953,7 +2041,7 @@ namespace DnsServerCore.Dns
                 .Concat(_customBlockingAAAARecords.Select(record => record.Address));
         }
 
-        internal BlockingPolicy CheckManifestBlockingPolicy(BlockingPolicy policy)
+        internal BlockingPolicy CheckManifestBlockingPolicy(BlockingPolicy policy, bool isConfigTransfer = false)
         {
             if (policy.BypassNetworks?.Count > byte.MaxValue)
                 throw new DnsWebServiceException("/dns/blocking/bypassNetworks: A maximum of 255 entries is allowed.");
@@ -1971,7 +2059,7 @@ namespace DnsServerCore.Dns
 
             bool Check(ManagedDnsSettings flag, bool present, bool different, string path)
             {
-                if (!_managedDnsSettings.HasFlag(flag))
+                if (!OwnsDnsSetting(flag, isConfigTransfer))
                     return true;
                 if (present && different)
                     throw new DnsWebServiceException($"/dns/blocking/{path}: Setting is managed by the configuration manifest.");
@@ -2041,7 +2129,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        internal ForwardingPolicy CheckManifestForwarding(ForwardingPolicy policy, bool validateRanges = true)
+        internal ForwardingPolicy CheckManifestForwarding(ForwardingPolicy policy, bool validateRanges = true, bool isConfigTransfer = false)
         {
             if (validateRanges)
             {
@@ -2053,7 +2141,7 @@ namespace DnsServerCore.Dns
                     throw new DnsWebServiceException("/dns/forwarding/concurrency: Valid range is from 1 to 10.");
             }
 
-            bool serversOwned = _managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers);
+            bool serversOwned = OwnsDnsSetting(ManagedDnsSettings.ForwardingServers, isConfigTransfer);
             if (serversOwned && policy.Servers is not null && !HaveSameForwarders(policy.Servers))
                 throw new DnsWebServiceException("/dns/forwarding/servers: Setting is managed by the configuration manifest.");
 
@@ -2065,7 +2153,7 @@ namespace DnsServerCore.Dns
 
             T? Check<T>(ManagedDnsSettings flag, T? candidate, T current, string path) where T : struct
             {
-                if (!_managedDnsSettings.HasFlag(flag))
+                if (!OwnsDnsSetting(flag, isConfigTransfer))
                     return candidate;
                 if (candidate.HasValue && !candidate.Value.Equals(current))
                     throw new DnsWebServiceException($"/dns/forwarding/{path}: Setting is managed by the configuration manifest.");
@@ -2690,38 +2778,38 @@ namespace DnsServerCore.Dns
 
             //recursion
             DnsServerRecursion recursion = (DnsServerRecursion)bR.ReadByte();
-            if (apply && (readOwnership || !ManifestOwnsRecursionMode))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.RecursionMode, isConfigTransfer)))
                 _recursion = recursion;
             var recursionAcl = AuthZoneInfo.ReadNetworkACLFrom(bR);
-            if (apply && (readOwnership || !ManifestOwnsRecursionAcl))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.RecursionAcl, isConfigTransfer)))
                 _recursionNetworkACL = recursionAcl;
             if (!apply)
-                CheckManifestRecursionPolicy(new RecursionPolicy(recursion, recursionAcl ?? []));
+                CheckManifestRecursionPolicy(new RecursionPolicy(recursion, recursionAcl ?? []), isConfigTransfer);
 
             bool randomizeName = bR.ReadBoolean();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.RandomizeName)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.RandomizeName, isConfigTransfer)))
                 _randomizeName = randomizeName;
             bool qnameMinimization = bR.ReadBoolean();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.QnameMinimization)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.QnameMinimization, isConfigTransfer)))
                 _qnameMinimization = qnameMinimization;
             bool locallyServedDnsZones = version < 4 || bR.ReadBoolean();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.LocallyServedDnsZones)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.LocallyServedDnsZones, isConfigTransfer)))
                 _locallyServedDnsZones = locallyServedDnsZones;
             int resolverRetries = bR.ReadInt32();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverRetries)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ResolverRetries, isConfigTransfer)))
                 _resolverRetries = resolverRetries;
             int resolverTimeout = bR.ReadInt32();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverTimeout)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ResolverTimeout, isConfigTransfer)))
                 _resolverTimeout = resolverTimeout;
             int resolverConcurrency = bR.ReadInt32();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverConcurrency)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ResolverConcurrency, isConfigTransfer)))
                 _resolverConcurrency = resolverConcurrency;
             int resolverMaxStackCount = bR.ReadInt32();
-            if (apply && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ResolverMaxStackCount)))
+            if (apply && (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ResolverMaxStackCount, isConfigTransfer)))
                 _resolverMaxStackCount = resolverMaxStackCount;
             if (!apply)
                 CheckManifestResolverOptions(new RecursionPolicy(null, null, randomizeName, qnameMinimization, locallyServedDnsZones,
-                    resolverRetries, resolverTimeout, resolverConcurrency, resolverMaxStackCount), validateRanges: false);
+                    resolverRetries, resolverTimeout, resolverConcurrency, resolverMaxStackCount), validateRanges: false, isConfigTransfer);
 
             //cache
             bool saveCacheToDisk = bR.ReadBoolean();
@@ -2806,23 +2894,28 @@ namespace DnsServerCore.Dns
 
             if (apply)
             {
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingEnabled))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.BlockingEnabled, isConfigTransfer))
                     _enableBlocking = enableBlocking;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingTxtReport))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.BlockingTxtReport, isConfigTransfer))
                     _allowTxtBlockingReport = allowTxtBlockingReport;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingBypass))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.BlockingBypass, isConfigTransfer))
                     _blockingBypassList = blockingBypassList;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingResponseType))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.BlockingResponseType, isConfigTransfer))
                     _blockingType = blockingType;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingAnswerTtl))
-                    _blockingAnswerTtl = blockingAnswerTtl;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingCustomAddresses))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.BlockingAnswerTtl, isConfigTransfer))
+                {
+                    if (isConfigTransfer)
+                        BlockingAnswerTtl = blockingAnswerTtl;
+                    else
+                        _blockingAnswerTtl = blockingAnswerTtl;
+                }
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.BlockingCustomAddresses, isConfigTransfer))
                     SetBlockingAddresses(customAddresses);
             }
             else if (HasManagedBlockingPolicy)
             {
                 CheckManifestBlockingPolicy(new BlockingPolicy(enableBlocking, allowTxtBlockingReport, blockingBypassList ?? [],
-                    blockingType, blockingAnswerTtl, NormalizeBlockingAddresses(customAddresses)));
+                    blockingType, blockingAnswerTtl, NormalizeBlockingAddresses(customAddresses)), isConfigTransfer);
             }
 
             //proxy & forwarders
@@ -2866,21 +2959,21 @@ namespace DnsServerCore.Dns
 
             if (apply)
             {
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ForwardingServers, isConfigTransfer))
                     _forwarders = forwarders.Length == 0 ? null : forwarders;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrent))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ForwardingConcurrent, isConfigTransfer))
                     _concurrentForwarding = concurrentForwarding;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingRetries))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ForwardingRetries, isConfigTransfer))
                     _forwarderRetries = forwarderRetries;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingTimeout))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ForwardingTimeout, isConfigTransfer))
                     _forwarderTimeout = forwarderTimeout;
-                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrency))
+                if (readOwnership || !OwnsDnsSetting(ManagedDnsSettings.ForwardingConcurrency, isConfigTransfer))
                     _forwarderConcurrency = forwarderConcurrency;
             }
             else if (HasManagedForwardingPolicy)
             {
                 CheckManifestForwarding(new ForwardingPolicy(forwarders, concurrentForwarding, forwarderRetries,
-                    forwarderTimeout, forwarderConcurrency), validateRanges: false);
+                    forwarderTimeout, forwarderConcurrency), validateRanges: false, isConfigTransfer);
                 if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingServers))
                     ValidateForwardingServers(forwarders, proxyType);
             }
@@ -2926,7 +3019,7 @@ namespace DnsServerCore.Dns
             {
                 var transferred = version >= 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
                 var local = _managedDnsSettings & ~_inheritedDnsPolicy;
-                _inheritedDnsPolicy = transferred & ClusterDnsPolicyOwnership & ~local;
+                _inheritedDnsPolicy = transferred & TransferableDnsPolicyOwnership & ~local;
                 _managedDnsSettings = local | _inheritedDnsPolicy;
             }
             else if (readOwnership)
@@ -2946,7 +3039,7 @@ namespace DnsServerCore.Dns
                         _managedTsigKeyNames = names;
                     }
                 }
-                _inheritedDnsPolicy = (ManagedDnsSettings)ReadOwnershipWord(s) & _managedDnsSettings & ClusterDnsPolicyOwnership;
+                _inheritedDnsPolicy = (ManagedDnsSettings)ReadOwnershipWord(s) & _managedDnsSettings & TransferableDnsPolicyOwnership;
             }
         }
 
@@ -8860,32 +8953,13 @@ namespace DnsServerCore.Dns
                     subnet = NormalizeClientSubnetSettings(subnet);
                     var previousInherited = _inheritedDnsPolicy;
                     var inherited = isClusterSecondary ? previousInherited : 0;
-                    ownership |= GetClusterDnsPolicyOwnership(defaults, resolverSettings, appAutoUpdate, subnet) | inherited;
+                    ownership |= GetClusterDnsPolicyOwnership(defaults, resolverSettings, appAutoUpdate, subnet) |
+                        GetClusterResolverPolicyOwnership(recursion, blocking, forwarding) | inherited;
                     bool subnetChanged = ClientSubnetChanges(subnet);
                     if (dnsLogging.IgnoreResolverLogs.HasValue)
                         ownership |= ManagedDnsSettings.IgnoreResolverLogs;
                     if (dnsLogging.LogQueries.HasValue)
                         ownership |= ManagedDnsSettings.LogQueries;
-
-                    if (recursion.Mode.HasValue)
-                        ownership |= ManagedDnsSettings.RecursionMode;
-                    if (recursion.NetworkAcl is not null)
-                        ownership |= ManagedDnsSettings.RecursionAcl;
-
-                    if (recursion.RandomizeName.HasValue)
-                        ownership |= ManagedDnsSettings.RandomizeName;
-                    if (recursion.QnameMinimization.HasValue)
-                        ownership |= ManagedDnsSettings.QnameMinimization;
-                    if (recursion.LocallyServedDnsZones.HasValue)
-                        ownership |= ManagedDnsSettings.LocallyServedDnsZones;
-                    if (recursion.ResolverRetries.HasValue)
-                        ownership |= ManagedDnsSettings.ResolverRetries;
-                    if (recursion.ResolverTimeout.HasValue)
-                        ownership |= ManagedDnsSettings.ResolverTimeout;
-                    if (recursion.ResolverConcurrency.HasValue)
-                        ownership |= ManagedDnsSettings.ResolverConcurrency;
-                    if (recursion.ResolverMaxStackCount.HasValue)
-                        ownership |= ManagedDnsSettings.ResolverMaxStackCount;
 
                     if (cache.SaveToDisk.HasValue)
                         ownership |= ManagedDnsSettings.CacheSaveToDisk;
@@ -8918,42 +8992,9 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.CachePrefetchTrigger;
                     cache = NormalizeCachePrefetch(cache);
 
-                    if (blocking.Enabled.HasValue)
-                        ownership |= ManagedDnsSettings.BlockingEnabled;
-                    if (blocking.AllowTxtReport.HasValue)
-                        ownership |= ManagedDnsSettings.BlockingTxtReport;
-                    if (blocking.BypassNetworks is not null)
-                        ownership |= ManagedDnsSettings.BlockingBypass;
-                    if (blocking.ResponseType.HasValue)
-                        ownership |= ManagedDnsSettings.BlockingResponseType;
-                    if (blocking.AnswerTtl.HasValue)
-                        ownership |= ManagedDnsSettings.BlockingAnswerTtl;
-                    if (blocking.CustomAddresses is not null)
-                        ownership |= ManagedDnsSettings.BlockingCustomAddresses;
-
                     bool proxyChanged = proxy.Managed != 0 && !ReferenceEquals(_proxy, proxy.Proxy);
-                    if (forwarding.Servers is not null)
-                        ownership |= ManagedDnsSettings.ForwardingServers;
-                    if (forwarding.Concurrent.HasValue)
-                        ownership |= ManagedDnsSettings.ForwardingConcurrent;
-                    if (forwarding.Retries.HasValue)
-                        ownership |= ManagedDnsSettings.ForwardingRetries;
-                    if (forwarding.Timeout.HasValue)
-                        ownership |= ManagedDnsSettings.ForwardingTimeout;
-                    if (forwarding.Concurrency.HasValue)
-                        ownership |= ManagedDnsSettings.ForwardingConcurrency;
-
-                    bool forwardingChanged = (forwarding.Servers is not null && !HaveSameForwarders(forwarding.Servers)) ||
-                        (forwarding.Concurrent.HasValue && forwarding.Concurrent != _concurrentForwarding) ||
-                        (forwarding.Retries.HasValue && forwarding.Retries != _forwarderRetries) ||
-                        (forwarding.Timeout.HasValue && forwarding.Timeout != _forwarderTimeout) ||
-                        (forwarding.Concurrency.HasValue && forwarding.Concurrency != _forwarderConcurrency);
-                    bool blockingChanged = (blocking.Enabled.HasValue && blocking.Enabled != _enableBlocking) ||
-                        (blocking.AllowTxtReport.HasValue && blocking.AllowTxtReport != _allowTxtBlockingReport) ||
-                        (blocking.BypassNetworks is not null && !HaveSameNetworks(blocking.BypassNetworks, _blockingBypassList)) ||
-                        (blocking.ResponseType.HasValue && blocking.ResponseType != _blockingType) ||
-                        (blocking.AnswerTtl.HasValue && blocking.AnswerTtl != _blockingAnswerTtl) ||
-                        (blocking.CustomAddresses is not null && !GetBlockingAddresses().SequenceEqual(blocking.CustomAddresses));
+                    bool forwardingChanged = ForwardingPolicyChanges(forwarding);
+                    bool blockingChanged = BlockingPolicyChanges(blocking);
                     bool cacheChanged = (cache.SaveToDisk.HasValue && cache.SaveToDisk != _saveCacheToDisk) ||
                         (cache.ServeStale.HasValue && cache.ServeStale != _serveStale) ||
                         (cache.StaleTtl.HasValue && cache.StaleTtl != _cacheZoneManager.ServeStaleTtl) ||
@@ -8968,15 +9009,7 @@ namespace DnsServerCore.Dns
                         (cache.PrefetchEnabled.HasValue && cache.PrefetchEnabled != _enableCachePrefetch) ||
                         (cache.PrefetchEligibility.HasValue && cache.PrefetchEligibility != _cachePrefetchEligibility) ||
                         (cache.PrefetchTrigger.HasValue && cache.PrefetchTrigger != _cachePrefetchTrigger);
-                    bool recursionChanged = (recursion.Mode.HasValue && recursion.Mode != _recursion) ||
-                        (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? [])) ||
-                        (recursion.RandomizeName.HasValue && recursion.RandomizeName != _randomizeName) ||
-                        (recursion.QnameMinimization.HasValue && recursion.QnameMinimization != _qnameMinimization) ||
-                        (recursion.LocallyServedDnsZones.HasValue && recursion.LocallyServedDnsZones != _locallyServedDnsZones) ||
-                        (recursion.ResolverRetries.HasValue && recursion.ResolverRetries != _resolverRetries) ||
-                        (recursion.ResolverTimeout.HasValue && recursion.ResolverTimeout != _resolverTimeout) ||
-                        (recursion.ResolverConcurrency.HasValue && recursion.ResolverConcurrency != _resolverConcurrency) ||
-                        (recursion.ResolverMaxStackCount.HasValue && recursion.ResolverMaxStackCount != _resolverMaxStackCount);
+                    bool recursionChanged = RecursionPolicyChanges(recursion);
                     bool dnsLoggingChanged = (dnsLogging.IgnoreResolverLogs.HasValue && dnsLogging.IgnoreResolverLogs != (_resolverLog is null)) ||
                         (dnsLogging.LogQueries.HasValue && dnsLogging.LogQueries != (_queryLog is not null));
                     bool excludedPortsChanged = outbound.ExcludedPorts is not null && !HaveSameSocketPoolExcludedPorts(outbound.ExcludedPorts);

@@ -3250,7 +3250,7 @@ namespace DnsServerCore
             bool secondary = clustered && _clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
             var blockLists = _dnsServer.BlockListZoneManager;
             var domainListChange = ConfigurationPlan.CheckClusterDomainListSupport(manifest, _clusterManager);
-            int[] dnsPolicyPeers = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager);
+            var dnsPolicyChange = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager);
             var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
                 blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval);
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3288,11 +3288,11 @@ namespace DnsServerCore
                     if (!_clusterManager.CheckDeclarativeDomainListPeers(domainLists.Path).SequenceEqual(domainLists.Peers))
                         throw new InvalidDataException($"{domainLists.Path}: Cluster membership changed during apply. Create a new preview.");
                 } : null;
-                Action checkDnsPolicyPeers = dnsPolicyPeers is null ? null : () =>
+                Action checkDnsPolicyPeers = dnsPolicyChange is { } dnsPolicy ? () =>
                 {
-                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers().SequenceEqual(dnsPolicyPeers))
+                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy).SequenceEqual(dnsPolicy.Peers))
                         throw new InvalidDataException("/dns: Cluster membership changed during apply. Create a new preview.");
-                };
+                } : null;
                 var clusterFiles = new List<string>(2);
                 if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
                     clusterFiles.Add("cluster.config");
@@ -3325,7 +3325,7 @@ namespace DnsServerCore
                 throw;
             }
 
-            if (clustered && !secondary && (dnsPolicyPeers is not null || domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
+            if (clustered && !secondary && (dnsPolicyChange.HasValue || domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
                 blockLists.BlockListUpdateIntervalHours, blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval)))
                 _clusterManager.TriggerNotifyAllSecondaryNodesIfPrimarySelfNode();
 

@@ -1104,10 +1104,10 @@ namespace DnsServerCore
                     WriteDnsSettings(writer, includeSecrets: false);
                     if (manifest is not null)
                     {
-                        if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager) is { } dnsPolicyPeers)
+                        if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager) is { } dnsPolicy)
                         {
                             writer.WritePropertyName("dnsPolicyPeers");
-                            JsonSerializer.Serialize(writer, dnsPolicyPeers);
+                            JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy });
                         }
                         if (ConfigurationPlan.CheckClusterDomainListSupport(manifest, _dnsWebService._clusterManager) is { } domainLists)
                         {
