@@ -26,7 +26,9 @@ namespace DnsServerCore.Configuration
 
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
-                if (isClusterInfrastructure(zone.Name) || zone.ApexZone is not PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } || zone.CatalogZoneName is not null)
+                if (isClusterInfrastructure(zone.Name) ||
+                    zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) ||
+                    zone.CatalogZoneName is not null)
                 {
                     missingInputs.Add(path);
                     continue;
@@ -34,7 +36,7 @@ namespace DnsServerCore.Configuration
 
                 var declaration = JsonSerializer.SerializeToNode(new
                 {
-                    type = nameof(AuthZoneType.Primary),
+                    type = zone.Type.ToString(),
                     enabled = !zone.Disabled,
                     query = new { mode = zone.QueryAccess.ToString(), networkAcl = zone.QueryAccessNetworkACL?.Select(rule => rule.ToString()) ?? [] },
                     transfer = new
@@ -73,7 +75,7 @@ namespace DnsServerCore.Configuration
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
             var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
-                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, DnsApplicationRecordData Application)>();
+                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, string MissingInput)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -82,7 +84,7 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 var info = record.Tag as GenericRecordInfo;
-                if (record.Class != DnsClass.IN || record.Type == DnsResourceRecordType.FWD)
+                if (record.Class != DnsClass.IN)
                 {
                     missingInputs.Add(path + "/records");
                     return null;
@@ -96,13 +98,49 @@ namespace DnsServerCore.Configuration
                     data = new DnsSOARecordData(soa.PrimaryNameServer, soa.ResponsiblePerson, 0, soa.Refresh, soa.Retry, soa.Expire, soa.Minimum);
                 else if (data is DnsSVCBRecordData svc)
                     data = ConfigurationPlan.WithoutAutomaticHints(svc, autoIpv4, autoIpv6);
-                var application = data as DnsApplicationRecordData;
-                string hex = null;
+                string sortKey, missingInput = null;
+                JsonObject declaration;
                 string owner = record.Name.ToLowerInvariant();
-                if (application is null)
+                if (data is DnsApplicationRecordData application)
+                {
+                    declaration = new JsonObject { ["app"] = new JsonObject { ["name"] = application.AppName, ["classPath"] = application.ClassPath } };
+                    sortKey = string.Empty;
+                    if (application.Data.Length > 0)
+                        missingInput = "/data/app/configuration";
+                }
+                else if (data is DnsForwarderRecordData forwarder)
+                {
+                    if (forwarder.Protocol is not (DnsTransportProtocol.Udp or DnsTransportProtocol.Tcp or DnsTransportProtocol.Tls or
+                        DnsTransportProtocol.Https or DnsTransportProtocol.Quic) ||
+                        forwarder.NameServer?.DoHEndPoint is Uri uri && (uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0))
+                    {
+                        missingInputs.Add(path + "/records");
+                        return null;
+                    }
+                    var proxy = new JsonObject { ["type"] = forwarder.ProxyType.ToString() };
+                    if (forwarder.ProxyType is DnsForwarderRecordProxyType.Http or DnsForwarderRecordProxyType.Socks5)
+                    {
+                        proxy["address"] = forwarder.ProxyAddress;
+                        proxy["port"] = forwarder.ProxyPort;
+                        if (!string.IsNullOrEmpty(forwarder.ProxyUsername))
+                            proxy["username"] = forwarder.ProxyUsername;
+                        if (!string.IsNullOrEmpty(forwarder.ProxyPassword))
+                            missingInput = "/data/forwarder/proxy/password";
+                    }
+                    declaration = new JsonObject
+                    {
+                        ["forwarder"] = new JsonObject
+                        {
+                            ["address"] = forwarder.Forwarder, ["transport"] = forwarder.Protocol.ToString(),
+                            ["priority"] = forwarder.Priority, ["dnssecValidation"] = forwarder.DnssecValidation, ["proxy"] = proxy
+                        }
+                    };
+                    sortKey = declaration.ToJsonString();
+                }
+                else
                 {
                     data.WriteTo(wire);
-                    hex = Convert.ToHexString(wire.GetBuffer().AsSpan(sizeof(ushort), (int)wire.Length - sizeof(ushort)));
+                    string hex = Convert.ToHexString(wire.GetBuffer().AsSpan(sizeof(ushort), (int)wire.Length - sizeof(ushort)));
                     try
                     {
                         if (!ConfigurationManifest.ReadRawZoneRecordData(zone, owner, record.Type, hex, path + "/records").RDATA.Equals(data))
@@ -116,6 +154,8 @@ namespace DnsServerCore.Configuration
                         missingInputs.Add(path + "/records");
                         return null;
                     }
+                    declaration = new JsonObject { ["rawHex"] = hex };
+                    sortKey = hex;
                 }
 
                 string[] glue = null;
@@ -135,10 +175,10 @@ namespace DnsServerCore.Configuration
                     glue = glueRecords.Select(address => address.RDATA.ToString()).ToArray();
                 }
 
-                entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false,
+                entries.Add((owner, (ushort)record.Type, sortKey, record.OriginalTtlValue, info?.Disabled ?? false,
                     info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue,
                     record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null,
-                    autoIpv4, autoIpv6, application));
+                    autoIpv4, autoIpv6, declaration, missingInput));
             }
 
             var exported = new JsonArray();
@@ -149,8 +189,7 @@ namespace DnsServerCore.Configuration
                 {
                     ["owner"] = entry.Owner == zone ? "@" : entry.Owner,
                     ["type"] = (int)entry.Type,
-                    ["data"] = entry.Application is null ? new JsonObject { ["rawHex"] = entry.Hex } :
-                        new JsonObject { ["app"] = new JsonObject { ["name"] = entry.Application.AppName, ["classPath"] = entry.Application.ClassPath } },
+                    ["data"] = entry.Data,
                     ["ttl"] = entry.Ttl,
                     ["disabled"] = entry.Disabled,
                     ["comments"] = entry.Comments,
@@ -164,8 +203,8 @@ namespace DnsServerCore.Configuration
                     record["autoIpv4Hint"] = true;
                 if (entry.AutoIpv6Hint)
                     record["autoIpv6Hint"] = true;
-                if (entry.Application?.Data.Length > 0)
-                    missingInputs.Add($"{path}/records/{exported.Count}/data/app/configuration");
+                if (entry.MissingInput is not null)
+                    missingInputs.Add($"{path}/records/{exported.Count}{entry.MissingInput}");
                 exported.Add(record);
             }
             return exported;

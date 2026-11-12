@@ -29,19 +29,21 @@ namespace DnsServerCore.Dns.Zones
     {
         #region constructor
 
-        public ForwarderZone(DnsServer dnsServer, AuthZoneInfo zoneInfo)
+        public ForwarderZone(DnsServer dnsServer, AuthZoneInfo zoneInfo, bool initializeTimers = true)
             : base(dnsServer, zoneInfo)
         {
             InitNotify();
-            InitRecordExpiry();
+            if (initializeTimers)
+                InitRecordExpiry();
         }
 
-        public ForwarderZone(DnsServer dnsServer, string name)
+        public ForwarderZone(DnsServer dnsServer, string name, bool initializeTimers = true)
             : base(dnsServer, name)
         {
             InitZone();
             InitNotify();
-            InitRecordExpiry();
+            if (initializeTimers)
+                InitRecordExpiry();
         }
 
         public ForwarderZone(DnsServer dnsServer, string name, DnsTransportProtocol forwarderProtocol, string forwarder, bool dnssecValidation, DnsForwarderRecordProxyType proxyType, string proxyAddress, ushort proxyPort, string proxyUsername, string proxyPassword, string fwdRecordComments)
@@ -64,6 +66,8 @@ namespace DnsServerCore.Dns.Zones
         #endregion
 
         #region internal
+
+        internal void InitializeManifestZoneExpiry() => InitRecordExpiry();
 
         internal virtual void InitZone()
         {

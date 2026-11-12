@@ -840,7 +840,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             string[] permissionOwnership = ConfigurationPermissions.GetOwnedPaths(manifest);
             if (auth.PermissionOwnershipFromPrimary ? isClusterSecondary : auth.ManagedPermissionPaths.SequenceEqual(permissionOwnership))
                 permissionOwnership = null;
-            var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
+            var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records, AuthZoneType Type)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
             var ownedZones = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
@@ -853,17 +853,26 @@ namespace DnsServerCore.Dns.ZoneManagers
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
                     ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
-                    if (zone is not null && (zone.Type != AuthZoneType.Primary || zone.CatalogZoneName is not null))
-                        throw new InvalidDataException($"{path}: Apply requires a primary zone outside catalogs.");
+                    if (zone is not null && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) || zone.CatalogZoneName is not null))
+                        throw new InvalidDataException($"{path}: Apply requires a primary or forwarder zone outside catalogs.");
 
                     if (declaration.Value.ValueKind == JsonValueKind.Null)
                     {
                         if (zone is not null)
                         {
-                            changed.Add((name, zone, true, null, default, default));
+                            changed.Add((name, zone, true, null, default, default, zone.Type));
                             membership.Add(name, false);
                         }
                         continue;
+                    }
+
+                    AuthZoneType type = zone?.Type ?? AuthZoneType.Primary;
+                    if (declaration.Value.TryGetProperty("type", out JsonElement declaredType))
+                    {
+                        AuthZoneType requested = Enum.Parse<AuthZoneType>(declaredType.GetString());
+                        if (zone is not null && requested != type)
+                            throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
+                        type = requested;
                     }
 
                     bool? disabled = declaration.Value.TryGetProperty("enabled", out JsonElement enabled)
@@ -876,7 +885,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         DateTime revision = zone.LastModified;
                         var currentRecords = new List<DnsResourceRecord>();
                         ListAllZoneRecords(name, currentRecords);
-                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"))
+                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"), type == AuthZoneType.Forwarder)
                             .Any(edit => edit.Kind.HasValue);
                         if (editRecords)
                             recordRevisions.Add(name, revision);
@@ -888,12 +897,12 @@ namespace DnsServerCore.Dns.ZoneManagers
                         if (!declaration.Value.TryGetProperty("type", out _))
                             throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
                         ValidateZoneName(name);
-                        changed.Add((name, null, false, disabled ?? false, policies, records));
+                        changed.Add((name, null, false, disabled ?? false, policies, records, type));
                         membership.Add(name, true);
                     }
                     else if ((disabled.HasValue && zone.Disabled != disabled.Value) || policies != default || editRecords)
                     {
-                        changed.Add((name, zone, false, disabled, policies, records));
+                        changed.Add((name, zone, false, disabled, policies, records, type));
                     }
                 }
             }
@@ -922,15 +931,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                 files.Add(AuthManager.PermissionOwnershipFile);
             if (staticSessions is not null)
                 files.Add(ConfigurationStaticSessions.FileName);
-            var created = new Dictionary<string, PrimaryZone>(StringComparer.Ordinal);
-            var stagedRecords = new Dictionary<string, (PrimaryZone Zone, List<DnsResourceRecord> Records,
+            var created = new Dictionary<string, ApexZone>(StringComparer.Ordinal);
+            var stagedRecords = new Dictionary<string, (ApexZone Zone, List<DnsResourceRecord> Records,
                 HashSet<(string Owner, DnsResourceRecordType Type)> ChangedSets)>(StringComparer.Ordinal);
             Action writeAuth = null;
             return (Commit, Write, files.ToArray());
 
             void Write()
             {
-                foreach (var (name, current, remove, disabled, policies, records) in changed)
+                foreach (var (name, current, remove, disabled, policies, records, type) in changed)
                 {
                     string path = Path.Combine(_dnsServer.ConfigFolder, "zones", name + ".zone");
                     if (remove)
@@ -943,11 +952,12 @@ namespace DnsServerCore.Dns.ZoneManagers
                     }
                     else
                     {
-                        PrimaryZone zone;
+                        ApexZone zone;
                         var allRecords = new List<DnsResourceRecord>();
                         if (current is null)
                         {
-                            zone = new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme, initializeExpiryTimer: false);
+                            zone = type == AuthZoneType.Forwarder ? new ForwarderZone(_dnsServer, name, initializeTimers: false) :
+                                new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme, initializeExpiryTimer: false);
                             created.Add(name, zone);
                             zone.Disabled = disabled.Value;
                             policies.Apply(new AuthZoneInfo(zone));
@@ -955,9 +965,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                         }
                         else
                         {
-                            if (((PrimaryZone)current.ApexZone).DnssecStatus != AuthZoneDnssecStatus.Unsigned)
+                            if (current.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned })
                                 throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}/records: Applying records requires an unsigned primary zone.");
-                            zone = new PrimaryZone(_dnsServer, GetAuthZoneInfo(name, loadHistory: true), initializeTimers: false);
+                            AuthZoneInfo previous = GetAuthZoneInfo(name, loadHistory: true);
+                            zone = type == AuthZoneType.Forwarder ? new ForwarderZone(_dnsServer, previous, initializeTimers: false) :
+                                new PrimaryZone(_dnsServer, previous, initializeTimers: false);
                             stagedRecords.Add(name, (zone, allRecords, null));
                             ListAllZoneRecords(name, allRecords);
                         }
@@ -990,7 +1002,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     lock (_saveLock)
                     {
-                        foreach (var (name, current, _, _, _, _) in changed)
+                        foreach (var (name, current, _, _, _, _, _) in changed)
                         {
                             AuthZoneInfo live = GetAuthZoneInfo(name);
                             if (!ReferenceEquals(live?.ApexZone, current?.ApexZone) || live?.CatalogZoneName is not null ||
@@ -1008,7 +1020,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         }
                         catch
                         {
-                            foreach (PrimaryZone zone in created.Values)
+                            foreach (ApexZone zone in created.Values)
                                 zone.Dispose();
                             foreach (var (name, stage) in stagedRecords)
                             {
@@ -1019,7 +1031,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         }
 
                         _manifestOwnedZones = ownedZones;
-                        foreach (var (name, current, remove, disabled, policies, records) in changed)
+                        foreach (var (name, current, remove, disabled, policies, _, _) in changed)
                         {
                             if (remove)
                             {
@@ -1034,8 +1046,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                             }
                             else
                             {
-                                PrimaryZone zone = created[name];
-                                zone.InitializeManifestZoneExpiry();
+                                ApexZone zone = created[name];
+                                if (zone is ForwarderZone forwarder)
+                                    forwarder.InitializeManifestZoneExpiry();
+                                else
+                                    ((PrimaryZone)zone).InitializeManifestZoneExpiry();
                                 if (!_root.TryAdd(zone))
                                     throw new InvalidOperationException("The primary zone already exists.");
                                 _zoneIndex.Add(new AuthZoneInfo(zone));
@@ -1133,11 +1148,11 @@ namespace DnsServerCore.Dns.ZoneManagers
             File.Move(temporary, path, true);
         }
 
-        private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(ConfigurationManifest manifest, PrimaryZone zone, JsonElement declaration, List<DnsResourceRecord> records,
+        private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(ConfigurationManifest manifest, ApexZone zone, JsonElement declaration, List<DnsResourceRecord> records,
             IReadOnlyDictionary<string, bool> membership, string serverDomain)
         {
             string path = ConfigurationPlan.AppendPath("/zones", zone.Name) + "/records";
-            var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"));
+            var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"), zone is ForwarderZone);
             var owners = DnsResourceRecord.GroupRecords(records);
             var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
             // The staging zone uses the normal record setters and SOA history, with notifications disabled.
@@ -1163,7 +1178,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                         throw new InvalidDataException($"{path}: A record belongs to a child zone.");
                 }
 
-                AuthZone node = apex ? zone : new PrimarySubDomainZone(zone, group.Key);
+                AuthZone node = apex ? zone : zone is ForwarderZone forwarder
+                    ? new ForwarderSubDomainZone(forwarder, group.Key) : new PrimarySubDomainZone((PrimaryZone)zone, group.Key);
                 if (!owners.TryGetValue(group.Key, out var rrsets))
                     owners.Add(group.Key, rrsets = new Dictionary<DnsResourceRecordType, List<DnsResourceRecord>>());
                 foreach (var (type, existing) in rrsets)

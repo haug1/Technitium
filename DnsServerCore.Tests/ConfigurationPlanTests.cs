@@ -4404,6 +4404,66 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ForwarderZoneReproducesRoutingAndProtectsProxySecrets()
+        {
+            const string variable = "TECHNITIUM_TEST_FORWARDER_PASSWORD";
+            const string secret = "fixture-forwarder-password";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, secret);
+            try
+            {
+                await using var upstream = new LoopbackDnsServer();
+                upstream.AddPrimaryZone("route.test", "www.route.test", IPAddress.Parse("192.0.2.42"));
+                await upstream.StartAsync();
+                await using var source = await LoopbackWebService.StartAsync();
+                string manifest = $$$$$"""
+                    {"schemaVersion":1,"zones":{"route.test":{"type":"Forwarder","records":[
+                      {"owner":"@","type":"FWD","data":{"forwarder":{"address":"{{{{{upstream.EndPoint}}}}}"}}},
+                      {"owner":"unused.route.test","type":"FWD","disabled":true,"data":{"forwarder":{
+                        "address":"{{{{{upstream.EndPoint}}}}}","transport":"Tcp","priority":3,
+                        "proxy":{"type":"Http","address":"127.0.0.1","port":8080,"username":"fixture",
+                                 "password":{"environment":"TECHNITIUM_TEST_FORWARDER_PASSWORD"}}
+                      }}}
+                    ]}}}
+                    """;
+                JsonElement plan = await PreviewAsync(source, manifest);
+                Assert.DoesNotContain(secret, plan.GetRawText());
+                LoopbackWebService.AssertOk(await ApplyAsync(source, manifest, plan.GetProperty("revision").GetString()!));
+                Assert.Empty((await PreviewAsync(source, manifest)).GetProperty("changes").EnumerateArray());
+                await AssertForwardedAsync(source);
+                await source.RestartAsync();
+                await AssertForwardedAsync(source);
+
+                JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain(secret, export.GetRawText());
+                JsonElement result = export.GetProperty("response");
+                var zones = JsonNode.Parse(result.GetProperty("manifest").GetProperty("zones").GetRawText())!;
+                var records = zones["route.test"]!["records"]!.AsArray();
+                int index = records.IndexOf(Assert.Single(records, record => record!["owner"]!.GetValue<string>() == "unused.route.test"));
+                Assert.Contains(result.GetProperty("missingInputs").EnumerateArray(),
+                    input => input.ValueEquals($"/zones/route.test/records/{index}/data/forwarder/proxy/password"));
+                records[index]!["data"]!["forwarder"]!["proxy"]!["password"] = new JsonObject { ["environment"] = variable };
+                string migrated = new JsonObject { ["schemaVersion"] = 1, ["zones"] = zones }.ToJsonString();
+                await using var destination = await LoopbackWebService.StartAsync();
+                plan = await PreviewAsync(destination, migrated);
+                LoopbackWebService.AssertOk(await ApplyAsync(destination, migrated, plan.GetProperty("revision").GetString()!));
+                await AssertForwardedAsync(destination);
+                Assert.Empty((await PreviewAsync(destination, migrated)).GetProperty("changes").EnumerateArray());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+
+            static async Task AssertForwardedAsync(LoopbackWebService server)
+            {
+                var answer = Assert.Single((await server.QueryAsync("www.route.test", DnsResourceRecordType.A)).Answer);
+                Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
+            }
+        }
+
+        [Fact]
         public async Task ApplicationRecordsReproduceWithReferencedData()
         {
             const string variable = "TECHNITIUM_TEST_APP_RECORD_DATA";

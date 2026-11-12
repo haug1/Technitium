@@ -49,6 +49,8 @@ namespace DnsServerCore.Configuration
             declaration.TryGetProperty("transfer", out JsonElement transfer);
             declaration.TryGetProperty("notify", out JsonElement notify);
             declaration.TryGetProperty("updates", out JsonElement updates);
+            bool forwarder = current?.Type == AuthZoneType.Forwarder ||
+                declaration.TryGetProperty("type", out JsonElement zoneType) && zoneType.ValueEquals(nameof(AuthZoneType.Forwarder));
             AuthZoneNotify? notifyMode = ReadMode(notify, "notify", current?.Notify);
             if (notifyMode == AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones)
                 throw new InvalidDataException($"{path}/notify/mode: This notification mode requires a catalog zone.");
@@ -76,12 +78,12 @@ namespace DnsServerCore.Configuration
                 notifyMode, notifyServers,
                 ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies);
 
-            static T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
+            T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
             {
                 if (policy.ValueKind != JsonValueKind.Object || !policy.TryGetProperty("mode", out JsonElement value))
                     return null;
 
-                T mode = Enum.Parse<T>(value.GetString() ?? GetDefaultMode(name));
+                T mode = Enum.Parse<T>(value.GetString() ?? GetDefaultMode(name, forwarder));
                 return previous.HasValue && EqualityComparer<T>.Default.Equals(previous.Value, mode) ? null : mode;
             }
 
@@ -230,6 +232,8 @@ namespace DnsServerCore.Configuration
         internal static void Compare(string zoneName, string zonePath, JsonElement declared, JsonElement current, List<ConfigurationChange> changes)
         {
             bool exists = current.ValueKind == JsonValueKind.Object && current.TryGetProperty("type", out _);
+            bool forwarder = exists ? current.GetProperty("type").ValueEquals(nameof(AuthZoneType.Forwarder)) :
+                declared.TryGetProperty("type", out JsonElement zoneType) && zoneType.ValueEquals(nameof(AuthZoneType.Forwarder));
             foreach (JsonProperty policy in declared.EnumerateObject())
             {
                 if (!IsPolicy(policy.Name))
@@ -240,9 +244,9 @@ namespace DnsServerCore.Configuration
                 if (exists)
                 {
                     JsonElement policies = current.GetProperty("policies");
-                    if (!current.GetProperty("type").ValueEquals(nameof(AuthZoneType.Primary)) ||
+                    if ((!forwarder && !current.GetProperty("type").ValueEquals(nameof(AuthZoneType.Primary))) ||
                         policies.GetProperty("catalogMember").GetBoolean())
-                        throw new InvalidDataException($"{path}: Policy preview requires a primary zone outside a catalog and the cluster infrastructure.");
+                        throw new InvalidDataException($"{path}: Policy preview requires a primary or forwarder zone outside catalogs.");
                     currentPolicy = policies.GetProperty(policy.Name);
                 }
 
@@ -252,7 +256,7 @@ namespace DnsServerCore.Configuration
                     bool changed;
                     if (field.Name == "mode")
                     {
-                        string mode = field.Value.GetString() ?? GetDefaultMode(policy.Name);
+                        string mode = field.Value.GetString() ?? GetDefaultMode(policy.Name, forwarder);
                         if (policy.Name == "notify" && mode == nameof(AuthZoneNotify.SeparateNameServersForCatalogAndMemberZones))
                             throw new InvalidDataException($"{fieldPath}: This notification mode requires a catalog zone.");
                         changed = exists && !currentPolicy.GetProperty("mode").ValueEquals(mode);
@@ -289,13 +293,13 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        private static string GetDefaultMode(string policy)
+        private static string GetDefaultMode(string policy, bool forwarder)
         {
             return policy switch
             {
                 "query" => nameof(AuthZoneQueryAccess.Allow),
-                "transfer" => nameof(AuthZoneTransfer.AllowOnlyZoneNameServers),
-                "notify" => nameof(AuthZoneNotify.ZoneNameServers),
+                "transfer" => forwarder ? nameof(AuthZoneTransfer.Deny) : nameof(AuthZoneTransfer.AllowOnlyZoneNameServers),
+                "notify" => forwarder ? nameof(AuthZoneNotify.None) : nameof(AuthZoneNotify.ZoneNameServers),
                 "updates" => nameof(AuthZoneUpdate.Deny),
                 _ => throw new ArgumentOutOfRangeException(nameof(policy))
             };

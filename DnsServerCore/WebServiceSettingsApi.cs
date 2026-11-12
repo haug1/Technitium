@@ -1365,8 +1365,8 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Access was denied.");
 
                     ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
-                    if (zone is not null && (zone.Type != AuthZoneType.Primary || zone.CatalogZoneName is not null))
-                        throw new InvalidDataException($"{zonePath}: Apply requires a primary zone outside catalogs.");
+                    if (zone is not null && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) || zone.CatalogZoneName is not null))
+                        throw new InvalidDataException($"{zonePath}: Apply requires a primary or forwarder zone outside catalogs.");
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                         ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, zonePath, zone, keys);
                     writer.WriteStartObject(name);
@@ -1389,7 +1389,9 @@ namespace DnsServerCore
                         }
                         var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, declaration.Name,
                             _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
-                            _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"));
+                            _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"),
+                            zone?.Type == AuthZoneType.Forwarder || (zone is null &&
+                                declaration.Value.TryGetProperty("type", out JsonElement type) && type.ValueEquals("Forwarder")));
                         writer.WriteStartArray("recordChanges");
                         foreach (var edit in edits)
                         {
@@ -1399,11 +1401,17 @@ namespace DnsServerCore
                                 writer.WriteNullValue();
                         }
                         writer.WriteEndArray();
-                        writer.WriteStartArray("applicationRecordInputs");
+                        writer.WriteStartArray("protectedRecordInputs");
                         foreach (var edit in edits)
                         {
-                            if (edit.Kind != ConfigurationChangeKind.Remove && edit.Data is DnsApplicationRecordData app)
-                                writer.WriteStringValue(Convert.ToHexString(HMACSHA256.HashData(_configurationRevisionKey, Encoding.UTF8.GetBytes(app.Data))));
+                            string input = edit.Data switch
+                            {
+                                DnsApplicationRecordData app => app.Data,
+                                DnsForwarderRecordData forwarder => forwarder.ProxyPassword,
+                                _ => null
+                            };
+                            if (edit.Kind != ConfigurationChangeKind.Remove && input is not null)
+                                writer.WriteStringValue(Convert.ToHexString(HMACSHA256.HashData(_configurationRevisionKey, Encoding.UTF8.GetBytes(input))));
                         }
                         writer.WriteEndArray();
                     }
