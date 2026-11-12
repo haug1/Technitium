@@ -180,6 +180,27 @@ def verify_propagation(primary, secondary, graceful):
 
     wait_for(catalog_ready, "the Secondary to transfer the cluster zone")
 
+    tls_change = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "web": {"tlsEnabled": False}})
+    assert tls_change["status"] == "error" and "HTTPS listeners" in tls_change["errorMessage"], tls_change
+    new_web_port = allocate_ports()[0]
+    web = {"schemaVersion": 1, "web": {"httpPort": new_web_port}}
+    web_plan = ok(secondary.call("settings/config/plan", manifest=web))
+    assert any(change["path"] == "/web/httpPort" and change["restartWebService"] for change in web_plan["changes"]), web_plan
+    operation = ok(secondary.call("settings/config/apply", manifest=web, revision=web_plan["revision"]))["operationId"]
+    secondary.http_port = new_web_port
+
+    def web_rebound():
+        try:
+            status = ok(secondary.call(f"settings/config/status?operationId={operation}"))
+        except (urllib.error.URLError, TimeoutError):
+            return False
+        if status["state"] == "failed":
+            raise RuntimeError(status)
+        return status["state"] == "applied"
+
+    wait_for(web_rebound, "the Secondary HTTP listener to rebind")
+    assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == new_web_port != web_port
+
     intervals = {"schemaVersion": 1, "cluster": {"configRefreshSeconds": 120, "configRetrySeconds": 30}}
 
     def plan_if_supported():
@@ -205,7 +226,8 @@ def verify_propagation(primary, secondary, graceful):
 
     previous_failures = publication_failures()
     primary.stop()
-    addresses = {"schemaVersion": 1, "cluster": {"node": {"addresses": ["127.0.0.1", "127.0.0.2"]}}}
+    addresses = {"schemaVersion": 1, "web": web["web"],
+                 "cluster": {"node": {"addresses": ["127.0.0.1", "127.0.0.2"]}}}
     revision = ok(secondary.call("settings/config/plan", manifest=addresses))["revision"]
     ok(secondary.call("settings/config/apply", manifest=addresses, revision=revision))
 
@@ -218,7 +240,7 @@ def verify_propagation(primary, secondary, graceful):
                    for node in state["clusterNodes"])
 
     wait_for(primary_received_addresses, "the Primary to receive the Secondary's new address")
-    assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == web_port
+    assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == new_web_port
     if graceful:
         current = ok(primary.call("admin/cluster/state"))
         successor, = (node for node in current["clusterNodes"] if node["type"] == "Secondary")

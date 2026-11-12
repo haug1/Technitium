@@ -865,8 +865,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             if (ConfigurationWebCertificate.IsDeclared(manifest))
                 throw new InvalidDataException("/web/certificate: Applying web certificate settings to a cluster is not implemented.");
-            if (GetWebListeners(manifest).HasValues)
-                throw new InvalidDataException("/web: Applying web listener settings to a cluster is not implemented.");
+            CheckClusterWebListenerSupport(manifest);
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             if (GetAuthoritativeDefaults(manifest).HasValues)
@@ -893,6 +892,14 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/clientSubnet: Applying EDNS Client Subnet settings to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
+        }
+
+        internal static void CheckClusterWebListenerSupport(ConfigurationManifest manifest)
+        {
+            DnsWebService.WebListeners listeners = GetWebListeners(manifest);
+            if (listeners.Addresses is not null || listeners.TlsPort.HasValue || listeners.TlsEnabled.HasValue ||
+                listeners.Http3Enabled.HasValue || listeners.TlsSocket.HasValues)
+                throw new InvalidDataException("/web: The cluster's HTTPS listeners cannot be changed through a manifest.");
         }
 
         internal static string ReadWebRoot(ConfigurationManifest manifest, LogManager log = null)

@@ -679,6 +679,9 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
+                    if (_dnsWebService._clusterManager.ClusterInitialized)
+                        ConfigurationPlan.CheckClusterWebListenerSupport(manifest);
+
                     bool declaresWebRoot = manifest.Settings.TryGetProperty("web", out JsonElement web) && web.TryGetProperty("rootPath", out _);
                     bool declaresWebCertificate = ConfigurationWebCertificate.IsDeclared(manifest);
                     if ((declaresWebRoot || declaresWebCertificate) &&
