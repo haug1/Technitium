@@ -3259,6 +3259,40 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DnssecOwnershipBlocksOnlyDeclaredSigningControls()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "managed-signing.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256", server.AdminToken));
+            const string enabled = """{"schemaVersion":1,"zones":{"managed-signing.test":{"dnssec":{"enabled":true}}}}""";
+            const string proof = """{"schemaVersion":1,"zones":{"managed-signing.test":{"dnssec":{"enabled":true,"proof":{"type":"NSEC3"}}}}}""";
+            const string convertToNsec = "zones/dnssec/properties/convertToNSEC?zone=" + name;
+
+            await ApplyPolicyAsync(enabled);
+            await server.RestartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/properties/convertToNSEC3?zone={name}", server.AdminToken));
+            JsonElement unsign = await server.CallAsync($"zones/dnssec/unsign?zone={name}", server.AdminToken);
+            Assert.Equal("error", unsign.GetProperty("status").GetString());
+            Assert.Contains("/dnssec/enabled", unsign.GetProperty("errorMessage").GetString());
+
+            await ApplyPolicyAsync(proof);
+            JsonElement blocked = await server.CallAsync(convertToNsec, server.AdminToken);
+            Assert.Equal("error", blocked.GetProperty("status").GetString());
+            Assert.Contains("/dnssec/proof", blocked.GetProperty("errorMessage").GetString());
+            await ApplyPolicyAsync(enabled);
+            LoopbackWebService.AssertOk(await server.CallAsync(convertToNsec, server.AdminToken));
+
+            async Task ApplyPolicyAsync(string manifest)
+            {
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            }
+        }
+
+        [Fact]
         public async Task ManifestStagesAdditionalSigningKeysWithoutPublishingThem()
         {
             await using var server = await LoopbackWebService.StartAsync();

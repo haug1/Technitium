@@ -772,7 +772,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 ConfigurationZonePolicies.CheckRestoreOwnership(path, fields, current, candidate);
                 ConfigurationZonePrimary.CheckRestoreOwnership(path, fields, current, candidate);
                 bool ownsRecords = fields.Contains("records", StringComparer.Ordinal);
-                bool ownsSigning = fields.Contains("dnssec", StringComparer.Ordinal);
+                bool ownsSigning = fields.Any(field => field == "dnssec" || field.StartsWith("dnssec/", StringComparison.Ordinal));
                 var candidateRecords = new List<DnsResourceRecord>();
                 bool hasSoa = false;
                 int count = recordReader.ReadInt32();
@@ -793,14 +793,31 @@ namespace DnsServerCore.Dns.ZoneManagers
                     ListAllZoneRecords(name, currentRecords);
                     if (ownsRecords && !OperatorRecordKeys(currentRecords).SetEquals(OperatorRecordKeys(candidateRecords)))
                         CheckManifestZoneRecords(name);
-                    if (ownsSigning && (!SigningRecords(currentRecords).SetEquals(SigningRecords(candidateRecords)) ||
-                        !SigningKeys(current).SetEquals(SigningKeys(candidate))))
-                        CheckManifestSigningOwnership(name);
+                    if (ownsSigning)
+                    {
+                        bool legacy = fields.Contains("dnssec", StringComparer.Ordinal);
+                        var before = ReadSigningSettings(currentRecords);
+                        var after = ReadSigningSettings(candidateRecords);
+                        if ((legacy || fields.Contains("dnssec/enabled", StringComparer.Ordinal)) && before.Enabled != after.Enabled)
+                            CheckManifestSigningOwnership(name, "enabled");
+                        if ((legacy || fields.Contains("dnssec/proof", StringComparer.Ordinal)) &&
+                            (before.UseNsec3, before.Iterations, before.SaltLength) != (after.UseNsec3, after.Iterations, after.SaltLength))
+                            CheckManifestSigningOwnership(name, "proof");
+                        if ((legacy || fields.Contains("dnssec/dnsKeyTtl", StringComparer.Ordinal)) && before.Ttl != after.Ttl)
+                            CheckManifestSigningOwnership(name, "dnsKeyTtl");
+                        if ((legacy || fields.Contains("dnssec/keys", StringComparer.Ordinal)) &&
+                            !SigningKeys(current).SetEquals(SigningKeys(candidate)))
+                            CheckManifestSigningOwnership(name, "keys");
+                    }
                 }
 
-                static HashSet<(DnsResourceRecordData Data, uint Ttl)> SigningRecords(List<DnsResourceRecord> records) =>
-                    records.Where(record => record.Type is DnsResourceRecordType.DNSKEY or DnsResourceRecordType.NSEC3PARAM)
-                        .Select(record => (record.RDATA, record.OriginalTtlValue)).ToHashSet();
+                static (bool Enabled, bool UseNsec3, ushort Iterations, int SaltLength, uint? Ttl) ReadSigningSettings(
+                    List<DnsResourceRecord> records)
+                {
+                    var dnsKey = records.Find(record => record.Type == DnsResourceRecordType.DNSKEY);
+                    var nsec3 = records.Find(record => record.Type == DnsResourceRecordType.NSEC3PARAM)?.RDATA as DnsNSEC3PARAMRecordData;
+                    return (dnsKey is not null, nsec3 is not null, nsec3?.Iterations ?? 0, nsec3?.Salt.Length ?? 0, dnsKey?.OriginalTtlValue);
+                }
 
                 static HashSet<(DnsResourceRecordData DnsKey, ushort RolloverDays)> SigningKeys(AuthZoneInfo zone) =>
                     (zone.DnssecPrivateKeys ?? []).Select(key => ((DnsResourceRecordData)key.DnsKey, key.RolloverDays)).ToHashSet();
@@ -1502,8 +1519,18 @@ namespace DnsServerCore.Dns.ZoneManagers
             var fields = new List<string>();
             foreach (JsonProperty field in declaration.EnumerateObject())
             {
-                if (field.Name is "enabled" or "records" or "dnssec")
+                if (field.Name is "enabled" or "records")
                     fields.Add(field.Name);
+                else if (field.Name == "dnssec")
+                {
+                    if (field.Value.EnumerateObject().Any())
+                        fields.Add("dnssec/enabled");
+                    foreach (string option in new[] { "proof", "dnsKeyTtl", "keys" })
+                    {
+                        if (field.Value.TryGetProperty(option, out _))
+                            fields.Add("dnssec/" + option);
+                    }
+                }
                 else if (field.Name == "catalog")
                     fields.AddRange(field.Value.EnumerateObject().Select(option => "catalog/" + option.Name));
                 else if (field.Name == "primary")
@@ -3128,10 +3155,10 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         #region DNSSEC
 
-        private void CheckManifestSigningOwnership(string name)
+        private void CheckManifestSigningOwnership(string name, string field)
         {
-            if (OwnsManifestZoneField(name, "dnssec"))
-                throw new DnsWebServiceException($"{GetManifestZonePath(name)}/dnssec: Signing policy is managed by the configuration manifest.");
+            if (OwnsManifestZoneField(name, "dnssec") || OwnsManifestZoneField(name, "dnssec/" + field))
+                throw new DnsWebServiceException($"{GetManifestZonePath(name)}/dnssec/{field}: Signing policy is managed by the configuration manifest.");
         }
 
         public void SignPrimaryZone(string zoneName, DnssecPrivateKey kskPrivateKey, DnssecPrivateKey zskPrivateKey, uint dnsKeyTtl, bool useNSec3, ushort iterations = 0, byte saltLength = 0)
@@ -3139,7 +3166,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (!_root.TryGet(zoneName, out ApexZone apexZone) || (apexZone is not PrimaryZone primaryZone))
                 throw new DnsServerException("No such primary zone was found: " + zoneName);
 
-            CheckManifestSigningOwnership(primaryZone.Name);
+            CheckManifestSigningOwnership(primaryZone.Name, "enabled");
             primaryZone.SignZone(kskPrivateKey, zskPrivateKey, dnsKeyTtl, useNSec3, iterations, saltLength);
 
             SaveZoneFile(primaryZone.Name);
@@ -3150,7 +3177,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (!_root.TryGet(zoneName, out ApexZone apexZone) || (apexZone is not PrimaryZone primaryZone))
                 throw new DnsServerException("No such primary zone was found: " + zoneName);
 
-            CheckManifestSigningOwnership(primaryZone.Name);
+            CheckManifestSigningOwnership(primaryZone.Name, "enabled");
             primaryZone.UnsignZone();
 
             SaveZoneFile(primaryZone.Name);
@@ -3161,7 +3188,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (!_root.TryGet(zoneName, out ApexZone apexZone) || (apexZone is not PrimaryZone primaryZone))
                 throw new DnsServerException("No such primary zone was found: " + zoneName);
 
-            CheckManifestSigningOwnership(primaryZone.Name);
+            CheckManifestSigningOwnership(primaryZone.Name, "proof");
             primaryZone.ConvertToNSec();
 
             SaveZoneFile(primaryZone.Name);
@@ -3172,7 +3199,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (!_root.TryGet(zoneName, out ApexZone apexZone) || (apexZone is not PrimaryZone primaryZone))
                 throw new DnsServerException("No such primary zone was found: " + zoneName);
 
-            CheckManifestSigningOwnership(primaryZone.Name);
+            CheckManifestSigningOwnership(primaryZone.Name, "proof");
             primaryZone.ConvertToNSec3(iterations, saltLength);
 
             SaveZoneFile(primaryZone.Name);
@@ -3183,7 +3210,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (!_root.TryGet(zoneName, out ApexZone apexZone) || (apexZone is not PrimaryZone primaryZone))
                 throw new DnsServerException("No such primary zone was found: " + zoneName);
 
-            CheckManifestSigningOwnership(primaryZone.Name);
+            CheckManifestSigningOwnership(primaryZone.Name, "proof");
             primaryZone.UpdateNSec3Parameters(iterations, saltLength);
 
             SaveZoneFile(primaryZone.Name);
@@ -3194,7 +3221,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (!_root.TryGet(zoneName, out ApexZone apexZone) || (apexZone is not PrimaryZone primaryZone))
                 throw new DnsServerException("No such primary zone was found: " + zoneName);
 
-            CheckManifestSigningOwnership(primaryZone.Name);
+            CheckManifestSigningOwnership(primaryZone.Name, "dnsKeyTtl");
             primaryZone.UpdateDnsKeyTtl(dnsKeyTtl);
 
             SaveZoneFile(primaryZone.Name);
