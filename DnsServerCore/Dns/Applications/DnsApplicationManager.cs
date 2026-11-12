@@ -419,14 +419,24 @@ namespace DnsServerCore.Dns.Applications
                 throw new InvalidDataException($"{ConfigurationApplications.AppPath(name)}: The package version or configuration is managed by the manifest.");
         }
 
-        internal bool CheckConfigurationWrite(DnsApplication app, string config)
+        internal async Task SetApplicationConfigAsync(DnsApplication app, string config)
         {
-            string path = ConfigurationApplications.AppPath(app.Name) + "/configuration";
-            if (!_manifestOwnedPaths.Contains(path))
-                return true;
-            if (app.ReadManifestConfig() != config)
-                throw new InvalidDataException($"{path}: App configuration is managed by the manifest.");
-            return false;
+            await _opsLock.WaitAsync();
+            try
+            {
+                string path = ConfigurationApplications.AppPath(app.Name) + "/configuration";
+                if (!_applications.TryGetValue(app.Name, out DnsApplication current) || !ReferenceEquals(current, app))
+                    throw new InvalidDataException($"{path}: The installed app changed before its configuration could be saved.");
+
+                if (!_manifestOwnedPaths.Contains(path))
+                    await app.SetConfigAsync(config);
+                else if (app.ReadManifestConfig() != config)
+                    throw new InvalidDataException($"{path}: App configuration is managed by the manifest.");
+            }
+            finally
+            {
+                _opsLock.Release();
+            }
         }
 
         private bool OwnsAppAbsence(string name)
@@ -434,6 +444,43 @@ namespace DnsServerCore.Dns.Applications
             StringComparer comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
             return _manifestOwnedPaths.Contains(ConfigurationApplications.Path) ||
                 (_manifestOwnedPaths.Contains(ConfigurationApplications.AppPath(name), comparer) && !_applications.Keys.Contains(name, comparer));
+        }
+
+        internal async Task WriteClusterTransferAsync(ZipArchive backupZip, DateTime ifModifiedSince)
+        {
+            await _opsLock.WaitAsync();
+            try
+            {
+                string[] appDirectories = Directory.GetDirectories(_appsPath);
+                foreach (string appDirectory in appDirectories)
+                {
+                    string applicationName = Path.GetFileName(appDirectory);
+                    string applicationZipFile = Path.Combine(appDirectory, applicationName + ".zip");
+                    string configFile = Path.Combine(appDirectory, DnsApplication.ConfigurationFileName);
+                    bool fileAdded = false;
+
+                    if (File.Exists(applicationZipFile) && (File.GetLastWriteTimeUtc(applicationZipFile) > ifModifiedSince))
+                    {
+                        string entryName = "apps/" + applicationName + "/" + applicationName + ".zip";
+                        backupZip.CreateEntryFromFile(applicationZipFile, entryName);
+                        fileAdded = true;
+                    }
+
+                    if (File.Exists(configFile) && (File.GetLastWriteTimeUtc(configFile) > ifModifiedSince))
+                    {
+                        string entryName = "apps/" + applicationName + "/" + DnsApplication.ConfigurationFileName;
+                        backupZip.CreateEntryFromFile(configFile, entryName);
+                        fileAdded = true;
+                    }
+
+                    if (!fileAdded)
+                        _ = backupZip.CreateEntry("apps/" + applicationName + "/.exists", CompressionLevel.Optimal);
+                }
+            }
+            finally
+            {
+                _opsLock.Release();
+            }
         }
 
         internal void CheckManifestRestore(ZipArchive archive, bool deleteExistingFiles, bool isConfigTransfer = false)

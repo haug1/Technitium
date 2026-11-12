@@ -866,31 +866,7 @@ namespace DnsServerCore
                 {
                     if (isConfigTransfer)
                     {
-                        string[] appDirectories = Directory.GetDirectories(Path.Combine(_configFolder, "apps"), "*", SearchOption.TopDirectoryOnly);
-                        foreach (string appDirectory in appDirectories)
-                        {
-                            string applicationName = Path.GetFileName(appDirectory);
-                            string applicationZipFile = Path.Combine(appDirectory, applicationName + ".zip");
-                            string configFile = Path.Combine(appDirectory, "dnsApp.config");
-                            bool fileAdded = false;
-
-                            if (File.Exists(applicationZipFile) && (File.GetLastWriteTimeUtc(applicationZipFile) > ifModifiedSince))
-                            {
-                                string entryName = "apps/" + applicationName + "/" + applicationName + ".zip";
-                                backupZip.CreateEntryFromFile(applicationZipFile, entryName);
-                                fileAdded = true;
-                            }
-
-                            if (File.Exists(configFile) && (File.GetLastWriteTimeUtc(configFile) > ifModifiedSince))
-                            {
-                                string entryName = "apps/" + applicationName + "/dnsApp.config";
-                                backupZip.CreateEntryFromFile(configFile, entryName);
-                                fileAdded = true;
-                            }
-
-                            if (!fileAdded)
-                                _ = backupZip.CreateEntry("apps/" + applicationName + "/.exists", CompressionLevel.Optimal);
-                        }
+                        await _dnsServer.DnsApplicationManager.WriteClusterTransferAsync(backupZip, ifModifiedSince);
                     }
                     else
                     {
@@ -1438,7 +1414,7 @@ namespace DnsServerCore
 
                                     try
                                     {
-                                        await application.SetConfigAsync(config);
+                                        await _dnsServer.DnsApplicationManager.SetApplicationConfigAsync(application, config);
                                     }
                                     catch (Exception ex)
                                     {

@@ -512,8 +512,7 @@ namespace DnsServerCore
                 if (config.Length == 0)
                     config = null;
 
-                if (_dnsWebService._dnsServer.DnsApplicationManager.CheckConfigurationWrite(application, config))
-                    await application.SetConfigAsync(config);
+                await _dnsWebService._dnsServer.DnsApplicationManager.SetApplicationConfigAsync(application, config);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DNS application '" + name + "' app config was saved successfully.");
 
