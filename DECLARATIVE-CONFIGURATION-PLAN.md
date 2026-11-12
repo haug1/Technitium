@@ -5,6 +5,7 @@ A versioned `technitium.json` manifest should reproduce the operator-controlled 
 ## 1. Close configuration and export gaps
 
 - Audit the inventory against the schema, preview, apply, and export. Close gaps where an operator-controlled value is lost or a valid source configuration cannot be represented. Use the same domain rules for equivalent manifest and API inputs.
+- Migrate operator-managed zones enrolled in the cluster catalog, including membership, zone policies, records, and the configured apex NS TTL. Recreate membership on the destination Primary and verify transfer to a Secondary. Derive the infrastructure zones and cluster-managed name server identities from the destination topology.
 
 **Acceptance.** Every operator-settable field in the inventory has a documented manifest representation and a migration path.
 

@@ -130,10 +130,7 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await restored.CallAsync("settings/config/apply", restored.AdminToken, applyBody,
                 preview.GetProperty("response").GetProperty("revision").GetString()));
             Assert.Equal(600, (await restored.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
-            using var repeatBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
-            JsonElement repeat = await restored.CallAsync("settings/config/plan", restored.AdminToken, repeatBody);
-            LoopbackWebService.AssertOk(repeat);
-            Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+            await AssertMigrationReapplyAsync(restored, migration.ToJsonString());
 
             migration["dns"]!["serverDomain"] = "different.cluster.test";
             using var renameBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
@@ -431,10 +428,7 @@ namespace DnsServerCore.Tests
             JsonElement migrated = await restored.GetSettingsAsync();
             Assert.Equal(41, migrated.GetProperty("maxLogFileDays").GetInt32());
             Assert.Equal(180, migrated.GetProperty("defaultRecordTtl").GetInt32());
-            using var repeatBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
-            JsonElement repeat = await restored.CallAsync("settings/config/plan", restored.AdminToken, repeatBody);
-            LoopbackWebService.AssertOk(repeat);
-            Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+            await AssertMigrationReapplyAsync(restored, migration.ToJsonString());
 
             void WriteManifest(string domain)
             {
@@ -933,6 +927,28 @@ namespace DnsServerCore.Tests
                 using var body = new StringContent(declaration, Encoding.UTF8, "application/json");
                 return await server.CallAsync("settings/config/plan", token, body);
             }
+        }
+
+        private static async Task AssertMigrationReapplyAsync(LoopbackWebService server, string manifest)
+        {
+            DateTime before = (await server.GetSettingsAsync()).GetProperty("uptimestamp").GetDateTime();
+            using var previewBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement preview = await server.CallAsync("settings/config/plan", server.AdminToken, previewBody);
+            LoopbackWebService.AssertOk(preview);
+            JsonElement plan = preview.GetProperty("response");
+            Assert.Empty(plan.GetProperty("changes").EnumerateArray());
+            string revision = plan.GetProperty("revision").GetString()!;
+
+            using var applyBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement apply = await server.CallAsync("settings/config/apply", server.AdminToken, applyBody, revision);
+            LoopbackWebService.AssertOk(apply);
+            Assert.False(apply.GetProperty("response").TryGetProperty("operationId", out _));
+            Assert.Equal(before, (await server.GetSettingsAsync()).GetProperty("uptimestamp").GetDateTime());
+
+            using var repeatBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement repeat = await server.CallAsync("settings/config/plan", server.AdminToken, repeatBody);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Equal(revision, repeat.GetProperty("response").GetProperty("revision").GetString());
         }
     }
 }
