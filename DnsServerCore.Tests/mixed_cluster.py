@@ -1,4 +1,4 @@
-"""Run the interval compatibility check against two published console builds."""
+"""Check cluster intervals across two builds or verify same-build propagation."""
 
 import argparse
 import json
@@ -41,14 +41,14 @@ class Node:
         self.binary = binary
         self.folder = folder
         self.folder.mkdir()
-        self.http_port, tls_port, dns_port = ports
+        self.http_port, tls_port, self.dns_port = ports
         self.password = password
         self.token = None
         self.process = None
         self.manifest = folder / "technitium.json"
         self.manifest.write_text(json.dumps({
             "schemaVersion": 1,
-            "dns": {"serverDomain": name, "localEndpoints": [f"127.0.0.1:{dns_port}"],
+            "dns": {"serverDomain": name, "localEndpoints": [f"127.0.0.1:{self.dns_port}"],
                     "recursion": {"mode": "Deny"}, "checkForUpdates": False},
             "web": {"localAddresses": ["127.0.0.1"], "httpPort": self.http_port,
                     "tlsPort": tls_port, "tlsEnabled": True, "useSelfSignedCertificate": True},
@@ -107,7 +107,17 @@ class Node:
             self.process.wait()
 
 
-def verify(current, previous, folder):
+def wait_for(check, description, timeout=45):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = check()
+        if result:
+            return result
+        time.sleep(0.5)
+    raise RuntimeError(f"Timed out waiting for {description}.")
+
+
+def verify(current, previous, folder, propagation):
     ports = allocate_ports()
     password = secrets.token_hex(16)
     primary = Node(current, folder / "primary", "primary.cluster.test", ports[:3], password)
@@ -125,6 +135,10 @@ def verify(current, previous, folder):
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
             "primaryNodePassword": password, "ignoreCertificateErrors": "true",
         }))
+        if propagation:
+            assert joined["supportsDeclarativeClusterOptions"] is True
+            verify_propagation(primary, secondary)
+            return
         assert "supportsDeclarativeClusterOptions" not in joined
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
         for rejected in (
@@ -149,14 +163,78 @@ def verify(current, previous, folder):
         primary.stop()
 
 
+def verify_propagation(primary, secondary):
+    catalog = "cluster-catalog.cluster.test"
+    web_port = ok(secondary.call("settings/get"))["webServiceHttpPort"]
+    ok(secondary.call("zones/options/set", form={
+        "zone": catalog, "primaryZoneTransferProtocol": "Tcp",
+        "primaryNameServerAddresses": f"127.0.0.1:{primary.dns_port}",
+    }))
+
+    def catalog_ready():
+        state = secondary.call("zones/options/get?zone=cluster.test")
+        if state["status"] == "ok":
+            return True
+        ok(secondary.call("zones/resync", form={"zone": catalog}))
+        return False
+
+    wait_for(catalog_ready, "the Secondary to transfer the cluster zone")
+
+    intervals = {"schemaVersion": 1, "cluster": {"configRefreshSeconds": 120, "configRetrySeconds": 30}}
+
+    def plan_if_supported():
+        plan = primary.call("settings/config/plan", manifest=intervals)
+        if plan["status"] == "ok":
+            return ok(plan)
+        if "has not advertised support" not in plan["errorMessage"]:
+            raise RuntimeError(plan["errorMessage"])
+        return None
+
+    plan = wait_for(plan_if_supported, "the Secondary to advertise interval support")
+    ok(primary.call("settings/config/apply", manifest=intervals, revision=plan["revision"]))
+
+    def secondary_interval_updated():
+        state = ok(secondary.call("admin/cluster/state"))
+        return state["configRefreshIntervalSeconds"] == 120 and state["configRetryIntervalSeconds"] == 30
+
+    wait_for(secondary_interval_updated, "the Secondary to receive the 120-second interval")
+    def publication_failures():
+        return sum(log.read_text(encoding="utf-8").count(
+            "DNS Server failed to update this Secondary node's details on the Primary node.")
+            for log in (secondary.folder / "logs").glob("*.log"))
+
+    previous_failures = publication_failures()
+    primary.stop()
+    addresses = {"schemaVersion": 1, "cluster": {"node": {"addresses": ["127.0.0.1", "127.0.0.2"]}}}
+    revision = ok(secondary.call("settings/config/plan", manifest=addresses))["revision"]
+    ok(secondary.call("settings/config/apply", manifest=addresses, revision=revision))
+
+    wait_for(lambda: publication_failures() > previous_failures, "a publication failure while the Primary is stopped")
+    primary.start()
+
+    def primary_received_addresses():
+        state = ok(primary.call("admin/cluster/state"))
+        return any(node["type"] == "Secondary" and "127.0.0.2" in node["ipAddresses"]
+                   for node in state["clusterNodes"])
+
+    wait_for(primary_received_addresses, "the Primary to receive the Secondary's new address")
+    assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == web_port
+    print("Propagation check passed. The Secondary received the intervals and its address publication succeeded after the Primary restarted.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("current", type=Path, help="current published DnsServerApp.dll")
-    parser.add_argument("previous", type=Path, help="published DnsServerApp.dll from a revision without the capability")
+    parser.add_argument("previous", type=Path, nargs="?", help="published DnsServerApp.dll from a revision without the capability")
+    parser.add_argument("--propagation", action="store_true", help="run the current build on both nodes and verify interval propagation")
     args = parser.parse_args()
+    if args.propagation == (args.previous is not None):
+        parser.error("supply a previous build or --propagation")
     folder = Path(tempfile.mkdtemp(prefix="technitium-mixed-cluster-"))
     print(f"Fixture logs: {folder}", flush=True)
-    verify(args.current.resolve(strict=True), args.previous.resolve(strict=True), folder)
+    current = args.current.resolve(strict=True)
+    previous = current if args.propagation else args.previous.resolve(strict=True)
+    verify(current, previous, folder, args.propagation)
 
 
 if __name__ == "__main__":
