@@ -3293,6 +3293,55 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneRestorePreservesManifestManagedDnssecProof()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "restore-signing.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256", server.AdminToken));
+            await server.RestartAsync();
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?zones=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using var response = await server.Client.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            byte[] backup = await response.Content.ReadAsByteArrayAsync();
+            const string owned = """
+                {"schemaVersion":1,"zones":{"restore-signing.test":{"dnssec":{"enabled":true,"proof":{"type":"NSEC3","iterations":2}}}}}
+                """;
+            const string released = """
+                {"schemaVersion":1,"zones":{"restore-signing.test":{"dnssec":{"enabled":true}}}}
+                """;
+
+            await ApplyPolicyAsync(owned);
+            JsonElement conflict = await RestoreAsync();
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/zones/restore-signing.test/dnssec/proof", conflict.GetProperty("errorMessage").GetString());
+            Assert.Single((await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Answer);
+            Assert.Empty((await PreviewAsync(server, owned)).GetProperty("changes").EnumerateArray());
+
+            await ApplyPolicyAsync(released);
+            LoopbackWebService.AssertOk(await RestoreAsync());
+            Assert.Empty((await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Answer);
+            Assert.Equal(2, (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer.Count);
+            Assert.Empty((await PreviewAsync(server, released)).GetProperty("changes").EnumerateArray());
+
+            async Task ApplyPolicyAsync(string manifest)
+            {
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            }
+
+            async Task<JsonElement> RestoreAsync()
+            {
+                using var form = new MultipartFormDataContent();
+                form.Add(new ByteArrayContent(backup), "file", "backup.zip");
+                return await server.CallAsync("settings/restore?zones=true&deleteExistingFiles=false", server.AdminToken, form);
+            }
+        }
+
+        [Fact]
         public async Task ManifestStagesAdditionalSigningKeysWithoutPublishingThem()
         {
             await using var server = await LoopbackWebService.StartAsync();
