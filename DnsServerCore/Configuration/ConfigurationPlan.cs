@@ -10,6 +10,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DnsServerCore.Dns.ZoneManagers;
+using TechnitiumLibrary.Net;
 
 namespace DnsServerCore.Configuration
 {
@@ -41,6 +42,8 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/minSoaRefresh"] = Field("minSoaRefresh", 300, canApply: true),
             ["/dns/authoritative/minSoaRetry"] = Field("minSoaRetry", 300, canApply: true),
             ["/dns/authoritative/useSoaSerialDateScheme"] = Field("useSoaSerialDateScheme", false, canApply: true),
+            ["/dns/authoritative/zoneTransferAllowedNetworks"] = Field("zoneTransferAllowedNetworks", Array.Empty<string>(), canApply: true),
+            ["/dns/authoritative/notifyAllowedNetworks"] = Field("notifyAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232),
@@ -139,7 +142,14 @@ namespace DnsServerCore.Configuration
                 ? ConfigurationManifest.ReadDefaultResponsiblePerson(responsible.Value) : null;
 
             return new DnsServer.AuthoritativeDefaults(ReadTtl("defaultRecordTtl"), ReadTtl("defaultNsRecordTtl"), ReadTtl("defaultSoaRecordTtl"),
-                ReadValue("useSoaSerialDateScheme")?.GetBoolean(), ReadTtl("minSoaRefresh"), ReadTtl("minSoaRetry"), responsiblePerson);
+                ReadValue("useSoaSerialDateScheme")?.GetBoolean(), ReadTtl("minSoaRefresh"), ReadTtl("minSoaRetry"), responsiblePerson,
+                ReadNetworks("zoneTransferAllowedNetworks"), ReadNetworks("notifyAllowedNetworks"));
+
+            NetworkAddress[] ReadNetworks(string name)
+            {
+                return authoritative.TryGetProperty(name, out JsonElement value)
+                    ? ConfigurationManifest.ReadAuthoritativeNetworks(value, name) : null;
+            }
 
 
             uint? ReadTtl(string name)
@@ -269,6 +279,12 @@ namespace DnsServerCore.Configuration
 
                         candidate = SortAddresses(addresses.Select(address => address.ToString()));
                         current = SortAddresses(ReadWebAddresses(current).Select(address => address.ToString()));
+                    }
+                    else if (path is "/dns/authoritative/zoneTransferAllowedNetworks" or "/dns/authoritative/notifyAllowedNetworks")
+                    {
+                        string name = setting.ApiField;
+                        candidate = SortAddresses(ConfigurationManifest.ReadAuthoritativeNetworks(desired, name).Select(network => network.ToString()));
+                        current = SortAddresses(ConfigurationManifest.ReadAuthoritativeNetworks(current, name).Select(network => network.ToString()));
                     }
                     else if (path == DnsEndpointsPath)
                     {

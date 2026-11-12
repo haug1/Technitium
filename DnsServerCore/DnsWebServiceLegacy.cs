@@ -222,17 +222,25 @@ namespace DnsServerCore
                     ReadLegacyWebConfiguration(reader, version);
                     stream.ReadShortString(); // server domain
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson)
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks)
                     {
                         var (_, _, recordTtl) = ReadLegacyDnsDefaults(reader, version);
                         var defaults = new DnsServer.AuthoritativeDefaults(recordTtl, null, null);
-                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson)
+                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks)
                         {
                             string responsiblePerson = version >= 36 ? reader.BaseStream.ReadShortString() : "";
-                            if (_dnsServer.HasManagedSoaTiming)
+                            if (_dnsServer.HasManagedSoaTiming || _dnsServer.HasManagedAuthoritativeNetworks)
                                 defaults = ReadLegacySoaTiming(reader, version) with { Record = recordTtl };
                             if (_dnsServer.ManifestOwnsResponsiblePerson)
                                 defaults = defaults with { ResponsiblePerson = DnsServer.NormalizeDefaultResponsiblePerson(responsiblePerson) };
+                        }
+                        if (_dnsServer.HasManagedAuthoritativeNetworks)
+                        {
+                            defaults = defaults with
+                            {
+                                ZoneTransferNetworks = version >= 33 ? AuthZoneInfo.ReadNetworkAddressesFrom(reader) ?? [] : [],
+                                NotifyNetworks = version >= 34 ? AuthZoneInfo.ReadNetworkAddressesFrom(reader) ?? [] : []
+                            };
                         }
                         _dnsServer.CheckManifestAuthoritativeDefaults(defaults);
                     }
@@ -250,7 +258,7 @@ namespace DnsServerCore
                         throw new InvalidDataException("/dns/authoritative/defaultRecordTtl: Cannot verify the default record TTL in this backup format.");
 
                     _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(
-                        version < 23 ? 3600u : null, null, null, false, 300, 300, ""));
+                        version < 23 ? 3600u : null, null, null, false, 300, 300, "", [], []));
                     return;
                 }
             }

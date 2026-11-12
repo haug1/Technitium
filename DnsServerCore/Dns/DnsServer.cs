@@ -126,7 +126,7 @@ namespace DnsServerCore.Dns
         ManagedDnsSettings _managedDnsSettings;
 
         [Flags]
-        private enum ManagedDnsSettings : byte
+        private enum ManagedDnsSettings : ushort
         {
             LocalEndPoints = 1,
             RecordTtl = 2,
@@ -135,14 +135,18 @@ namespace DnsServerCore.Dns
             SerialDateScheme = 16,
             MinRefresh = 32,
             MinRetry = 64,
-            ResponsiblePerson = 128
+            ResponsiblePerson = 128,
+            ZoneTransferNetworks = 256,
+            NotifyNetworks = 512
         }
 
         internal readonly record struct AuthoritativeDefaults(uint? Record, uint? Ns, uint? Soa,
-            bool? SerialDateScheme = null, uint? MinRefresh = null, uint? MinRetry = null, string ResponsiblePerson = null)
+            bool? SerialDateScheme = null, uint? MinRefresh = null, uint? MinRetry = null, string ResponsiblePerson = null,
+            IReadOnlyCollection<NetworkAddress> ZoneTransferNetworks = null, IReadOnlyCollection<NetworkAddress> NotifyNetworks = null)
         {
             internal bool HasValues => Record.HasValue || Ns.HasValue || Soa.HasValue ||
-                SerialDateScheme.HasValue || MinRefresh.HasValue || MinRetry.HasValue || (ResponsiblePerson is not null);
+                SerialDateScheme.HasValue || MinRefresh.HasValue || MinRetry.HasValue || (ResponsiblePerson is not null) ||
+                (ZoneTransferNetworks is not null) || (NotifyNetworks is not null);
         }
         readonly LogManager _log;
 
@@ -696,6 +700,8 @@ namespace DnsServerCore.Dns
         internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
         internal bool ManifestOwnsResponsiblePerson => _managedDnsSettings.HasFlag(ManagedDnsSettings.ResponsiblePerson);
+        internal bool HasManagedAuthoritativeNetworks => (_managedDnsSettings &
+            (ManagedDnsSettings.ZoneTransferNetworks | ManagedDnsSettings.NotifyNetworks)) != 0;
         internal bool HasManagedSoaTiming => (_managedDnsSettings &
             (ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh | ManagedDnsSettings.MinRetry)) != 0;
         internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
@@ -718,6 +724,10 @@ namespace DnsServerCore.Dns
                 yield return "/dns/authoritative/minSoaRetry";
             if (ManifestOwnsResponsiblePerson)
                 yield return "/dns/authoritative/defaultResponsiblePerson";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ZoneTransferNetworks))
+                yield return "/dns/authoritative/zoneTransferAllowedNetworks";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NotifyNetworks))
+                yield return "/dns/authoritative/notifyAllowedNetworks";
         }
 
         internal void CheckManifestAuthoritativeDefaults(AuthoritativeDefaults defaults)
@@ -737,6 +747,12 @@ namespace DnsServerCore.Dns
             if (ManifestOwnsResponsiblePerson && (defaults.ResponsiblePerson is not null) &&
                 !string.Equals(defaults.ResponsiblePerson, _defaultResponsiblePerson?.Address ?? "", StringComparison.Ordinal))
                 throw new DnsWebServiceException("/dns/authoritative/defaultResponsiblePerson: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ZoneTransferNetworks) && defaults.ZoneTransferNetworks is not null &&
+                !HaveSameNetworks(defaults.ZoneTransferNetworks, _zoneTransferAllowedNetworks))
+                throw new DnsWebServiceException("/dns/authoritative/zoneTransferAllowedNetworks: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NotifyNetworks) && defaults.NotifyNetworks is not null &&
+                !HaveSameNetworks(defaults.NotifyNetworks, _notifyAllowedNetworks))
+                throw new DnsWebServiceException("/dns/authoritative/notifyAllowedNetworks: Setting is managed by the configuration manifest.");
         }
 
         private static AuthoritativeDefaults ReadAuthoritativeTtls(BinaryReader reader, int version)
@@ -755,10 +771,25 @@ namespace DnsServerCore.Dns
             };
         }
 
+        private static AuthoritativeDefaults ReadAuthoritativeNetworks(BinaryReader reader, AuthoritativeDefaults defaults)
+        {
+            return defaults with
+            {
+                ZoneTransferNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(reader) ?? [],
+                NotifyNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(reader) ?? []
+            };
+        }
+
+        private static bool HaveSameNetworks(IReadOnlyCollection<NetworkAddress> first, IReadOnlyCollection<NetworkAddress> second)
+        {
+            return ReferenceEquals(first, second) || (first ?? []).ToHashSet().SetEquals(second ?? []);
+        }
+
         private AuthoritativeDefaults GetAuthoritativeDefaults()
         {
             return new AuthoritativeDefaults(_authZoneManager.DefaultRecordTtl, _authZoneManager.DefaultNsRecordTtl, _authZoneManager.DefaultSoaRecordTtl,
-                _authZoneManager.UseSoaSerialDateScheme, _authZoneManager.MinSoaRefresh, _authZoneManager.MinSoaRetry, _defaultResponsiblePerson?.Address ?? "");
+                _authZoneManager.UseSoaSerialDateScheme, _authZoneManager.MinSoaRefresh, _authZoneManager.MinSoaRetry, _defaultResponsiblePerson?.Address ?? "",
+                _zoneTransferAllowedNetworks ?? [], _notifyAllowedNetworks ?? []);
         }
 
         internal void SetAuthoritativeDefaults(AuthoritativeDefaults defaults)
@@ -778,6 +809,10 @@ namespace DnsServerCore.Dns
             if ((defaults.ResponsiblePerson is not null) &&
                 !string.Equals(defaults.ResponsiblePerson, _defaultResponsiblePerson?.Address ?? "", StringComparison.Ordinal))
                 _defaultResponsiblePerson = defaults.ResponsiblePerson.Length == 0 ? null : new MailAddress(defaults.ResponsiblePerson);
+            if (defaults.ZoneTransferNetworks is not null && !HaveSameNetworks(defaults.ZoneTransferNetworks, _zoneTransferAllowedNetworks))
+                ZoneTransferAllowedNetworks = defaults.ZoneTransferNetworks;
+            if (defaults.NotifyNetworks is not null && !HaveSameNetworks(defaults.NotifyNetworks, _notifyAllowedNetworks))
+                NotifyAllowedNetworks = defaults.NotifyNetworks;
         }
 
         internal void CheckManifestLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints)
@@ -798,12 +833,14 @@ namespace DnsServerCore.Dns
                 AuthZoneInfo.ReadNetworkAddressesFrom(reader);
                 AuthZoneInfo.ReadNetworkAddressesFrom(reader);
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
-                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson)
+                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks)
                 {
                     string responsiblePerson = reader.BaseStream.ReadShortString();
                     defaults = defaults with { ResponsiblePerson = NormalizeDefaultResponsiblePerson(responsiblePerson) };
-                    if (HasManagedSoaTiming)
+                    if (HasManagedSoaTiming || HasManagedAuthoritativeNetworks)
                         defaults = ReadSoaTiming(reader, defaults);
+                    if (HasManagedAuthoritativeNetworks)
+                        defaults = ReadAuthoritativeNetworks(reader, defaults);
                 }
 
                 CheckManifestAuthoritativeDefaults(defaults);
@@ -853,10 +890,8 @@ namespace DnsServerCore.Dns
             else
                 _defaultResponsiblePerson = new MailAddress(rp);
 
-            SetAuthoritativeDefaults(ReadSoaTiming(bR, defaults));
-
-            _zoneTransferAllowedNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
-            _notifyAllowedNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
+            defaults = ReadSoaTiming(bR, defaults);
+            SetAuthoritativeDefaults(ReadAuthoritativeNetworks(bR, defaults));
 
             if (version >= 4)
                 _enableCheckForUpdate = bR.ReadBoolean();
@@ -1352,7 +1387,15 @@ namespace DnsServerCore.Dns
             if (readOwnership)
                 {
                 int ownership = version == 7 ? s.ReadByte() : -1;
-                _managedDnsSettings = ownership >= 0 ? (ManagedDnsSettings)ownership : 0;
+                if (ownership < 0)
+                {
+                    _managedDnsSettings = 0;
+                }
+                else
+                {
+                    int extendedOwnership = s.ReadByte();
+                    _managedDnsSettings = (ManagedDnsSettings)(ownership | (Math.Max(0, extendedOwnership) << 8));
+                }
             }
         }
 
@@ -1647,7 +1690,11 @@ namespace DnsServerCore.Dns
             bW.Write(_statsManager.MaxStatFileDays);
             // Existing version 7 readers stop after maxStatFileDays.
             if (_managedDnsSettings != 0)
+            {
                 bW.Write((byte)_managedDnsSettings);
+                if ((ushort)_managedDnsSettings > byte.MaxValue)
+                    bW.Write((byte)((ushort)_managedDnsSettings >> 8));
+            }
         }
 
         #endregion
@@ -7145,12 +7192,20 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.MinRetry;
                     if (defaults.ResponsiblePerson is not null)
                         ownership |= ManagedDnsSettings.ResponsiblePerson;
+                    if (defaults.ZoneTransferNetworks is not null)
+                        ownership |= ManagedDnsSettings.ZoneTransferNetworks;
+                    if (defaults.NotifyNetworks is not null)
+                        ownership |= ManagedDnsSettings.NotifyNetworks;
 
                     AuthoritativeDefaults previousDefaults = GetAuthoritativeDefaults();
                     var effectiveDefaults = new AuthoritativeDefaults(defaults.Record ?? previousDefaults.Record,
                         defaults.Ns ?? previousDefaults.Ns, defaults.Soa ?? previousDefaults.Soa,
                         defaults.SerialDateScheme ?? previousDefaults.SerialDateScheme, defaults.MinRefresh ?? previousDefaults.MinRefresh,
-                        defaults.MinRetry ?? previousDefaults.MinRetry, defaults.ResponsiblePerson ?? previousDefaults.ResponsiblePerson);
+                        defaults.MinRetry ?? previousDefaults.MinRetry, defaults.ResponsiblePerson ?? previousDefaults.ResponsiblePerson,
+                        defaults.ZoneTransferNetworks is null || HaveSameNetworks(defaults.ZoneTransferNetworks, previousDefaults.ZoneTransferNetworks)
+                            ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
+                        defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
+                            ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
                     if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults))
                     {
                         persist(null);

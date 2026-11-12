@@ -278,6 +278,40 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task AuthoritativeNetworkAllowlistsNormalizeAndKeepOwnershipAfterRestart()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"authoritative":{"zoneTransferAllowedNetworks":["192.0.2.129/24","192.0.2.0/24"],"notifyAllowedNetworks":["2001:db8::2"]}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal("192.0.2.0/24", Assert.Single(current.GetProperty("zoneTransferAllowedNetworks").EnumerateArray()).GetString());
+            Assert.Equal("2001:db8::2", Assert.Single(current.GetProperty("notifyAllowedNetworks").EnumerateArray()).GetString());
+            Assert.Equal(2, current.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement conflict = await server.CallAsync("settings/set?zoneTransferAllowedNetworks=198.51.100.0%2F24&maxLogFileDays=90", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/authoritative/zoneTransferAllowedNetworks", conflict.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+            const string reset = """
+                {"schemaVersion":1,"dns":{"authoritative":{"zoneTransferAllowedNetworks":null,"notifyAllowedNetworks":[]}}}
+                """;
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            current = await server.GetSettingsAsync();
+            Assert.Empty(current.GetProperty("zoneTransferAllowedNetworks").EnumerateArray());
+            Assert.Empty(current.GetProperty("notifyAllowedNetworks").EnumerateArray());
+            Assert.Equal(2, current.GetProperty("managedSettings").GetArrayLength());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

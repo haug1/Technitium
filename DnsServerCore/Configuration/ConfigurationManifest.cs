@@ -89,12 +89,32 @@ namespace DnsServerCore.Configuration
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
                 if (dns.TryGetProperty("localEndpoints", out JsonElement endpoints))
                     ReadDnsLocalEndPoints(endpoints);
-                if (dns.TryGetProperty("authoritative", out JsonElement authoritative) &&
-                    authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
-                    ReadDefaultResponsiblePerson(responsiblePerson);
+                if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
+                {
+                    if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
+                        ReadDefaultResponsiblePerson(responsiblePerson);
+                    if (authoritative.TryGetProperty("zoneTransferAllowedNetworks", out JsonElement transfer))
+                        ReadAuthoritativeNetworks(transfer, "zoneTransferAllowedNetworks");
+                    if (authoritative.TryGetProperty("notifyAllowedNetworks", out JsonElement notify))
+                        ReadAuthoritativeNetworks(notify, "notifyAllowedNetworks");
+                }
             }
 
             return new ConfigurationManifest(filePath, root.Clone());
+        }
+
+        internal static NetworkAddress[] ReadAuthoritativeNetworks(JsonElement value, string name)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return [];
+
+            var networks = new NetworkAddress[value.GetArrayLength()];
+            for (int i = 0; i < networks.Length; i++)
+            {
+                if (!NetworkAddress.TryParse(value[i].GetString(), out networks[i]))
+                    throw new InvalidDataException($"/dns/authoritative/{name}/{i}: Invalid network address.");
+            }
+            return networks.Distinct().ToArray();
         }
 
         internal static string ReadDefaultResponsiblePerson(JsonElement value)

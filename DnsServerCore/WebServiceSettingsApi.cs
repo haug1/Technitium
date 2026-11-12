@@ -645,6 +645,11 @@ namespace DnsServerCore
                 }
 
                 string defaultResponsiblePerson = request.QueryOrForm("defaultResponsiblePerson");
+                request.TryQueryOrFormArray("zoneTransferAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] zoneTransferAllowedNetworks);
+                request.TryQueryOrFormArray("notifyAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] notifyAllowedNetworks);
+                if (zoneTransferAllowedNetworks?.Length > byte.MaxValue || notifyAllowedNetworks?.Length > byte.MaxValue)
+                    throw new ArgumentException("Authoritative network allowlists cannot have more than 255 entries.");
+
                 var authoritativeDefaults = new DnsServer.AuthoritativeDefaults(
                     request.TryGetQueryOrForm("defaultRecordTtl", ZoneFile.ParseTtl, out uint defaultRecordTtl) ? defaultRecordTtl : null,
                     request.TryGetQueryOrForm("defaultNsRecordTtl", ZoneFile.ParseTtl, out uint defaultNsRecordTtl) ? defaultNsRecordTtl : null,
@@ -652,7 +657,8 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("useSoaSerialDateScheme", bool.Parse, out bool useSoaSerialDateScheme) ? useSoaSerialDateScheme : null,
                     request.TryGetQueryOrForm("minSoaRefresh", ZoneFile.ParseTtl, out uint minSoaRefresh) ? minSoaRefresh : null,
                     request.TryGetQueryOrForm("minSoaRetry", ZoneFile.ParseTtl, out uint minSoaRetry) ? minSoaRetry : null,
-                    defaultResponsiblePerson is null ? null : DnsServer.NormalizeDefaultResponsiblePerson(defaultResponsiblePerson));
+                    defaultResponsiblePerson is null ? null : DnsServer.NormalizeDefaultResponsiblePerson(defaultResponsiblePerson),
+                    zoneTransferAllowedNetworks, notifyAllowedNetworks);
                 _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
 
                 try
@@ -710,19 +716,10 @@ namespace DnsServerCore
                         if (authoritativeDefaults.MinRetry.HasValue)
                             clusterParameters.Add("minSoaRetry", minSoaRetry.ToString());
 
-                        if (request.TryQueryOrFormArray("zoneTransferAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] zoneTransferAllowedNetworks))
-                        {
-                            _dnsWebService._dnsServer.ZoneTransferAllowedNetworks = zoneTransferAllowedNetworks;
-
+                        if (zoneTransferAllowedNetworks is not null)
                             clusterParameters.Add("zoneTransferAllowedNetworks", zoneTransferAllowedNetworks.Join());
-                        }
-
-                        if (request.TryQueryOrFormArray("notifyAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] notifyAllowedNetworks))
-                        {
-                            _dnsWebService._dnsServer.NotifyAllowedNetworks = notifyAllowedNetworks;
-
+                        if (notifyAllowedNetworks is not null)
                             clusterParameters.Add("notifyAllowedNetworks", notifyAllowedNetworks.Join());
-                        }
 
                         if (request.TryGetQueryOrForm("dnsServerEnableCheckForUpdate", bool.Parse, out bool dnsServerEnableCheckForUpdate))
                         {
