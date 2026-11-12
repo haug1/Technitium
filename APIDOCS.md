@@ -5309,6 +5309,8 @@ On a cluster, only the Primary can declare blocklist sources and update schedule
 
 Only the cluster Primary can declare `allowZones` and `blockZones`. Changes to the lists or their ownership require peers to advertise `supportsDeclarativeDomainLists`. Secondaries inherit the lists and ownership during configuration sync. Omitting an owned list releases ownership and requires Modify permission for the corresponding Allowed Zones or Blocked Zones section.
 
+The cluster Primary can apply `dns.authoritative`, `dns.checkForUpdates`, `dns.udpPayloadSize`, `dns.dnssecValidation`, `dns.clientSubnet`, and `apps.autoUpdate`. Changes to these values or their ownership require peers to advertise `supportsDeclarativeDnsPolicy`. A Secondary receives the effective values and ownership during configuration sync.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7441,6 +7443,7 @@ WHERE:
 - `secondaryNodeIpAddresses`: A comma separated list of Secondary node IP addresses.
 - `secondaryNodeCertificate`: The Secondary node's TLS certificate used by the API web service.
 - `supportsDeclarativeDomainLists` (optional): Set to true when the Secondary can inherit manifest ownership of allow and block domains. Required when the Primary already manages either list.
+- `supportsDeclarativeDnsPolicy` (optional): Set to true when the Secondary can inherit manifest ownership of DNS policy. Required when the Primary manages a supported cluster-wide DNS policy field.
 
 RESPONSE:
 ```

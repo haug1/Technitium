@@ -298,6 +298,8 @@ namespace DnsServerCore.Configuration
                     blockListPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("domainListPeers", out JsonElement domainListPeers))
                     domainListPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("dnsPolicyPeers", out JsonElement dnsPolicyPeers))
+                    dnsPolicyPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -363,7 +365,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, tsig, alreadyActive, listenerTuningStaged, dnsBindingsStaged, manifest, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, tsig, alreadyActive, listenerTuningStaged, dnsBindingsStaged, manifest, isClusterSecondary, writeDnsConfig =>
                 ApplyBlockLists(writeBlockListConfig =>
                     ApplyAllowedZones(writeAllowed =>
                     ApplyBlockedZones(writeBlocked =>
@@ -889,16 +891,13 @@ namespace DnsServerCore.Configuration
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
                 throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
             CheckClusterDomainListSupport(manifest, cluster);
+            CheckClusterDnsPolicySupport(manifest, cluster);
             if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             CheckClusterWebListenerSupport(manifest, cluster);
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
-            if (GetAuthoritativeDefaults(manifest).HasValues)
-                throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
-            if (GetAppAutoUpdate(manifest).HasValue)
-                throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
             if (GetDnsTuning(manifest) != default)
                 throw new InvalidDataException("/dns/tuning: Applying DNS tuning to a cluster is not implemented.");
             if (GetRateLimitPolicy(manifest) != default)
@@ -911,10 +910,26 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/blocking: Applying blocking policy to a cluster is not implemented.");
             if (GetRecursionPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/recursion: Applying recursion policy to a cluster is not implemented.");
-            if (GetClientSubnetSettings(manifest) != default)
-                throw new InvalidDataException("/dns/clientSubnet: Applying EDNS Client Subnet settings to a cluster is not implemented.");
-            if (GetResolverSettings(manifest).HasValues)
-                throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
+        }
+
+        internal static int[] CheckClusterDnsPolicySupport(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            var defaults = GetAuthoritativeDefaults(manifest);
+            var resolver = GetResolverSettings(manifest);
+            var subnet = GetClientSubnetSettings(manifest);
+            bool? autoUpdate = GetAppAutoUpdate(manifest);
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+            {
+                if (defaults.HasValues || resolver.HasValues || subnet != default || autoUpdate.HasValue)
+                    throw new InvalidDataException("/dns: Only the Primary can apply cluster DNS policy.");
+                return null;
+            }
+
+            return cluster.DnsWebService.DnsServer.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet)
+                ? cluster.CheckDeclarativeDnsPolicyPeers() : null;
         }
 
         internal static (string Path, int[] Peers)? CheckClusterDomainListSupport(ConfigurationManifest manifest, ClusterManager cluster)

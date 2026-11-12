@@ -136,6 +136,8 @@ def verify(current, previous, folder, propagation, graceful):
         blocklist_revision = ok(primary.call("settings/config/plan", manifest=blocklist_manifest))["revision"]
         domain_lists = {"schemaVersion": 1, "allowZones": ["allow.fixture.test"], "blockZones": ["block.fixture.test"]}
         domain_revision = ok(primary.call("settings/config/plan", manifest=domain_lists))["revision"]
+        dns_policy = {"schemaVersion": 1, "dns": {"udpPayloadSize": 1300}}
+        dns_policy_revision = ok(primary.call("settings/config/plan", manifest=dns_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -143,6 +145,9 @@ def verify(current, previous, folder, propagation, graceful):
         }))
         if propagation:
             assert joined["supportsDeclarativeClusterOptions"] is True
+            assert joined["supportsDeclarativeDnsPolicy"] is True
+            rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
+            assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert "supportsDeclarativeClusterOptions" not in joined
@@ -160,7 +165,11 @@ def verify(current, previous, folder, propagation, graceful):
         assert rejected["status"] == "error" and "declarative domain lists" in rejected["errorMessage"], rejected
         assert "/allowZones" not in ok(primary.call("settings/get"))["managedSettings"]
         assert "/blockZones" not in ok(primary.call("settings/get"))["managedSettings"]
+        rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
+        assert rejected["status"] == "error" and "declarative DNS policy" in rejected["errorMessage"], rejected
         for node in (primary, secondary):
+            settings = ok(node.call("settings/get"))
+            assert settings["udpPayloadSize"] == 1232 and "/dns/udpPayloadSize" not in settings["managedSettings"]
             state = ok(node.call("admin/cluster/state"))
             assert state["configRefreshIntervalSeconds"] == 900, state
             assert "/cluster/configRefreshSeconds" not in state.get("managedOptionPaths", []), state
@@ -406,6 +415,7 @@ def verify_propagation(primary, secondary, graceful):
     wait_for(secondary_released_blocklists, "the Secondary to release ownership and retain the last interval")
 
     verify_domain_lists(primary, secondary, release, local_web, new_primary_tls_port)
+    verify_dns_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -497,6 +507,51 @@ def verify_domain_lists(primary, secondary, cluster_manifest, local_web, primary
     apply_primary(cluster_manifest)
     wait_for(lambda: matches(desired["allowZones"], [], set()),
              "the Secondary to release both domain lists while retaining their entries")
+
+
+def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
+    desired = {**cluster_manifest,
+               "dns": {"authoritative": {"defaultRecordTtl": 450}, "checkForUpdates": False,
+                       "udpPayloadSize": 1300, "dnssecValidation": False,
+                       "clientSubnet": {"enabled": True, "ipv4PrefixLength": 23}},
+               "apps": {"autoUpdate": False}}
+    paths = {"/dns/authoritative/defaultRecordTtl", "/dns/checkForUpdates", "/dns/udpPayloadSize",
+             "/dns/dnssecValidation", "/dns/clientSubnet/enabled", "/dns/clientSubnet/ipv4PrefixLength",
+             "/apps/autoUpdate"}
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "dns": desired["dns"]})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, manifest):
+        plan = ok(node.call("settings/config/plan", manifest=manifest))
+        ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
+        return plan
+
+    def matches(node, ttl, prefix, owned):
+        state = ok(node.call("settings/get"))
+        return (state["defaultRecordTtl"] == ttl and state["dnsServerEnableCheckForUpdate"] is False
+                and state["udpPayloadSize"] == 1300 and state["dnssecValidation"] is False
+                and state["eDnsClientSubnet"] is True and state["eDnsClientSubnetIPv4PrefixLength"] == prefix
+                and state["dnsAppsEnableAutomaticUpdate"] is False
+                and paths.intersection(state["managedSettings"]) == owned)
+
+    plan = apply(primary, desired)
+    assert paths - {"/dns/checkForUpdates"} == {change["path"] for change in plan["changes"]}, plan
+    wait_for(lambda: matches(secondary, 450, 23, paths), "the Secondary to inherit DNS policy and ownership")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(secondary, 450, 23, paths)
+    apply(secondary, local_web)
+    assert matches(secondary, 450, 23, paths)
+    denied = secondary.call("settings/set?defaultRecordTtl=451")
+    assert denied["status"] == "error" and "/dns/authoritative/defaultRecordTtl" in denied["errorMessage"], denied
+
+    desired["dns"]["authoritative"]["defaultRecordTtl"] = 460
+    desired["dns"]["clientSubnet"]["ipv4PrefixLength"] = 22
+    apply(primary, desired)
+    wait_for(lambda: matches(secondary, 460, 22, paths), "the Secondary to apply the next DNS policy")
+    assert not apply(primary, desired)["changes"]
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(secondary, 460, 22, set()), "the Secondary to release DNS policy ownership")
 
 
 def assert_promoted_policy(state):

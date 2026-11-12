@@ -870,7 +870,7 @@ namespace DnsServerCore.Cluster
             return Convert.ToHexString(SHA256.HashData(payload));
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
@@ -884,6 +884,9 @@ namespace DnsServerCore.Cluster
             if (!supportsDeclarativeDomainLists &&
                 (_dnsWebService.DnsServer.AllowedZoneManager.ManifestOwnsList || _dnsWebService.DnsServer.BlockedZoneManager.ManifestOwnsList))
                 throw new DnsServerException("The Secondary must support declarative domain lists before joining.");
+
+            if (_dnsWebService.DnsServer.HasManagedClusterDnsPolicy && !supportsDeclarativeDnsPolicy)
+                throw new DnsServerException("/dns: The Secondary must support declarative DNS policy before joining.");
 
             string secondaryNodeDomain = secondaryNodeUrl.Host.ToLowerInvariant();
 
@@ -904,7 +907,8 @@ namespace DnsServerCore.Cluster
             {
                 SupportsDeclarativeClusterOptions = supportsDeclarativeOptions,
                 SupportsDeclarativeBlockLists = supportsDeclarativeBlockLists,
-                SupportsDeclarativeDomainLists = supportsDeclarativeDomainLists
+                SupportsDeclarativeDomainLists = supportsDeclarativeDomainLists,
+                SupportsDeclarativeDnsPolicy = supportsDeclarativeDnsPolicy
             };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
@@ -1265,6 +1269,17 @@ namespace DnsServerCore.Cluster
                 info.Comments = "Cluster managed record. Do not update or delete.";
                 return record;
             }
+        }
+
+        internal int[] CheckDeclarativeDnsPolicyPeers()
+        {
+            var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id).ToArray();
+            foreach (ClusterNode peer in peers)
+            {
+                if (!peer.SupportsDeclarativeDnsPolicy)
+                    throw new InvalidDataException($"/dns: Node '{peer.Name}' has not advertised support for declarative DNS policy.");
+            }
+            return peers.Select(peer => peer.Id).ToArray();
         }
 
         internal int[] CheckDeclarativeDomainListPeers(string path)
@@ -1869,7 +1884,7 @@ namespace DnsServerCore.Cluster
 
                 //join cluster
                 primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
-                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, cancellationToken);
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, cancellationToken);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);

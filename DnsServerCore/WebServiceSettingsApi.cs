@@ -1104,6 +1104,11 @@ namespace DnsServerCore
                     WriteDnsSettings(writer, includeSecrets: false);
                     if (manifest is not null)
                     {
+                        if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager) is { } dnsPolicyPeers)
+                        {
+                            writer.WritePropertyName("dnsPolicyPeers");
+                            JsonSerializer.Serialize(writer, dnsPolicyPeers);
+                        }
                         if (ConfigurationPlan.CheckClusterDomainListSupport(manifest, _dnsWebService._clusterManager) is { } domainLists)
                         {
                             writer.WritePropertyName("domainListPeers");

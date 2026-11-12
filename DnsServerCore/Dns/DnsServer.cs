@@ -126,6 +126,7 @@ namespace DnsServerCore.Dns
         readonly string _dohwwwFolder;
         IReadOnlyList<IPEndPoint> _localEndPoints;
         ManagedDnsSettings _managedDnsSettings;
+        ManagedDnsSettings _inheritedDnsPolicy;
 
         [Flags]
         private enum ManagedDnsSettings : ulong
@@ -1294,9 +1295,99 @@ namespace DnsServerCore.Dns
             ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB | ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore;
         internal bool HasManagedDnsTuning => (_managedDnsSettingsExtension & TuningOwnership) != 0;
 
-        internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership | BlockingOwnership | ForwardingOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits || HasManagedDnsTuning;
+        private const ManagedDnsSettings AuthoritativeOwnership = ManagedDnsSettings.RecordTtl | ManagedDnsSettings.NsTtl |
+            ManagedDnsSettings.SoaTtl | ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh |
+            ManagedDnsSettings.MinRetry | ManagedDnsSettings.ResponsiblePerson | ManagedDnsSettings.ZoneTransferNetworks |
+            ManagedDnsSettings.NotifyNetworks;
+
+        private const ManagedDnsSettings ClusterDnsPolicyOwnership = AuthoritativeOwnership | ResolverOwnership |
+            ClientSubnetOwnership | ManagedDnsSettings.AppAutoUpdate;
+
+        internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & AuthoritativeOwnership) != 0;
+        internal bool HasManagedClusterDnsPolicy => (_managedDnsSettings & ClusterDnsPolicyOwnership) != 0;
+
+        private bool OwnsDnsSetting(ManagedDnsSettings setting, bool isConfigTransfer) =>
+            ((_managedDnsSettings & ~(isConfigTransfer ? _inheritedDnsPolicy : 0)) & setting) != 0;
+
+        private static ManagedDnsSettings GetClusterDnsPolicyOwnership(AuthoritativeDefaults defaults,
+            ResolverSettings resolverSettings, bool? appAutoUpdate, ClientSubnetSettings subnet)
+        {
+            ManagedDnsSettings ownership = 0;
+            if (defaults.Record.HasValue)
+                ownership |= ManagedDnsSettings.RecordTtl;
+            if (defaults.Ns.HasValue)
+                ownership |= ManagedDnsSettings.NsTtl;
+            if (defaults.Soa.HasValue)
+                ownership |= ManagedDnsSettings.SoaTtl;
+            if (defaults.SerialDateScheme.HasValue)
+                ownership |= ManagedDnsSettings.SerialDateScheme;
+            if (defaults.MinRefresh.HasValue)
+                ownership |= ManagedDnsSettings.MinRefresh;
+            if (defaults.MinRetry.HasValue)
+                ownership |= ManagedDnsSettings.MinRetry;
+            if (defaults.ResponsiblePerson is not null)
+                ownership |= ManagedDnsSettings.ResponsiblePerson;
+            if (defaults.ZoneTransferNetworks is not null)
+                ownership |= ManagedDnsSettings.ZoneTransferNetworks;
+            if (defaults.NotifyNetworks is not null)
+                ownership |= ManagedDnsSettings.NotifyNetworks;
+
+            if (resolverSettings.CheckForUpdates.HasValue)
+                ownership |= ManagedDnsSettings.CheckForUpdates;
+            if (resolverSettings.UdpPayloadSize.HasValue)
+                ownership |= ManagedDnsSettings.UdpPayloadSize;
+            if (resolverSettings.DnssecValidation.HasValue)
+                ownership |= ManagedDnsSettings.DnssecValidation;
+
+            if (appAutoUpdate.HasValue)
+                ownership |= ManagedDnsSettings.AppAutoUpdate;
+
+            if (subnet.Enabled.HasValue)
+                ownership |= ManagedDnsSettings.ClientSubnetEnabled;
+            if (subnet.Ipv4Prefix.HasValue)
+                ownership |= ManagedDnsSettings.ClientSubnetIpv4Prefix;
+            if (subnet.Ipv6Prefix.HasValue)
+                ownership |= ManagedDnsSettings.ClientSubnetIpv6Prefix;
+            if (subnet.HasIpv4Override)
+                ownership |= ManagedDnsSettings.ClientSubnetIpv4Override;
+            if (subnet.HasIpv6Override)
+                ownership |= ManagedDnsSettings.ClientSubnetIpv6Override;
+            return ownership;
+        }
+
+        internal bool ClusterDnsPolicyChanges(AuthoritativeDefaults defaults, ResolverSettings resolverSettings,
+            bool? appAutoUpdate, ClientSubnetSettings subnet)
+        {
+            var desired = GetClusterDnsPolicyOwnership(defaults, resolverSettings, appAutoUpdate, subnet);
+            if (desired != (_managedDnsSettings & ClusterDnsPolicyOwnership) || _inheritedDnsPolicy != 0)
+                return true;
+
+            subnet = NormalizeClientSubnetSettings(subnet);
+            AuthoritativeDefaults current = GetAuthoritativeDefaults();
+            return (defaults.Record.HasValue && defaults.Record != current.Record) ||
+                (defaults.Ns.HasValue && defaults.Ns != current.Ns) ||
+                (defaults.Soa.HasValue && defaults.Soa != current.Soa) ||
+                (defaults.SerialDateScheme.HasValue && defaults.SerialDateScheme != current.SerialDateScheme) ||
+                (defaults.MinRefresh.HasValue && defaults.MinRefresh != current.MinRefresh) ||
+                (defaults.MinRetry.HasValue && defaults.MinRetry != current.MinRetry) ||
+                (defaults.ResponsiblePerson is not null && defaults.ResponsiblePerson != current.ResponsiblePerson) ||
+                (defaults.ZoneTransferNetworks is not null && !HaveSameNetworks(defaults.ZoneTransferNetworks, current.ZoneTransferNetworks)) ||
+                (defaults.NotifyNetworks is not null && !HaveSameNetworks(defaults.NotifyNetworks, current.NotifyNetworks)) ||
+                (resolverSettings.CheckForUpdates.HasValue && resolverSettings.CheckForUpdates != _enableCheckForUpdate) ||
+                (resolverSettings.UdpPayloadSize.HasValue && resolverSettings.UdpPayloadSize != _udpPayloadSize) ||
+                (resolverSettings.DnssecValidation.HasValue && resolverSettings.DnssecValidation != _dnssecValidation) ||
+                (appAutoUpdate.HasValue && appAutoUpdate != _dnsApplicationManager.EnableAutomaticUpdate) ||
+                ClientSubnetChanges(subnet);
+        }
+
+        private bool ClientSubnetChanges(ClientSubnetSettings subnet) =>
+            (subnet.Enabled.HasValue && subnet.Enabled != _eDnsClientSubnet) ||
+            (subnet.Ipv4Prefix.HasValue && subnet.Ipv4Prefix != _eDnsClientSubnetIPv4PrefixLength) ||
+            (subnet.Ipv6Prefix.HasValue && subnet.Ipv6Prefix != _eDnsClientSubnetIPv6PrefixLength) ||
+            (subnet.HasIpv4Override && !Equals(subnet.Ipv4Override, _eDnsClientSubnetIpv4Override)) ||
+            (subnet.HasIpv6Override && !Equals(subnet.Ipv6Override, _eDnsClientSubnetIpv6Override));
+
+        internal bool HasManagedClusterDnsSettings => HasManagedClusterDnsPolicy || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits || HasManagedDnsTuning;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -1499,27 +1590,27 @@ namespace DnsServerCore.Dns
                 yield return "/dns/authoritative/notifyAllowedNetworks";
         }
 
-        internal void CheckManifestAuthoritativeDefaults(AuthoritativeDefaults defaults)
+        internal void CheckManifestAuthoritativeDefaults(AuthoritativeDefaults defaults, bool isConfigTransfer = false)
         {
-            if (ManifestOwnsDefaultRecordTtl && defaults.Record.HasValue && defaults.Record != _authZoneManager.DefaultRecordTtl)
+            if (OwnsDnsSetting(ManagedDnsSettings.RecordTtl, isConfigTransfer) && defaults.Record.HasValue && defaults.Record != _authZoneManager.DefaultRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultRecordTtl: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl) && defaults.Ns.HasValue && defaults.Ns != _authZoneManager.DefaultNsRecordTtl)
+            if (OwnsDnsSetting(ManagedDnsSettings.NsTtl, isConfigTransfer) && defaults.Ns.HasValue && defaults.Ns != _authZoneManager.DefaultNsRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultNsRecordTtl: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SoaTtl) && defaults.Soa.HasValue && defaults.Soa != _authZoneManager.DefaultSoaRecordTtl)
+            if (OwnsDnsSetting(ManagedDnsSettings.SoaTtl, isConfigTransfer) && defaults.Soa.HasValue && defaults.Soa != _authZoneManager.DefaultSoaRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultSoaRecordTtl: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SerialDateScheme) && defaults.SerialDateScheme.HasValue && defaults.SerialDateScheme != _authZoneManager.UseSoaSerialDateScheme)
+            if (OwnsDnsSetting(ManagedDnsSettings.SerialDateScheme, isConfigTransfer) && defaults.SerialDateScheme.HasValue && defaults.SerialDateScheme != _authZoneManager.UseSoaSerialDateScheme)
                 throw new DnsWebServiceException("/dns/authoritative/useSoaSerialDateScheme: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRefresh) && defaults.MinRefresh.HasValue && defaults.MinRefresh != _authZoneManager.MinSoaRefresh)
+            if (OwnsDnsSetting(ManagedDnsSettings.MinRefresh, isConfigTransfer) && defaults.MinRefresh.HasValue && defaults.MinRefresh != _authZoneManager.MinSoaRefresh)
                 throw new DnsWebServiceException("/dns/authoritative/minSoaRefresh: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRetry) && defaults.MinRetry.HasValue && defaults.MinRetry != _authZoneManager.MinSoaRetry)
+            if (OwnsDnsSetting(ManagedDnsSettings.MinRetry, isConfigTransfer) && defaults.MinRetry.HasValue && defaults.MinRetry != _authZoneManager.MinSoaRetry)
                 throw new DnsWebServiceException("/dns/authoritative/minSoaRetry: Setting is managed by the configuration manifest.");
-            if (ManifestOwnsResponsiblePerson && (defaults.ResponsiblePerson is not null) &&
+            if (OwnsDnsSetting(ManagedDnsSettings.ResponsiblePerson, isConfigTransfer) && (defaults.ResponsiblePerson is not null) &&
                 !string.Equals(defaults.ResponsiblePerson, _defaultResponsiblePerson?.Address ?? "", StringComparison.Ordinal))
                 throw new DnsWebServiceException("/dns/authoritative/defaultResponsiblePerson: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ZoneTransferNetworks) && defaults.ZoneTransferNetworks is not null &&
+            if (OwnsDnsSetting(ManagedDnsSettings.ZoneTransferNetworks, isConfigTransfer) && defaults.ZoneTransferNetworks is not null &&
                 !HaveSameNetworks(defaults.ZoneTransferNetworks, _zoneTransferAllowedNetworks))
                 throw new DnsWebServiceException("/dns/authoritative/zoneTransferAllowedNetworks: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NotifyNetworks) && defaults.NotifyNetworks is not null &&
+            if (OwnsDnsSetting(ManagedDnsSettings.NotifyNetworks, isConfigTransfer) && defaults.NotifyNetworks is not null &&
                 !HaveSameNetworks(defaults.NotifyNetworks, _notifyAllowedNetworks))
                 throw new DnsWebServiceException("/dns/authoritative/notifyAllowedNetworks: Setting is managed by the configuration manifest.");
         }
@@ -1639,13 +1730,13 @@ namespace DnsServerCore.Dns
                 DnsClientConnection.IPv6SourceAddresses = ipv6;
         }
 
-        internal void CheckManifestResolverSettings(ResolverSettings settings)
+        internal void CheckManifestResolverSettings(ResolverSettings settings, bool isConfigTransfer = false)
         {
-            if (ManifestOwnsUpdateChecks && settings.CheckForUpdates.HasValue && settings.CheckForUpdates != _enableCheckForUpdate)
+            if (OwnsDnsSetting(ManagedDnsSettings.CheckForUpdates, isConfigTransfer) && settings.CheckForUpdates.HasValue && settings.CheckForUpdates != _enableCheckForUpdate)
                 throw new DnsWebServiceException("/dns/checkForUpdates: Setting is managed by the configuration manifest.");
-            if (ManifestOwnsUdpPayloadSize && settings.UdpPayloadSize.HasValue && settings.UdpPayloadSize != _udpPayloadSize)
+            if (OwnsDnsSetting(ManagedDnsSettings.UdpPayloadSize, isConfigTransfer) && settings.UdpPayloadSize.HasValue && settings.UdpPayloadSize != _udpPayloadSize)
                 throw new DnsWebServiceException("/dns/udpPayloadSize: Setting is managed by the configuration manifest.");
-            if (ManifestOwnsDnssecValidation && settings.DnssecValidation.HasValue && settings.DnssecValidation != _dnssecValidation)
+            if (OwnsDnsSetting(ManagedDnsSettings.DnssecValidation, isConfigTransfer) && settings.DnssecValidation.HasValue && settings.DnssecValidation != _dnssecValidation)
                 throw new DnsWebServiceException("/dns/dnssecValidation: Setting is managed by the configuration manifest.");
         }
 
@@ -1705,9 +1796,9 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/dns/udpSocketPool/excludedPorts: Setting is managed by the configuration manifest.");
         }
 
-        internal void CheckManifestAppAutoUpdate(bool enabled)
+        internal void CheckManifestAppAutoUpdate(bool enabled, bool isConfigTransfer = false)
         {
-            if (ManifestOwnsAppAutoUpdate && enabled != _dnsApplicationManager.EnableAutomaticUpdate)
+            if (OwnsDnsSetting(ManagedDnsSettings.AppAutoUpdate, isConfigTransfer) && enabled != _dnsApplicationManager.EnableAutomaticUpdate)
                 throw new DnsWebServiceException("/apps/autoUpdate: Setting is managed by the configuration manifest.");
         }
 
@@ -2180,7 +2271,7 @@ namespace DnsServerCore.Dns
             return value is not null && value.IsHostAddress ? new NetworkAddress(value.Address, prefix) : value;
         }
 
-        internal ClientSubnetSettings CheckManifestClientSubnet(ClientSubnetSettings settings)
+        internal ClientSubnetSettings CheckManifestClientSubnet(ClientSubnetSettings settings, bool isConfigTransfer = false)
         {
             Check(ManagedDnsSettings.ClientSubnetEnabled, settings.Enabled.HasValue, settings.Enabled != _eDnsClientSubnet, "enabled");
             Check(ManagedDnsSettings.ClientSubnetIpv4Prefix, settings.Ipv4Prefix.HasValue, settings.Ipv4Prefix != _eDnsClientSubnetIPv4PrefixLength, "ipv4PrefixLength");
@@ -2197,7 +2288,7 @@ namespace DnsServerCore.Dns
 
             void Check(ManagedDnsSettings flag, bool declared, bool different, string field)
             {
-                if (declared && different && _managedDnsSettings.HasFlag(flag))
+                if (declared && different && OwnsDnsSetting(flag, isConfigTransfer))
                     throw new DnsWebServiceException($"/dns/clientSubnet/{field}: Setting is managed by the configuration manifest.");
             }
         }
@@ -2291,14 +2382,14 @@ namespace DnsServerCore.Dns
                         defaults = ReadAuthoritativeNetworks(reader, defaults);
                 }
 
-                CheckManifestAuthoritativeDefaults(defaults);
+                CheckManifestAuthoritativeDefaults(defaults, isConfigTransfer);
                 if (readUpdateChecks)
                 {
                     bool updateChecks = ReadUpdateChecks(reader, version);
                     ushort? payloadSize = null;
                     bool? dnssec = null;
                     if (readOutbound || ManifestOwnsAppAutoUpdate)
-                        CheckManifestAppAutoUpdate(reader.ReadBoolean());
+                        CheckManifestAppAutoUpdate(reader.ReadBoolean(), isConfigTransfer);
                     if (readOutbound)
                     {
                         IPv6Mode mode = version >= 3 ? (IPv6Mode)reader.ReadByte() : ReadLegacyIpv6Mode(reader);
@@ -2313,9 +2404,9 @@ namespace DnsServerCore.Dns
                             dnssec = reader.ReadBoolean();
                         }
                     }
-                    CheckManifestResolverSettings(new ResolverSettings(updateChecks, payloadSize, dnssec));
+                    CheckManifestResolverSettings(new ResolverSettings(updateChecks, payloadSize, dnssec), isConfigTransfer);
                     if (HasManagedClientSubnet)
-                        CheckManifestClientSubnet(ReadClientSubnetSettings(reader));
+                        CheckManifestClientSubnet(ReadClientSubnetSettings(reader), isConfigTransfer);
                 }
             }
         }
@@ -2399,20 +2490,25 @@ namespace DnsServerCore.Dns
             }
 
             ushort udpPayloadSize = bR.ReadUInt16();
-            if (apply)
-                _udpPayloadSize = udpPayloadSize;
             bool dnssecValidation = bR.ReadBoolean();
-            if (apply)
-                _dnssecValidation = dnssecValidation;
-
             ClientSubnetSettings subnet = ReadClientSubnetSettings(bR);
             if (apply)
             {
-                _eDnsClientSubnet = subnet.Enabled.Value;
-                _eDnsClientSubnetIPv4PrefixLength = subnet.Ipv4Prefix.Value;
-                _eDnsClientSubnetIPv6PrefixLength = subnet.Ipv6Prefix.Value;
-                _eDnsClientSubnetIpv4Override = subnet.Ipv4Override;
-                _eDnsClientSubnetIpv6Override = subnet.Ipv6Override;
+                _udpPayloadSize = udpPayloadSize;
+                if (isConfigTransfer)
+                {
+                    DnssecValidation = dnssecValidation;
+                    SetClientSubnetSettings(subnet);
+                }
+                else
+                {
+                    _dnssecValidation = dnssecValidation;
+                    _eDnsClientSubnet = subnet.Enabled.Value;
+                    _eDnsClientSubnetIPv4PrefixLength = subnet.Ipv4Prefix.Value;
+                    _eDnsClientSubnetIPv6PrefixLength = subnet.Ipv6Prefix.Value;
+                    _eDnsClientSubnetIpv4Override = subnet.Ipv4Override;
+                    _eDnsClientSubnetIpv6Override = subnet.Ipv6Override;
+                }
             }
 
             var qpmPrefixLimitsIPv4 = ReadRateLimitTable(bR);
@@ -2826,7 +2922,14 @@ namespace DnsServerCore.Dns
                 return;
             }
 
-            if (readOwnership)
+            if (isConfigTransfer)
+            {
+                var transferred = version >= 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
+                var local = _managedDnsSettings & ~_inheritedDnsPolicy;
+                _inheritedDnsPolicy = transferred & ClusterDnsPolicyOwnership & ~local;
+                _managedDnsSettings = local | _inheritedDnsPolicy;
+            }
+            else if (readOwnership)
             {
                 _managedDnsSettings = version >= 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
                 _managedDnsSettingsExtension = version >= 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
@@ -2843,6 +2946,7 @@ namespace DnsServerCore.Dns
                         _managedTsigKeyNames = names;
                     }
                 }
+                _inheritedDnsPolicy = (ManagedDnsSettings)ReadOwnershipWord(s) & _managedDnsSettings & ClusterDnsPolicyOwnership;
             }
         }
 
@@ -3098,6 +3202,11 @@ namespace DnsServerCore.Dns
                         s.WriteShortString(name);
                 }
             }
+            else if (_inheritedDnsPolicy != 0)
+            {
+                bW.Write((ulong)_managedDnsSettings);
+                bW.Write((ulong)_managedDnsSettingsExtension);
+            }
             else if (_managedDnsSettingsExtension == 0)
             {
                 for (ulong ownership = (ulong)_managedDnsSettings; ownership != 0; ownership >>= 8)
@@ -3109,6 +3218,9 @@ namespace DnsServerCore.Dns
                 for (ulong ownership = (ulong)_managedDnsSettingsExtension; ownership != 0; ownership >>= 8)
                     bW.Write((byte)ownership);
             }
+            // Existing readers stop after the ownership words and optional TSIG names.
+            if (_inheritedDnsPolicy != 0)
+                bW.Write((ulong)_inheritedDnsPolicy);
         }
 
         #endregion
@@ -8600,7 +8712,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, ConfigurationTsig.Candidate tsig, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationManifest manifest, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, ConfigurationTsig.Candidate tsig, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationManifest manifest, bool isClusterSecondary, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8728,43 +8840,14 @@ namespace DnsServerCore.Dns
                     ManagedDnsSettings ownership = owned ? ManagedDnsSettings.LocalEndPoints : 0;
                     if (serverDomain is not null)
                         ownership |= ManagedDnsSettings.ServerDomain;
-                    if (defaults.Record.HasValue)
-                        ownership |= ManagedDnsSettings.RecordTtl;
-                    if (defaults.Ns.HasValue)
-                        ownership |= ManagedDnsSettings.NsTtl;
-                    if (defaults.Soa.HasValue)
-                        ownership |= ManagedDnsSettings.SoaTtl;
-                    if (defaults.SerialDateScheme.HasValue)
-                        ownership |= ManagedDnsSettings.SerialDateScheme;
-                    if (defaults.MinRefresh.HasValue)
-                        ownership |= ManagedDnsSettings.MinRefresh;
-                    if (defaults.MinRetry.HasValue)
-                        ownership |= ManagedDnsSettings.MinRetry;
-                    if (defaults.ResponsiblePerson is not null)
-                        ownership |= ManagedDnsSettings.ResponsiblePerson;
-                    if (defaults.ZoneTransferNetworks is not null)
-                        ownership |= ManagedDnsSettings.ZoneTransferNetworks;
-                    if (defaults.NotifyNetworks is not null)
-                        ownership |= ManagedDnsSettings.NotifyNetworks;
-
                     if (sourceNetworks.Ipv4 is not null)
                         ownership |= ManagedDnsSettings.Ipv4SourceNetworks;
                     if (sourceNetworks.Ipv6 is not null)
                         ownership |= ManagedDnsSettings.Ipv6SourceNetworks;
-                    if (resolverSettings.CheckForUpdates.HasValue)
-                        ownership |= ManagedDnsSettings.CheckForUpdates;
-                    if (resolverSettings.UdpPayloadSize.HasValue)
-                        ownership |= ManagedDnsSettings.UdpPayloadSize;
-                    if (resolverSettings.DnssecValidation.HasValue)
-                        ownership |= ManagedDnsSettings.DnssecValidation;
-
                     if (statistics.InMemory.HasValue)
                         ownership |= ManagedDnsSettings.StatsInMemory;
                     if (statistics.RetentionDays.HasValue)
                         ownership |= ManagedDnsSettings.StatsRetention;
-
-                    if (appAutoUpdate.HasValue)
-                        ownership |= ManagedDnsSettings.AppAutoUpdate;
 
                     if (outbound.Ipv6Mode.HasValue)
                         ownership |= ManagedDnsSettings.Ipv6Mode;
@@ -8775,22 +8858,10 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.UdpSocketPoolExcludedPorts;
 
                     subnet = NormalizeClientSubnetSettings(subnet);
-                    if (subnet.Enabled.HasValue)
-                        ownership |= ManagedDnsSettings.ClientSubnetEnabled;
-                    if (subnet.Ipv4Prefix.HasValue)
-                        ownership |= ManagedDnsSettings.ClientSubnetIpv4Prefix;
-                    if (subnet.Ipv6Prefix.HasValue)
-                        ownership |= ManagedDnsSettings.ClientSubnetIpv6Prefix;
-                    if (subnet.HasIpv4Override)
-                        ownership |= ManagedDnsSettings.ClientSubnetIpv4Override;
-                    if (subnet.HasIpv6Override)
-                        ownership |= ManagedDnsSettings.ClientSubnetIpv6Override;
-
-                    bool subnetChanged = (subnet.Enabled.HasValue && subnet.Enabled != _eDnsClientSubnet) ||
-                        (subnet.Ipv4Prefix.HasValue && subnet.Ipv4Prefix != _eDnsClientSubnetIPv4PrefixLength) ||
-                        (subnet.Ipv6Prefix.HasValue && subnet.Ipv6Prefix != _eDnsClientSubnetIPv6PrefixLength) ||
-                        (subnet.HasIpv4Override && !Equals(subnet.Ipv4Override, _eDnsClientSubnetIpv4Override)) ||
-                        (subnet.HasIpv6Override && !Equals(subnet.Ipv6Override, _eDnsClientSubnetIpv6Override));
+                    var previousInherited = _inheritedDnsPolicy;
+                    var inherited = isClusterSecondary ? previousInherited : 0;
+                    ownership |= GetClusterDnsPolicyOwnership(defaults, resolverSettings, appAutoUpdate, subnet) | inherited;
+                    bool subnetChanged = ClientSubnetChanges(subnet);
                     if (dnsLogging.IgnoreResolverLogs.HasValue)
                         ownership |= ManagedDnsSettings.IgnoreResolverLogs;
                     if (dnsLogging.LogQueries.HasValue)
@@ -8940,7 +9011,7 @@ namespace DnsServerCore.Dns
                             !ConfigurationTsig.SameKey(existing, entry.Value)));
                     bool tsigOwnershipChanged = tsig.OwnsAll != _manifestOwnsAllTsigKeys ||
                         (_managedTsigKeyNames is null ? tsig.OwnedNames?.Count > 0 : !_managedTsigKeyNames.SetEquals(tsig.OwnedNames is null ? Array.Empty<string>() : tsig.OwnedNames));
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !tsigChanged && !tsigOwnershipChanged && !certificateChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !tsigChanged && !tsigOwnershipChanged && !certificateChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (inherited == previousInherited) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8949,6 +9020,7 @@ namespace DnsServerCore.Dns
 
                     _localEndPoints = changed ? endpoints : previous;
                     _managedDnsSettings = ownership;
+                    _inheritedDnsPolicy = inherited;
                     _managedDnsSettingsExtension = extendedOwnership;
                     try
                     {
@@ -8966,6 +9038,7 @@ namespace DnsServerCore.Dns
                     {
                         _localEndPoints = previous;
                         _managedDnsSettings = previousOwnership;
+                        _inheritedDnsPolicy = previousInherited;
                         _managedDnsSettingsExtension = previousExtendedOwnership;
                         SetResolverSettings(previousResolverSettings);
                         SetAuthoritativeDefaults(previousDefaults);
