@@ -3,6 +3,7 @@ using DnsServerCore.Dns.ZoneManagers;
 using Json.Schema;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -501,6 +502,8 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/type")}: Unknown record type. Use a numeric type code for unrecognized types.");
 
                     JsonElement data = record.GetProperty("data");
+                    if (data.TryGetProperty("zoneFile", out JsonElement zoneFile))
+                        ValidateZoneFileRecordData(zoneName, owner, type, zoneFile.GetString(), recordPath + "/data/zoneFile");
                     if (data.TryGetProperty("forwarder", out _) && type != DnsResourceRecordType.FWD)
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/data/forwarder")}: Forwarder data requires an FWD record.");
                     if (data.TryGetProperty("app", out _) && type != DnsResourceRecordType.APP)
@@ -518,6 +521,26 @@ namespace DnsServerCore.Configuration
                     }
                 }
             }
+        }
+
+        private static void ValidateZoneFileRecordData(string zoneName, string owner, DnsResourceRecordType type, string data, string path)
+        {
+            // The parser only reads this in-memory record. Relative names in its RDATA use the enclosing zone as their origin.
+            string typeCode = ((ushort)type).ToString(CultureInfo.InvariantCulture);
+            using var input = new StringReader($"{owner}. 0 IN TYPE{typeCode} {data}");
+            List<DnsResourceRecord> records;
+            try
+            {
+                records = ZoneFile.ReadZoneFileFromAsync(input, zoneName).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) when (ex is FormatException or ArgumentException or NotSupportedException or InvalidOperationException or DnsClientException)
+            {
+                throw new InvalidDataException($"{DisplayPath(path)}: Invalid zone-file record data.");
+            }
+
+            if (records.Count != 1 || records[0].Type != type || records[0].Class != DnsClass.IN ||
+                !records[0].Name.Equals(owner, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"{DisplayPath(path)}: Expected data for exactly one record.");
         }
 
         private static JsonDocument ParseDocument(Stream stream)

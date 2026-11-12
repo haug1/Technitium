@@ -35,7 +35,7 @@ Evaluate the entire proposed change against the active ownership policy before c
 
 An explicitly declared value takes precedence over the corresponding existing setting or legacy environment variable. If `DNS_SERVER_DOMAIN=old.example.test` conflicts with declared `dns.serverDomain=primary.example.test`, validation reports the conflict by field and environment-variable name. Local validation checks its own environment. Remote preview and startup report conflicts from the server environment. The declared value is the candidate. Omitting that field preserves the existing domain on an initialized server and lets the normal legacy environment handling supply it on a fresh server. Releasing ownership allows later API changes without restoring an older value.
 
-Zone record owners use full DNS names with an optional trailing dot. Use `@` for the zone apex. Validation checks that each owner belongs to its enclosing zone and reports invalid record types or structured record data by field.
+Zone record owners use full DNS names with an optional trailing dot. Use `@` for the zone apex. Validation checks that each owner belongs to its enclosing zone and reports invalid record types or record data by field. The zone-file data form uses the enclosing zone as the origin for relative names and accepts data for one record per entry.
 
 ## Validation examples
 

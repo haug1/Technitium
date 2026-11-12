@@ -108,6 +108,8 @@ namespace DnsServerCore.Tests
         }
 
         [Theory]
+        [InlineData("@", "A", """{"zoneFile":"bad-address"}""", "/data/zoneFile")]
+        [InlineData("@", "A", """{"zoneFile":"192.0.2.1\nother.lab.example.test. 300 IN A 192.0.2.2"}""", "/data/zoneFile")]
         [InlineData("outside.test", "A", "{\"zoneFile\":\"192.0.2.1\"}", "/owner")]
         [InlineData("@", "UNKNOWN", "{\"rawHex\":\"00\"}", "/type")]
         [InlineData("@", "A", "{\"forwarder\":{\"address\":\"192.0.2.1\"}}", "/data/forwarder")]
@@ -121,6 +123,7 @@ namespace DnsServerCore.Tests
             InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
             Assert.Contains("/zones/lab.example.test/records/0" + suffix, error.Message);
             Assert.DoesNotContain("invalid***", error.Message);
+            Assert.DoesNotContain("bad-address", error.Message);
         }
 
         [Fact]
@@ -129,6 +132,8 @@ namespace DnsServerCore.Tests
             string path = WriteManifest("""
                 {"schemaVersion":1,"zones":{"bücher.test.":{"records":[
                     {"owner":"@","type":"TXT","data":{"txtBase64":["SGVsbG8="]}},
+                    {"owner":"@","type":"MX","data":{"zoneFile":"10 mail"}},
+                    {"owner":"@","type":"TXT","data":{"zoneFile":"( \"one\"\n \"two\" )"}},
                     {"owner":"www.XN--BCHER-KVA.TEST.","type":65280,"data":{"rawHex":"00"}}
                 ]}}}
                 """);
