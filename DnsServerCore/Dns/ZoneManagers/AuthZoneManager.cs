@@ -741,18 +741,48 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                 CheckManifestZoneEnabled(current, candidate.Disabled);
                 ConfigurationZonePolicies.CheckRestoreOwnership(path, fields, current, candidate);
+                bool ownsRecords = fields.Contains("records", StringComparer.Ordinal);
+                var candidateRecords = new List<DnsResourceRecord>();
                 bool hasSoa = false;
                 int count = recordReader.ReadInt32();
                 for (int index = 0; index < count; index++)
                 {
                     var record = new DnsResourceRecord(records);
-                    _ = AuthRecordInfo.ReadGenericRecordInfoFrom(recordReader, record.Type);
+                    record.Tag = AuthRecordInfo.ReadGenericRecordInfoFrom(recordReader, record.Type);
+                    if (ownsRecords)
+                        candidateRecords.Add(record);
                     ValidateIfDomainBelongsToZone(name, record.Name);
                     hasSoa |= record.Type == DnsResourceRecordType.SOA && record.Name.Equals(name, StringComparison.OrdinalIgnoreCase);
                 }
                 if (!hasSoa)
                     throw new InvalidDataException($"{path}: The zone backup is missing the apex SOA record.");
+                if (ownsRecords)
+                {
+                    var currentRecords = new List<DnsResourceRecord>();
+                    ListAllZoneRecords(name, currentRecords);
+                    var expected = OperatorRecordKeys(currentRecords);
+                    if (!expected.SetEquals(OperatorRecordKeys(candidateRecords)))
+                        CheckManifestZoneRecords(name);
+                }
+
+                HashSet<(string Owner, DnsResourceRecordType Type, DnsClass Class, DnsResourceRecordData Data,
+                    uint Ttl, bool Disabled, string Comments, uint ExpiryTtl)> OperatorRecordKeys(List<DnsResourceRecord> source) =>
+                    source.Where(record => !ConfigurationPlan.IsLeaseRecord(record) &&
+                        !ConfigurationPlan.IsGeneratedRecord(name, _dnsServer.ServerDomain, record.Name, record.Type, record.RDATA))
+                        .Select(record =>
+                        {
+                            var metadata = record.Tag as GenericRecordInfo;
+                            return (record.Name.ToLowerInvariant(), record.Type, record.Class, record.RDATA,
+                                record.OriginalTtlValue, metadata?.Disabled ?? false, metadata?.Comments ?? string.Empty, metadata?.ExpiryTtl ?? 0u);
+                        }).ToHashSet();
+
             }
+        }
+
+        internal void CheckManifestZoneRecords(string name)
+        {
+            if (OwnsManifestZoneField(name, "records"))
+                throw new DnsWebServiceException($"{GetManifestZonePath(name)}/records: Zone records are managed by the configuration manifest.");
         }
 
         internal bool OwnsManifestZoneField(string name, string field) =>
@@ -986,7 +1016,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             var fields = new List<string>();
             foreach (JsonProperty field in declaration.EnumerateObject())
             {
-                if (field.Name == "enabled")
+                if (field.Name is "enabled" or "records")
                     fields.Add(field.Name);
                 else if (ConfigurationZonePolicies.IsPolicy(field.Name))
                 {

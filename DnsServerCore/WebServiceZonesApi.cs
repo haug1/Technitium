@@ -1945,6 +1945,8 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(zoneInfo.Name);
+
                 bool overwriteRecords = request.GetQueryOrForm("overwrite", bool.Parse, true);
                 bool overwriteZone = request.GetQueryOrForm("overwriteZone", bool.Parse, false);
                 bool overwriteSoaSerial = request.GetQueryOrForm("overwriteSoaSerial", bool.Parse, false);
@@ -3891,6 +3893,8 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(zoneInfo.Name);
+
                 DnsResourceRecordType type = request.GetQueryOrFormEnum<DnsResourceRecordType>("type");
 
                 uint defaultTtl;
@@ -3943,6 +3947,7 @@ namespace DnsServerCore
 
                                     string ptrZone = Zone.GetReverseZone(ipAddress, type == DnsResourceRecordType.A ? 24 : 64);
 
+                                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(ptrZone);
                                     reverseZoneInfo = _dnsWebService._dnsServer.AuthZoneManager.CreatePrimaryZone(ptrZone);
                                     if (reverseZoneInfo == null)
                                         throw new DnsWebServiceException("Failed to create reverse zone to add PTR record: " + ptrZone);
@@ -3966,6 +3971,7 @@ namespace DnsServerCore
                                 ptrRecord.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
                                 ptrRecord.GetAuthGenericRecordInfo().ExpiryTtl = expiryTtl;
 
+                                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(reverseZoneInfo.Name);
                                 _dnsWebService._dnsServer.AuthZoneManager.SetRecord(reverseZoneInfo.Name, ptrRecord);
                                 _dnsWebService._dnsServer.AuthZoneManager.SaveZoneFile(reverseZoneInfo.Name);
                             }
@@ -4396,6 +4402,8 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(zoneInfo.Name);
+
                 DnsResourceRecordType type = request.GetQueryOrFormEnum<DnsResourceRecordType>("type");
                 switch (type)
                 {
@@ -4426,7 +4434,8 @@ namespace DnsServerCore
                                     {
                                         if ((ptrRecord.RDATA as DnsPTRRecordData).Domain.Equals(domain, StringComparison.OrdinalIgnoreCase))
                                         {
-                                            if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, reverseZoneInfo.Name, sessionUser, PermissionFlag.Delete))
+                                            if (!_dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(reverseZoneInfo.Name, "records") &&
+                                                _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, reverseZoneInfo.Name, sessionUser, PermissionFlag.Delete))
                                             {
                                                 //delete PTR record and save reverse zone
                                                 _dnsWebService._dnsServer.AuthZoneManager.DeleteRecord(reverseZoneInfo.Name, ptrDomain, DnsResourceRecordType.PTR, ptrRecord.RDATA);
@@ -4707,6 +4716,8 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
+                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(zoneInfo.Name);
+
                 string newDomain = request.GetQueryOrForm("newDomain", domain).Trim('.');
 
                 DnsResourceRecordType type = request.GetQueryOrFormEnum<DnsResourceRecordType>("type");
@@ -4748,6 +4759,12 @@ namespace DnsServerCore
                             bool ptr = request.GetQueryOrForm("ptr", bool.Parse, false);
                             if (ptr)
                             {
+                                string oldPtrDomain = Zone.GetReverseZone(ipAddress, type == DnsResourceRecordType.A ? 32 : 128);
+
+                                AuthZoneInfo oldReverseZoneInfo = _dnsWebService._dnsServer.AuthZoneManager.FindAuthZoneInfo(oldPtrDomain);
+                                if (oldReverseZoneInfo is not null)
+                                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(oldReverseZoneInfo.Name);
+
                                 string newPtrDomain = Zone.GetReverseZone(newIpAddress, type == DnsResourceRecordType.A ? 32 : 128);
 
                                 AuthZoneInfo newReverseZoneInfo = _dnsWebService._dnsServer.AuthZoneManager.FindAuthZoneInfo(newPtrDomain);
@@ -4762,6 +4779,7 @@ namespace DnsServerCore
 
                                     string ptrZone = Zone.GetReverseZone(newIpAddress, type == DnsResourceRecordType.A ? 24 : 64);
 
+                                    _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneMembership(ptrZone);
                                     newReverseZoneInfo = _dnsWebService._dnsServer.AuthZoneManager.CreatePrimaryZone(ptrZone);
                                     if (newReverseZoneInfo is null)
                                         throw new DnsWebServiceException("Failed to create reverse zone to add PTR record: " + ptrZone);
@@ -4778,12 +4796,10 @@ namespace DnsServerCore
                                         throw new DnsWebServiceException("Cannot update reverse zone to add PTR record: access was denied.");
                                 }
 
+                                _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRecords(newReverseZoneInfo.Name);
                                 if ((newReverseZoneInfo.Type != AuthZoneType.Primary) && (newReverseZoneInfo.Type != AuthZoneType.Forwarder))
                                     throw new DnsWebServiceException("Reverse zone '" + newReverseZoneInfo.DisplayName + "' is not a primary or forwarder zone.");
 
-                                string oldPtrDomain = Zone.GetReverseZone(ipAddress, type == DnsResourceRecordType.A ? 32 : 128);
-
-                                AuthZoneInfo oldReverseZoneInfo = _dnsWebService._dnsServer.AuthZoneManager.FindAuthZoneInfo(oldPtrDomain);
                                 if ((oldReverseZoneInfo is not null) && ((oldReverseZoneInfo.Type == AuthZoneType.Primary) || (oldReverseZoneInfo.Type == AuthZoneType.Forwarder)))
                                 {
                                     if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, oldReverseZoneInfo.Name, sessionUser, PermissionFlag.Delete))

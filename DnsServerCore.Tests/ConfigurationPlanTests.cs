@@ -3216,6 +3216,51 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneRecordOwnershipProtectsLegacyEditsUntilReleased()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=owned-records.test&type=Primary", server.AdminToken));
+            await server.RestartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?zones=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] previousZone = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"owned-records.test":{"type":"Primary","records":[
+                    {"owner":"www.owned-records.test","type":"A","data":{"zoneFile":"192.0.2.42"}}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+
+            foreach (string endpoint in new[]
+            {
+                "zones/records/add?zone=owned-records.test&domain=new.owned-records.test&type=A&ipAddress=192.0.2.43",
+                "zones/records/delete?zone=owned-records.test&domain=www.owned-records.test&type=A&ipAddress=192.0.2.42"
+            })
+            {
+                JsonElement rejected = await server.CallAsync(endpoint, server.AdminToken);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/zones/owned-records.test/records", rejected.GetProperty("errorMessage").GetString());
+            }
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(previousZone), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?zones=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/zones/owned-records.test/records", restore.GetProperty("errorMessage").GetString());
+            Assert.Single((await server.QueryAsync("www.owned-records.test", DnsResourceRecordType.A)).Answer);
+
+            const string release = """{"schemaVersion":1,"zones":{"owned-records.test":{"type":"Primary"}}}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=owned-records.test&domain=new.owned-records.test&type=A&ipAddress=192.0.2.43", server.AdminToken));
+        }
+
+        [Fact]
         public async Task ZonePolicyOwnershipRejectsMixedEditsAndAllowsUnmanagedFields()
         {
             await using var server = await LoopbackWebService.StartAsync();

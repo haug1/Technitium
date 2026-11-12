@@ -2224,7 +2224,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/zones/list", _zonesApi.ListZones);
             _webService.MapGetAndPost("/api/zones/catalogs/list", _zonesApi.ListCatalogZones);
             _webService.MapGetAndPost("/api/zones/create", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.CreateZoneAsync));
-            _webService.MapGetAndPost("/api/zones/import", _zonesApi.ImportZoneAsync);
+            _webService.MapGetAndPost("/api/zones/import", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.ImportZoneAsync));
             _webService.MapGetAndPost("/api/zones/export", _zonesApi.ExportZoneAsync);
             _webService.MapGetAndPost("/api/zones/clone", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.CloneZone));
             _webService.MapGetAndPost("/api/zones/convert", context => _settingsApi.WithConfigurationLockAsync(context, _zonesApi.ConvertZone));
