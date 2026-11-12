@@ -1306,6 +1306,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                                 {
                                     var primaryZone = (PrimaryZone)live;
                                     primaryZone.ActivateManifestSigning((PrimaryZone)stage.Zone);
+                                    foreach (var removal in signing.Removals ?? [])
+                                        primaryZone.RemoveGeneratedPrivateKey(removal.Tag);
                                     foreach (var rollover in signing.Rollovers ?? [])
                                         primaryZone.UpdatePrivateKey(rollover.Tag, rollover.After);
                                     if (stagedKeyAdditions.TryGetValue(name, out var additions))
@@ -1593,6 +1595,8 @@ namespace DnsServerCore.Dns.ZoneManagers
         private static HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestSigning(
             PrimaryZone zone, List<DnsResourceRecord> records, ConfigurationZoneDnssec.Signing signing, bool refreshRecords = false)
         {
+            foreach (var removal in signing?.Removals ?? [])
+                zone.RemoveGeneratedPrivateKey(removal.Tag);
             foreach (var rollover in signing?.Rollovers ?? [])
                 zone.StageRolloverDays(rollover.Tag, rollover.After);
 

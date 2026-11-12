@@ -1248,6 +1248,11 @@ namespace DnsServerCore.Dns.Zones
             if (_dnssecStatus == AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("The zone must be signed.");
 
+            RemoveGeneratedPrivateKey(keyTag);
+        }
+
+        internal void RemoveGeneratedPrivateKey(ushort keyTag)
+        {
             lock (_dnssecPrivateKeys)
             {
                 if (!_dnssecPrivateKeys.TryGetValue(keyTag, out DnssecPrivateKey privateKey))

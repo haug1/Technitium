@@ -40,7 +40,9 @@ namespace DnsServerCore.Configuration
         }
 
         internal sealed record Signing(uint Ttl, bool UseNsec3, ushort Iterations, int SaltLength, Key[] Keys,
-            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false, RolloverChange[] Rollovers = null, Key[] Additions = null);
+            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false, RolloverChange[] Rollovers = null, Key[] Additions = null, KeyRemoval[] Removals = null);
+
+        internal sealed record KeyRemoval(ushort Tag, string Path);
 
         internal sealed record RolloverChange(ushort Tag, ushort Before, ushort After, string Path);
 
@@ -55,6 +57,8 @@ namespace DnsServerCore.Configuration
                 yield return (path + "/dnsKeyTtl", ConfigurationChangeKind.Update);
             foreach (Key key in signing.Keys.Concat(signing.Additions ?? []))
                 yield return (key.Path, ConfigurationChangeKind.Add);
+            foreach (KeyRemoval removal in signing.Removals ?? [])
+                yield return (removal.Path, ConfigurationChangeKind.Remove);
             foreach (RolloverChange rollover in signing.Rollovers ?? [])
                 yield return (rollover.Path + "/rolloverDays", ConfigurationChangeKind.Update);
         }
@@ -88,6 +92,7 @@ namespace DnsServerCore.Configuration
                 }
 
                 ReadKeys(null, dnssec, path);
+                ReadKeyRemovals(dnssec, path);
             }
         }
 
@@ -132,12 +137,23 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{path}/proof/saltLength: NSEC3 salt length must be between 0 and 32.");
 
             Key[] parsed = ReadKeys(manifest, dnssec, path);
+            KeyRemoval[] requestedRemovals = ReadKeyRemovals(dnssec, path);
 
             if (signed)
             {
                 var existingKeys = (current.DnssecPrivateKeys ?? []).ToArray();
                 var additions = new List<Key>();
-                var remaining = existingKeys.Where(key => !key.IsRetiring).ToList();
+                var removals = new List<KeyRemoval>();
+                foreach (KeyRemoval removal in requestedRemovals)
+                {
+                    DnssecPrivateKey key = existingKeys.FirstOrDefault(candidate => candidate.KeyTag == removal.Tag);
+                    if (key is null)
+                        continue;
+                    if (key.State != DnssecPrivateKeyState.Generated)
+                        throw new InvalidDataException($"{removal.Path}: Only Generated keys can be removed. Use the DNSSEC lifecycle to retire a published key.");
+                    removals.Add(removal);
+                }
+                var remaining = existingKeys.Where(key => !key.IsRetiring && !removals.Any(removal => removal.Tag == key.KeyTag)).ToList();
                 var rollovers = new List<RolloverChange>();
                 foreach (Key expected in parsed.OrderBy(key => key.Imported is null))
                 {
@@ -175,7 +191,7 @@ namespace DnsServerCore.Configuration
                 bool changeTtl = ttl != current.DnsKeyTtl;
                 bool changeProof = useNsec3 != currentNsec3 || (useNsec3 &&
                     (iterations != (parameters?.Iterations ?? 0) || saltLength != (parameters?.Salt.Length ?? 0)));
-                if (!changeProof && !changeTtl && rollovers.Count == 0 && additions.Count == 0)
+                if (!changeProof && !changeTtl && rollovers.Count == 0 && additions.Count == 0 && removals.Count == 0)
                     return null;
                 if (changeTtl)
                 {
@@ -188,7 +204,7 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}/dnsKeyTtl: {ex.Message}");
                     }
                 }
-                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl, Rollovers: rollovers.ToArray(), Additions: additions.ToArray());
+                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl, Rollovers: rollovers.ToArray(), Additions: additions.ToArray(), Removals: removals.ToArray());
             }
 
             if (!parsed.Any(key => key.Role == DnssecPrivateKeyType.KeySigningKey) ||
@@ -256,11 +272,30 @@ namespace DnsServerCore.Configuration
         {
             JsonElement keys = Read(dnssec, "keys") ?? default;
             Key[] parsed = keys.ValueKind == JsonValueKind.Object
-                ? keys.EnumerateObject().Select(key => ReadKey(manifest, key.Value, ConfigurationPlan.AppendPath(path + "/keys", key.Name))).ToArray()
+                ? keys.EnumerateObject().Where(key => key.Value.ValueKind != JsonValueKind.Null).Select(key => ReadKey(manifest, key.Value, ConfigurationPlan.AppendPath(path + "/keys", key.Name))).ToArray()
                 : [];
             if (parsed.Where(key => key.Imported is not null).GroupBy(key => key.Imported.KeyTag).Any(group => group.Count() > 1))
                 throw new InvalidDataException($"{path}/keys: Imported DNSSEC key tags must be distinct.");
             return parsed;
+        }
+
+        private static KeyRemoval[] ReadKeyRemovals(JsonElement dnssec, string path)
+        {
+            if (Read(dnssec, "keys") is not JsonElement keys)
+                return [];
+
+            var removals = new List<KeyRemoval>();
+            foreach (JsonProperty key in keys.EnumerateObject())
+            {
+                if (key.Value.ValueKind != JsonValueKind.Null)
+                    continue;
+                string keyPath = ConfigurationPlan.AppendPath(path + "/keys", key.Name);
+                if (!ushort.TryParse(key.Name, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out ushort tag) ||
+                    key.Name != tag.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    throw new InvalidDataException($"{keyPath}: Use the numeric DNSSEC key tag to remove a Generated key.");
+                removals.Add(new(tag, keyPath));
+            }
+            return removals.ToArray();
         }
 
         private static Key ReadKey(ConfigurationManifest manifest, JsonElement value, string path)

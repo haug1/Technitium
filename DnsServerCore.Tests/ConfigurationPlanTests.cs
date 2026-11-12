@@ -3367,6 +3367,31 @@ namespace DnsServerCore.Tests
             Assert.Equal(pending.GetProperty("keyTag").GetInt32(), (await CheckPendingKeyAsync()).GetProperty("keyTag").GetInt32());
             Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
 
+            var keys = await GetKeysAsync();
+            int publishedTag = keys.EnumerateArray().First(key => !key.GetProperty("state").ValueEquals("Generated")).GetProperty("keyTag").GetInt32();
+            using (var body = new StringContent(RemoveKey(publishedTag), Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, body);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("Only Generated keys", rejected.GetProperty("errorMessage").GetString());
+            }
+
+            int pendingTag = pending.GetProperty("keyTag").GetInt32();
+            string removal = RemoveKey(pendingTag);
+            preview = await PreviewAsync(server, removal);
+            JsonElement change = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal($"/zones/pending-key.test/dnssec/keys/{pendingTag}", change.GetProperty("path").GetString());
+            Assert.Equal("Remove", change.GetProperty("kind").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, removal, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            Assert.Equal(2, (await GetKeysAsync()).GetArrayLength());
+            Assert.Equal(2, (await server.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer.Count);
+            Assert.Empty((await PreviewAsync(server, removal)).GetProperty("changes").EnumerateArray());
+
+            static string RemoveKey(int tag) => $$"""
+                {"schemaVersion":1,"zones":{"pending-key.test":{"dnssec":{"keys":{"{{tag}}":null} } } } }
+                """;
+
             async Task<JsonElement> GetKeysAsync()
             {
                 JsonElement result = await server.CallAsync($"zones/dnssec/properties/get?zone={name}", server.AdminToken);
