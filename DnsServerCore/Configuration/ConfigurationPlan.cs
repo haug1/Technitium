@@ -1466,8 +1466,12 @@ namespace DnsServerCore.Configuration
                         changes.Add(new ConfigurationChange($"{path}/primary/{field.GetString()}", ConfigurationChangeKind.Update, false));
                 }
 
-                if (current.TryGetProperty("dnssecChange", out _))
-                    changes.Add(new ConfigurationChange(path + "/dnssec", ConfigurationChangeKind.Update, false));
+                if (current.TryGetProperty("dnssecChanges", out JsonElement dnssecChanges))
+                {
+                    foreach (JsonElement change in dnssecChanges.EnumerateArray())
+                        changes.Add(new ConfigurationChange(change.GetProperty("path").GetString(),
+                            (ConfigurationChangeKind)change.GetProperty("kind").GetInt32(), false));
+                }
 
                 if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
                 {

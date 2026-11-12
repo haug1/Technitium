@@ -3271,7 +3271,11 @@ namespace DnsServerCore.Tests
                   "next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P384","rolloverDays":60}
                 }}}}}
                 """;
-            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            JsonElement addition = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal("/zones/pending-key.test/dnssec/keys/next", addition.GetProperty("path").GetString());
+            Assert.Equal("Add", addition.GetProperty("kind").GetString());
+            string revision = preview.GetProperty("revision").GetString()!;
             Assert.Equal(2, (await GetKeysAsync()).GetArrayLength());
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
 
@@ -3315,7 +3319,11 @@ namespace DnsServerCore.Tests
             Assert.Equal(30, original.GetProperty("rolloverDays").GetInt32());
             var soa = Assert.IsType<DnsSOARecordData>(
                 Assert.Single((await server.QueryAsync(name, DnsResourceRecordType.SOA)).Answer).RDATA);
-            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            JsonElement change = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal("/zones/rollover.test/dnssec/keys/zsk/rolloverDays", change.GetProperty("path").GetString());
+            Assert.Equal("Update", change.GetProperty("kind").GetString());
+            string revision = preview.GetProperty("revision").GetString()!;
             Assert.Equal(30, (await GetKeyAsync()).GetProperty("rolloverDays").GetInt32());
             string blockedPath = Path.Combine(server.ConfigurationDirectory, "zones", name + ".tmp");
             Directory.CreateDirectory(blockedPath);
@@ -3378,7 +3386,7 @@ namespace DnsServerCore.Tests
             Assert.Equal(2, originalKeys.Length);
             JsonElement plan = await PreviewAsync(server, nsec3);
             Assert.Contains(plan.GetProperty("changes").EnumerateArray(), change =>
-                change.GetProperty("path").ValueEquals("/zones/proof.test/dnssec"));
+                change.GetProperty("path").ValueEquals("/zones/proof.test/dnssec/proof"));
             Assert.Empty((await server.QueryAsync(name, DnsResourceRecordType.NSEC3PARAM)).Answer);
             string revision = plan.GetProperty("revision").GetString()!;
 

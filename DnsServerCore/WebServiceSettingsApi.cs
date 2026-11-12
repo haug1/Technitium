@@ -889,7 +889,7 @@ namespace DnsServerCore
                             !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Delete))
                             throw new DnsWebServiceException("Access was denied.");
 
-                        if (exists && currentZone.TryGetProperty("dnssecChange", out _) &&
+                        if (exists && currentZone.TryGetProperty("dnssecChanges", out _) &&
                             !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Delete))
                             throw new DnsWebServiceException("Access was denied.");
 
@@ -1428,7 +1428,15 @@ namespace DnsServerCore
                         signing = ConfigurationZoneDnssec.Prepare(manifest, declaration.Value, type, zone, zonePath);
                         if (signing is not null)
                         {
-                            writer.WriteBoolean("dnssecChange", true);
+                            writer.WriteStartArray("dnssecChanges");
+                            foreach (var (path, kind) in ConfigurationZoneDnssec.DescribeChanges(signing, zonePath))
+                            {
+                                writer.WriteStartObject();
+                                writer.WriteString("path", path);
+                                writer.WriteNumber("kind", (int)kind);
+                                writer.WriteEndObject();
+                            }
+                            writer.WriteEndArray();
                             if (zone is not null)
                                 writer.WriteString("dnssecRevision", zone.LastModified);
                             writer.WriteStartArray("dnssecKeyIdentities");

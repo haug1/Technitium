@@ -42,7 +42,22 @@ namespace DnsServerCore.Configuration
         internal sealed record Signing(uint Ttl, bool UseNsec3, ushort Iterations, int SaltLength, Key[] Keys,
             bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false, RolloverChange[] Rollovers = null, Key[] Additions = null);
 
-        internal sealed record RolloverChange(ushort Tag, ushort Before, ushort After);
+        internal sealed record RolloverChange(ushort Tag, ushort Before, ushort After, string Path);
+
+        internal static IEnumerable<(string Path, ConfigurationChangeKind Kind)> DescribeChanges(Signing signing, string zonePath)
+        {
+            string path = zonePath + "/dnssec";
+            if (signing.Disable || signing.Keys.Length > 0)
+                yield return (path + "/enabled", ConfigurationChangeKind.Update);
+            if (signing.ChangeProof)
+                yield return (path + "/proof", ConfigurationChangeKind.Update);
+            if (signing.ChangeTtl)
+                yield return (path + "/dnsKeyTtl", ConfigurationChangeKind.Update);
+            foreach (Key key in signing.Keys.Concat(signing.Additions ?? []))
+                yield return (key.Path, ConfigurationChangeKind.Add);
+            foreach (RolloverChange rollover in signing.Rollovers ?? [])
+                yield return (rollover.Path + "/rolloverDays", ConfigurationChangeKind.Update);
+        }
 
         internal static void ValidateDeclarations(JsonElement root)
         {
@@ -154,7 +169,7 @@ namespace DnsServerCore.Configuration
                     {
                         throw new InvalidDataException($"{expected.Path}/rolloverDays: {ex.Message}");
                     }
-                    rollovers.Add(new(key.KeyTag, key.RolloverDays, expected.RolloverDays));
+                    rollovers.Add(new(key.KeyTag, key.RolloverDays, expected.RolloverDays, expected.Path));
                 }
 
                 bool changeTtl = ttl != current.DnsKeyTtl;
