@@ -4412,10 +4412,12 @@ namespace DnsServerCore.Tests
             const string source = """
                 {"schemaVersion":1,"zones":{"catalog.test":{"type":"Catalog","transfer":{"mode":"Allow"},
                   "notify":{"mode":"None","secondaryCatalogNameServers":["127.0.0.1"]}
-                },"member.test":{"type":"Primary","catalog":{"name":"catalog.test","overrideNotify":false,
+                },"destination-catalog.test":{"type":"Catalog","transfer":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1/32"]}},
+                "member.test":{"type":"Primary","catalog":{"name":"catalog.test","overrideNotify":false,
                   "overrideQueryAccess":false,"overrideZoneTransfer":false},
                   "query":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1/32"]},
-                  "transfer":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1/32"]}
+                  "transfer":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1/32"]},
+                  "records":[{"owner":"www.member.test","type":"A","data":{"zoneFile":"192.0.2.42"}}]
                 }}}
                 """;
             string revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
@@ -4470,6 +4472,8 @@ namespace DnsServerCore.Tests
             string manifest = $$$$$"""
                 {"schemaVersion":1,"zones":{"catalog.test":{"type":"SecondaryCatalog",
                   "primary":{"servers":[{"address":"{{{{{address}}}}}"}],"transferProtocol":"Tcp"}
+                },"destination-catalog.test":{"type":"SecondaryCatalog","enabled":false,
+                  "primary":{"servers":[{"address":"{{{{{address}}}}}"}],"transferProtocol":"Tcp"}
                 }}}
                 """;
             revision = (await PreviewAsync(replica, manifest)).GetProperty("revision").GetString()!;
@@ -4490,6 +4494,17 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(member);
             Assert.True(member.GetProperty("response").GetProperty("overrideCatalogQueryAccess").GetBoolean());
             Assert.True(member.GetProperty("response").GetProperty("overrideCatalogZoneTransfer").GetBoolean());
+            deadline = DateTime.UtcNow.AddSeconds(20);
+            DnsDatagram answer;
+            do
+            {
+                answer = await replica.QueryAsync("www.member.test", DnsResourceRecordType.A);
+                if (answer.Answer.Count != 0)
+                    break;
+                await Task.Delay(300);
+            }
+            while (DateTime.UtcNow < deadline);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(Assert.Single(answer.Answer).RDATA).Address);
             Assert.Empty((await PreviewAsync(replica, manifest)).GetProperty("changes").EnumerateArray());
 
             JsonElement export = await replica.CallAsync("settings/config/export", replica.AdminToken);
@@ -4505,6 +4520,29 @@ namespace DnsServerCore.Tests
             JsonElement rejected = await replica.CallAsync("settings/config/plan", replica.AdminToken, remove);
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.Contains("have no members", rejected.GetProperty("errorMessage").GetString());
+
+            string moved = updatedSource.Replace("\"name\":\"catalog.test\"", "\"name\":\"destination-catalog.test\"", StringComparison.Ordinal);
+            JsonElement movePlan = await PreviewAsync(primary, moved);
+            Assert.Contains(movePlan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/member.test/catalog/name"));
+            LoopbackWebService.AssertOk(await ApplyAsync(primary, moved, movePlan.GetProperty("revision").GetString()!));
+            LoopbackWebService.AssertOk(await replica.CallAsync("zones/disable?zone=catalog.test", replica.AdminToken));
+            LoopbackWebService.AssertOk(await replica.CallAsync("zones/enable?zone=catalog.test", replica.AdminToken));
+            deadline = DateTime.UtcNow.AddSeconds(20);
+            do
+            {
+                await Task.Delay(300);
+                member = await replica.CallAsync("zones/options/get?zone=member.test", replica.AdminToken);
+                LoopbackWebService.AssertOk(member);
+                if (member.GetProperty("response").GetProperty("catalog").ValueEquals("destination-catalog.test"))
+                    break;
+            }
+            while (DateTime.UtcNow < deadline);
+            Assert.Equal("destination-catalog.test", member.GetProperty("response").GetProperty("catalog").GetString());
+            answer = await replica.QueryAsync("www.member.test", DnsResourceRecordType.A);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(Assert.Single(answer.Answer).RDATA).Address);
+            await primary.RestartAsync();
+            Assert.Empty((await PreviewAsync(primary, moved)).GetProperty("changes").EnumerateArray());
 
             string updated = manifest.Replace(address, LoopbackDnsServer.GetLoopbackEndPoint().ToString(), StringComparison.Ordinal);
             JsonElement plan = await PreviewAsync(replica, updated);

@@ -837,8 +837,6 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             string after = value.ValueKind == JsonValueKind.Null ? "" :
                 ConfigurationManifest.CanonicalDnsName(value.GetString(), path + "/catalog/name", allowRoot: false);
-            if (before is not null && after.Length != 0 && before != after)
-                throw new InvalidDataException($"{path}/catalog/name: Detach the zone before assigning another catalog.");
             if (after.Length != 0)
             {
                 bool declaredCatalog = false;
@@ -943,7 +941,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         bool wasActive = before.Length != 0 && !zone.Disabled;
                         bool isActive = catalog.Length != 0 && !(disabled ?? zone?.Disabled ?? false);
                         if (wasActive && (!isActive || catalog != before))
-                            AddCatalogEdit(before, new(name, type, false, null, null, null));
+                            AddCatalogEdit(before, new(name, type, false, null, null, null, isActive ? catalog : null));
                         if (isActive && (!wasActive || catalog != before || CatalogPoliciesChanged(policies)))
                         {
                             bool queryOverride = policies.OverrideCatalogQuery ?? zone?.OverrideCatalogQueryAccess ?? false;
@@ -1285,7 +1283,8 @@ namespace DnsServerCore.Dns.ZoneManagers
         }
 
         private sealed record ManifestCatalogMemberEdit(string Member, AuthZoneType Type, bool? Add,
-            IReadOnlyCollection<NetworkAccessControl> Query, IReadOnlyCollection<NetworkAccessControl> Transfer, IReadOnlySet<string> Keys);
+            IReadOnlyCollection<NetworkAccessControl> Query, IReadOnlyCollection<NetworkAccessControl> Transfer, IReadOnlySet<string> Keys,
+            string Destination = null);
 
         private static bool CatalogPoliciesChanged(ConfigurationZonePolicies.Changes policies) =>
             policies.OverrideCatalogQuery.HasValue || policies.OverrideCatalogTransfer.HasValue ||
@@ -1299,6 +1298,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             var currentSoa = records.Single(record => record.Type == DnsResourceRecordType.SOA && record.Name == zone.Name);
             zone.LoadRecords(DnsResourceRecordType.SOA, [CopyRecord(currentSoa, currentSoa.OriginalTtlValue)]);
             var desired = new Dictionary<(string Owner, DnsResourceRecordType Type), IReadOnlyList<DnsResourceRecord>>();
+            var expiryChanges = new HashSet<(string Owner, DnsResourceRecordType Type)>();
             zone.ApplyManifestPolicies(policies, initialize, (name, type, rrset) => desired[(name, type)] = rrset);
             if (membership is not null)
             {
@@ -1309,11 +1309,37 @@ namespace DnsServerCore.Dns.ZoneManagers
                         record.RDATA is DnsPTRRecordData ptr && ptr.Domain.Equals(edit.Member, StringComparison.OrdinalIgnoreCase)).ToArray();
                     if (edit.Add == false)
                     {
+                        if (edit.Destination is not null && pointers.Length != 1)
+                            throw new InvalidDataException($"{GetManifestZonePath(edit.Member)}/catalog: The source catalog must contain one member record for a move.");
                         foreach (DnsResourceRecord pointer in pointers)
                         {
-                            foreach (DnsResourceRecord record in records.Where(record => record.Name == pointer.Name ||
-                                record.Name.EndsWith("." + pointer.Name, StringComparison.Ordinal)))
-                                desired[(record.Name, record.Type)] = [];
+                            var memberRecords = records.Where(record => record.Name == pointer.Name ||
+                                record.Name.EndsWith("." + pointer.Name, StringComparison.Ordinal))
+                                .GroupBy(record => (record.Name, record.Type));
+                            if (edit.Destination is null)
+                            {
+                                foreach (var rrset in memberRecords)
+                                    desired[rrset.Key] = [];
+                            }
+                            else
+                            {
+                                DateTime timestamp = DateTime.UtcNow;
+                                uint expiry = zone.GetZoneSoaExpire();
+                                foreach (var rrset in memberRecords)
+                                {
+                                    desired[rrset.Key] = rrset.Select(record =>
+                                    {
+                                        var copy = CopyRecord(record, record.OriginalTtlValue);
+                                        GenericRecordInfo info = copy.GetAuthGenericRecordInfo();
+                                        info.LastModified = timestamp;
+                                        info.ExpiryTtl = expiry;
+                                        return copy;
+                                    }).ToArray();
+                                    expiryChanges.Add(rrset.Key);
+                                }
+                                var handoff = CatalogZone.CreateChangeOfOwnershipRecord(pointer.Name, edit.Destination, timestamp, expiry);
+                                desired[(handoff.Name, handoff.Type)] = [handoff];
+                            }
                         }
                         continue;
                     }
@@ -1321,10 +1347,35 @@ namespace DnsServerCore.Dns.ZoneManagers
                     string domain;
                     if (edit.Add == true)
                     {
-                        var created = zone.CreateMemberRecords(edit.Member, edit.Type);
-                        domain = created.Domain;
-                        foreach (DnsResourceRecord record in created.Records)
-                            desired[(record.Name, record.Type)] = [record];
+                        if (pointers.Length > 1)
+                            throw new InvalidDataException($"{GetManifestZonePath(edit.Member)}/catalog: The destination catalog contains duplicate member records.");
+                        if (pointers.Length == 1)
+                        {
+                            domain = pointers[0].Name;
+                            foreach (var rrset in records.Where(record => record.Name == domain ||
+                                record.Name.EndsWith("." + domain, StringComparison.Ordinal)).GroupBy(record => (record.Name, record.Type)))
+                            {
+                                if (rrset.Key.Name == "coo." + domain && rrset.Key.Type == DnsResourceRecordType.PTR)
+                                {
+                                    desired[rrset.Key] = [];
+                                    continue;
+                                }
+                                desired[rrset.Key] = rrset.Select(record =>
+                                {
+                                    var copy = CopyRecord(record, record.OriginalTtlValue);
+                                    copy.GetAuthGenericRecordInfo().ExpiryTtl = 0;
+                                    return copy;
+                                }).ToArray();
+                                expiryChanges.Add(rrset.Key);
+                            }
+                        }
+                        else
+                        {
+                            var created = zone.CreateMemberRecords(edit.Member, edit.Type);
+                            domain = created.Domain;
+                            foreach (DnsResourceRecord record in created.Records)
+                                desired[(record.Name, record.Type)] = [record];
+                        }
                     }
                     else
                     {
@@ -1336,22 +1387,26 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
             }
             var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
-            var deleted = new List<DnsResourceRecord>();
             var added = new List<DnsResourceRecord>();
+            var wireDeleted = new List<DnsResourceRecord>();
+            var wireAdded = new List<DnsResourceRecord>();
             foreach (var (key, candidate) in desired)
             {
                 var previous = records.Where(record => record.Name == key.Owner && record.Type == key.Type).ToArray();
-                if (previous.SequenceEqual(candidate))
+                if (!expiryChanges.Contains(key) && previous.SequenceEqual(candidate))
                     continue;
                 changed.Add(key);
-                deleted.AddRange(previous);
                 added.AddRange(candidate);
+                // Expiry metadata is local. Sending the unchanged PTR as a deletion in IXFR
+                // would make a replica remove the member before reading the handoff.
+                wireDeleted.AddRange(previous.Except(candidate));
+                wireAdded.AddRange(candidate.Except(previous));
             }
             if (changed.Count != 0)
             {
                 records.RemoveAll(record => changed.Contains((record.Name, record.Type)));
                 records.AddRange(added);
-                zone.CommitAndIncrementSerial(deleted, added);
+                zone.CommitAndIncrementSerial(wireDeleted, wireAdded);
                 records.Remove(currentSoa);
                 records.AddRange(zone.GetRecords(DnsResourceRecordType.SOA));
                 changed.Add((zone.Name, DnsResourceRecordType.SOA));

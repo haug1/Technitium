@@ -212,18 +212,9 @@ namespace DnsServerCore.Dns.Zones
         public void ChangeMemberZoneOwnership(string memberZoneName, string newCatalogZoneName)
         {
             string memberZoneDomain = GetMemberZoneDomain(memberZoneName);
-            string domain = "coo." + memberZoneDomain;
-
             DateTime utcNow = DateTime.UtcNow;
             uint soaExpiry = GetZoneSoaExpire();
-
-            //add COO record with expiry
-            DnsResourceRecord cooRecord = new DnsResourceRecord(domain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(newCatalogZoneName));
-            GenericRecordInfo cooRecordInfo = cooRecord.GetAuthGenericRecordInfo();
-            cooRecordInfo.LastModified = utcNow;
-            cooRecordInfo.ExpiryTtl = soaExpiry;
-
-            _dnsServer.AuthZoneManager.SetRecord(_name, cooRecord);
+            _dnsServer.AuthZoneManager.SetRecord(_name, CreateChangeOfOwnershipRecord(memberZoneDomain, newCatalogZoneName, utcNow, soaExpiry));
 
             //set expiry for other member zone records
             foreach (DnsResourceRecord record in _dnsServer.AuthZoneManager.EnumerateAllRecords(_name, memberZoneDomain, true))
@@ -232,6 +223,15 @@ namespace DnsServerCore.Dns.Zones
                 recordInfo.LastModified = utcNow;
                 recordInfo.ExpiryTtl = soaExpiry;
             }
+        }
+
+        internal static DnsResourceRecord CreateChangeOfOwnershipRecord(string memberDomain, string catalogName, DateTime timestamp, uint expiry)
+        {
+            var record = new DnsResourceRecord("coo." + memberDomain, DnsResourceRecordType.PTR, DnsClass.IN, 0, new DnsPTRRecordData(catalogName));
+            GenericRecordInfo info = record.GetAuthGenericRecordInfo();
+            info.LastModified = timestamp;
+            info.ExpiryTtl = expiry;
+            return record;
         }
 
         public IReadOnlyCollection<string> GetAllMemberZoneNames()
