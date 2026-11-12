@@ -465,6 +465,76 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task IncrementalClusterTransferClearsAppConfigurationWithoutUninstallingTheApp()
+        {
+            await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
+            await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true,
+                adminPassword: primary.AdminPassword);
+            using var package = new MemoryStream();
+            using (var zip = new ZipArchive(package, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                using var config = new StreamWriter(zip.CreateEntry("dnsApp.config").Open());
+                config.Write("fixture configuration");
+            }
+            package.Position = 0;
+            using var upload = new MultipartFormDataContent();
+            upload.Add(new StreamContent(package), "file", "fixture.zip");
+            LoopbackWebService.AssertOk(await primary.CallAsync("apps/install?name=Fixture", primary.AdminToken, upload));
+
+            JsonElement initialized = await primary.CallAsync(
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", primary.AdminToken);
+            LoopbackWebService.AssertOk(initialized);
+            JsonElement primaryNode = Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
+            using var join = new FormUrlEncodedContent([
+                new("secondaryNodeIpAddresses", "127.0.0.1"),
+                new("primaryNodeUrl", primaryNode.GetProperty("url").GetString()!),
+                new("primaryNodeIpAddress", "127.0.0.1"),
+                new("primaryNodeUsername", "admin"),
+                new("primaryNodePassword", primary.AdminPassword),
+                new("ignoreCertificateErrors", "true")
+            ]);
+            LoopbackWebService.AssertOk(await secondary.CallAsync("admin/cluster/initJoin", secondary.AdminToken, join));
+            string token = await secondary.LoginAsync("admin", primary.AdminPassword);
+            Assert.Equal("fixture configuration", (await ReadSecondaryConfigAsync()).GetString());
+
+            using var catalog = new FormUrlEncodedContent([
+                new("zone", "cluster-catalog.cluster.test"),
+                new("primaryZoneTransferProtocol", "Tcp"),
+                new("primaryNameServerAddresses", $"127.0.0.1:{primary.DnsPort}")
+            ]);
+            LoopbackWebService.AssertOk(await secondary.CallAsync("zones/options/set", token, catalog));
+            LoopbackWebService.AssertOk(await secondary.CallAsync("zones/resync?zone=cluster-catalog.cluster.test", token));
+            Assert.True(await WaitForAsync(async () =>
+                (await secondary.CallAsync("zones/options/get?zone=cluster.test", token)).GetProperty("status").ValueEquals("ok")),
+                "The Secondary did not transfer the cluster zone.");
+
+            using var clear = new FormUrlEncodedContent([new("config", "")]);
+            LoopbackWebService.AssertOk(await primary.CallAsync("apps/config/set?name=Fixture", primary.AdminToken, clear));
+            Assert.True(await WaitForAsync(async () => (await ReadSecondaryConfigAsync()).ValueKind == JsonValueKind.Null),
+                "The Secondary did not clear the installed app's configuration.");
+
+            async Task<JsonElement> ReadSecondaryConfigAsync()
+            {
+                JsonElement result = await secondary.CallAsync("apps/config/get?name=Fixture", token);
+                LoopbackWebService.AssertOk(result);
+                return result.GetProperty("response").GetProperty("config");
+            }
+
+            static async Task<bool> WaitForAsync(Func<Task<bool>> condition)
+            {
+                DateTime deadline = DateTime.UtcNow.AddSeconds(25);
+                do
+                {
+                    if (await condition())
+                        return true;
+                    await Task.Delay(200);
+                }
+                while (DateTime.UtcNow < deadline);
+                return false;
+            }
+        }
+
+        [Fact]
         public async Task JoiningSecondaryReceivesDnsSettingsAndKeepsItsLocalWebConfiguration()
         {
             await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);

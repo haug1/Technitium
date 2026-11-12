@@ -23,6 +23,7 @@ namespace DnsServerCore.Tests
 
         public HttpClient Client { get; private set; } = null!;
         public string ConfigurationDirectory => _configuration.FullName;
+        public int DnsPort => DnsEndPoint.Port;
         public string AdminPassword { get; private init; } = null!;
         public string AdminToken { get; private set; } = null!;
         private IPEndPoint DnsEndPoint { get; set; } = null!;

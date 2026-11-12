@@ -1385,36 +1385,36 @@ namespace DnsServerCore
                             }
 
                             //update app config
+                            DnsApplicationManager appManager = _dnsServer.DnsApplicationManager;
                             foreach (ZipArchiveEntry entry in backupZip.Entries)
                             {
                                 if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal))
                                     continue;
 
                                 string[] fullNameParts = entry.FullName.Split('/');
-                                if (fullNameParts.Length < 3)
+                                if (fullNameParts.Length != 3)
                                     continue;
 
                                 string applicationName = fullNameParts[1];
                                 string configFile = fullNameParts[2];
 
-                                if (!configFile.Equals("dnsApp.config", StringComparison.Ordinal))
+                                bool clear = configFile == DnsApplicationManager.ClusterConfigAbsentEntry;
+                                if (!clear && configFile != DnsApplication.ConfigurationFileName)
                                     continue;
 
-                                if (_dnsServer.DnsApplicationManager.Applications.TryGetValue(applicationName, out DnsApplication application))
+                                if (appManager.Applications.TryGetValue(applicationName, out DnsApplication application))
                                 {
-                                    string config;
-
-                                    await using (Stream s = entry.Open())
+                                    if (clear)
                                     {
-                                        using (StreamReader sR = new StreamReader(s, true))
-                                        {
-                                            config = await sR.ReadToEndAsync();
-                                        }
+                                        await appManager.SetApplicationConfigAsync(application, null, skipUnchanged: true);
+                                        continue;
                                     }
 
+                                    using var reader = new StreamReader(entry.Open(), true);
+                                    string config = await reader.ReadToEndAsync();
                                     try
                                     {
-                                        await _dnsServer.DnsApplicationManager.SetApplicationConfigAsync(application, config);
+                                        await appManager.SetApplicationConfigAsync(application, config);
                                     }
                                     catch (Exception ex)
                                     {

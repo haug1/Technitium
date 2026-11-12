@@ -64,6 +64,8 @@ namespace DnsServerCore.Dns.Applications
         const int APP_UPDATE_TIMER_INITIAL_INTERVAL = 10000;
         const int APP_UPDATE_TIMER_PERIODIC_INTERVAL = 86400000;
 
+        internal const string ClusterConfigAbsentEntry = ".config-absent";
+
         private string[] _manifestOwnedPaths = [];
         internal IReadOnlyList<string> ManagedPaths => _manifestOwnedPaths;
 
@@ -419,7 +421,7 @@ namespace DnsServerCore.Dns.Applications
                 throw new InvalidDataException($"{ConfigurationApplications.AppPath(name)}: The package version or configuration is managed by the manifest.");
         }
 
-        internal async Task SetApplicationConfigAsync(DnsApplication app, string config)
+        internal async Task SetApplicationConfigAsync(DnsApplication app, string config, bool skipUnchanged = false)
         {
             await _opsLock.WaitAsync();
             try
@@ -428,9 +430,12 @@ namespace DnsServerCore.Dns.Applications
                 if (!_applications.TryGetValue(app.Name, out DnsApplication current) || !ReferenceEquals(current, app))
                     throw new InvalidDataException($"{path}: The installed app changed before its configuration could be saved.");
 
-                if (!_manifestOwnedPaths.Contains(path))
+                bool managed = _manifestOwnedPaths.Contains(path);
+                if ((managed || skipUnchanged) && app.ReadManifestConfig() == config)
+                    return;
+                if (!managed)
                     await app.SetConfigAsync(config);
-                else if (app.ReadManifestConfig() != config)
+                else
                     throw new InvalidDataException($"{path}: App configuration is managed by the manifest.");
             }
             finally
@@ -466,7 +471,12 @@ namespace DnsServerCore.Dns.Applications
                         fileAdded = true;
                     }
 
-                    if (File.Exists(configFile) && (File.GetLastWriteTimeUtc(configFile) > ifModifiedSince))
+                    if (!File.Exists(configFile))
+                    {
+                        _ = backupZip.CreateEntry("apps/" + applicationName + "/" + ClusterConfigAbsentEntry);
+                        fileAdded = true;
+                    }
+                    else if (File.GetLastWriteTimeUtc(configFile) > ifModifiedSince)
                     {
                         string entryName = "apps/" + applicationName + "/" + DnsApplication.ConfigurationFileName;
                         backupZip.CreateEntryFromFile(configFile, entryName);
@@ -523,6 +533,14 @@ namespace DnsServerCore.Dns.Applications
                     string target = Path.GetFullPath(Path.Combine(_dnsServer.ConfigFolder, entry.FullName));
                     if (!target.StartsWith(folder, comparison))
                         continue;
+                    if (isConfigTransfer && entry.FullName.Equals(archiveFolder + ".exists", comparison))
+                        continue;
+                    if (isConfigTransfer && entry.FullName.Equals(archiveFolder + ClusterConfigAbsentEntry, comparison))
+                    {
+                        if (paths.Contains(path + "/configuration") && app.ReadManifestConfig() is not null)
+                            throw new InvalidDataException($"{path}/configuration: Cluster transfer would clear a managed app configuration.");
+                        continue;
+                    }
                     bool config = Path.GetFileName(target).Equals(DnsApplication.ConfigurationFileName, comparison);
                     if (config && !paths.Contains(path + "/configuration"))
                         continue;

@@ -7675,6 +7675,8 @@ RESPONSE:
 
 The Transfer Config call is used by Secondary nodes to  sync the complete config data from the Primary node. This call can be made only at the Primary node.
 
+The transfer ZIP uses an empty `apps/<name>/.config-absent` entry when an installed app has no configuration file. A Secondary that recognizes this entry clears any stored configuration for the app and keeps the package installed. Older Secondaries ignore this entry.
+
 URL:\
 `http://localhost:5380/api/admin/cluster/primary/transferConfig?includeZones=`
 
