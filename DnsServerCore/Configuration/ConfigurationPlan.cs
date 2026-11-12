@@ -10,7 +10,6 @@ using DnsServerCore.Dns;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using DnsServerCore.Dns.ZoneManagers;
 using TechnitiumLibrary.Net;
 
 namespace DnsServerCore.Configuration
@@ -29,6 +28,7 @@ namespace DnsServerCore.Configuration
         private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService,
             Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false);
 
+        private const string BlockListSourcesPath = "/blocklists/sources";
         private const string ServerDomainPath = "/dns/serverDomain";
         private const string DnsEndpointsPath = "/dns/localEndpoints";
         private const string Ipv4SourcePath = "/dns/sourceNetworks/ipv4";
@@ -67,8 +67,8 @@ namespace DnsServerCore.Configuration
             ["/statistics/inMemory"] = Field("enableInMemoryStats", false),
             ["/statistics/retentionDays"] = Field("maxStatFileDays", 365),
             ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24, canApply: true),
-            ["/blocklists/sources"] = new("blockListUrls", JsonSerializer.SerializeToElement(Array.Empty<string>()),
-                false, NormalizeBlockListSources, OmitFromExport: true),
+            [BlockListSourcesPath] = new("blockListUrls", JsonSerializer.SerializeToElement<string>(null),
+                false, OmitFromExport: true, CanApply: true),
             ["/apps/autoUpdate"] = Field("dnsAppsEnableAutomaticUpdate", true)
         };
 
@@ -132,13 +132,19 @@ namespace DnsServerCore.Configuration
                 ? GetManifestLogFolder(folderValue, log) : null;
 
             return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig =>
-                dns.BlockListZoneManager.ApplyManifestUpdateInterval(GetBlockListInterval(manifest), writeBlockListConfig => log.ApplyManifestSettings(
+                dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
                 writeDnsConfig, writeCertificate, writeBlockListConfig)));
+        }
+
+        private static IReadOnlyList<string> GetBlockListSources(ConfigurationManifest manifest)
+        {
+            return manifest.Settings.TryGetProperty("blocklists", out JsonElement blocklists) &&
+                blocklists.TryGetProperty("sources", out JsonElement value) ? ConfigurationManifest.ReadBlockListSources(value) : null;
         }
 
         private static int? GetBlockListInterval(ConfigurationManifest manifest)
@@ -223,6 +229,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             if (GetAuthoritativeDefaults(manifest).HasValues)
                 throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
+            if (GetBlockListSources(manifest) is not null)
+                throw new InvalidDataException("/blocklists/sources: Applying blocklist sources to a cluster is not implemented.");
             if (GetBlockListInterval(manifest).HasValue)
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
@@ -368,6 +376,11 @@ namespace DnsServerCore.Configuration
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
                     }
+                    else if (path == BlockListSourcesPath)
+                    {
+                        candidate = NormalizeBlockListSources(desired);
+                        current = NormalizeBlockListSources(current);
+                    }
                     else if (path == DnsEndpointsPath)
                     {
                         var endpoints = ConfigurationManifest.ReadDnsLocalEndPoints(desired);
@@ -437,8 +450,8 @@ namespace DnsServerCore.Configuration
 
         private static JsonElement NormalizeBlockListSources(JsonElement value)
         {
-            string[] urls = value.EnumerateArray().Select(item => item.GetString()).ToArray();
-            return JsonSerializer.SerializeToElement(BlockListZoneManager.NormalizeBlockListUrls(urls));
+            IReadOnlyList<string> sources = ConfigurationManifest.ReadBlockListSources(value);
+            return JsonSerializer.SerializeToElement(sources.Count == 0 ? null : sources);
         }
 
         private static Setting Field<T>(string apiField, T defaultValue, bool restartWebService = false, bool canApply = false)

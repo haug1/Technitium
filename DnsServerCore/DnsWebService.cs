@@ -921,7 +921,7 @@ namespace DnsServerCore
                     CheckRestoreManifestDnsSettings(dnsConfiguration, isConfigTransfer: true);
                 }
 
-                if (isConfigTransfer && blockLists && _dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval &&
+                if (isConfigTransfer && blockLists && _dnsServer.BlockListZoneManager.HasManagedSettings &&
                     backupZip.GetEntry("blocklist.config") is ZipArchiveEntry managedBlockListEntry)
                 {
                     using Stream blockListConfiguration = managedBlockListEntry.Open();

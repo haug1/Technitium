@@ -606,6 +606,36 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task BlockListSourcesPersistWithoutLeakingUrlsInPreviewOrExport()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string secret = "fixture-sensitive";
+            const string source = "https://example.test/list?token=" + secret;
+            string manifest = JsonSerializer.Serialize(new { schemaVersion = 1, blocklists = new { sources = new[] { source, source }, updateIntervalHours = 0 } });
+
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.DoesNotContain(secret, preview.GetRawText());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(source, Assert.Single(current.GetProperty("blockListUrls").EnumerateArray()).GetString());
+            Assert.Contains(current.GetProperty("managedSettings").EnumerateArray(), path => path.GetString() == "/blocklists/sources");
+            Assert.DoesNotContain(secret, ConfigurationPlan.Export(current, includePreviewOnly: false).ToJsonString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement edit = await server.CallAsync("settings/set?blockListUrls=https%3A%2F%2Fexample.test%2Fother", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/blocklists/sources", edit.GetProperty("errorMessage").GetString());
+
+            const string clear = """{"schemaVersion":1,"blocklists":{"sources":null,"updateIntervalHours":0}}""";
+            string revision = (await PreviewAsync(server, clear)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, clear, revision));
+            Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("blockListUrls").ValueKind);
+            Assert.Empty((await PreviewAsync(server, clear)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -949,10 +979,9 @@ namespace DnsServerCore.Tests
         [InlineData("""{"schemaVersion":1,"blocklists":{"sources":["bad address"]}}""", "/blocklists/sources")]
         public void PreviewRejectsUnsupportedOrInvalidSettings(string json, string path)
         {
-            ConfigurationManifest manifest = Load(json);
             using var snapshot = JsonDocument.Parse("""{"blockListUrls":[]}""");
 
-            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationPlan.Create(manifest, snapshot.RootElement));
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationPlan.Create(Load(json), snapshot.RootElement));
 
             Assert.Contains(path, error.Message);
             Assert.DoesNotContain("bad address", error.Message);

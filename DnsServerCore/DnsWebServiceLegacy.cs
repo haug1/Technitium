@@ -216,6 +216,8 @@ namespace DnsServerCore
 
             if (format == "DS")
             {
+                if (_dnsServer.BlockListZoneManager.ManifestOwnsSources)
+                    throw new InvalidDataException("/blocklists/sources: Cannot verify the source list in this combined backup format.");
                 if (_dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
                     throw new InvalidDataException("/blocklists/updateIntervalHours: Cannot verify the update interval in this combined backup format.");
 

@@ -21,6 +21,7 @@ using DnsServerCore.Auth;
 using DnsServerCore.Cluster;
 using DnsServerCore.Configuration;
 using DnsServerCore.Dns;
+using DnsServerCore.Dns.ZoneManagers;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Collections.Generic;
@@ -467,6 +468,8 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue(path);
                 if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
                     jsonWriter.WriteStringValue("/blocklists/updateIntervalHours");
+                if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsSources)
+                    jsonWriter.WriteStringValue("/blocklists/sources");
                 foreach (string path in _dnsWebService._log.GetManagedManifestPaths())
                     jsonWriter.WriteStringValue(path);
                 jsonWriter.WriteEndArray();
@@ -680,6 +683,12 @@ namespace DnsServerCore
                     defaultResponsiblePerson is null ? null : DnsServer.NormalizeDefaultResponsiblePerson(defaultResponsiblePerson),
                     zoneTransferAllowedNetworks, notifyAllowedNetworks);
                 _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
+                bool hasBlockListSources = request.TryQueryOrFormArray("blockListUrls", out string[] blockListUrls);
+                if (hasBlockListSources)
+                {
+                    IReadOnlyList<string> sources = BlockListZoneManager.NormalizeBlockListUrls(blockListUrls);
+                    _dnsWebService._dnsServer.BlockListZoneManager.CheckManifestSources(sources);
+                }
                 bool hasBlockListInterval = request.TryGetQueryOrForm("blockListUpdateIntervalHours", int.Parse, out int blockListUpdateIntervalHours);
                 if (hasBlockListInterval)
                     _dnsWebService._dnsServer.BlockListZoneManager.CheckManifestUpdateInterval(blockListUpdateIntervalHours);
@@ -1658,7 +1667,7 @@ namespace DnsServerCore
                             clusterParameters.Add("customBlockingAddresses", customBlockingAddresses.Join());
                         }
 
-                        if (request.TryQueryOrFormArray("blockListUrls", out string[] blockListUrls))
+                        if (hasBlockListSources && !_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsSources)
                         {
                             _dnsWebService._dnsServer.BlockListZoneManager.BlockListUrls = blockListUrls;
                             _dnsWebService._dnsServer.BlockListZoneManager.SaveConfigFile();
@@ -2029,9 +2038,9 @@ namespace DnsServerCore
                             fS.Position = 0;
 
                             bool checkLog = logSettings && _dnsWebService._log.HasManagedLoggingSettings;
-                            bool ownsBlockListInterval = _dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval;
-                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListInterval);
-                            bool checkBlockList = blockLists && ownsBlockListInterval;
+                            bool ownsBlockListSettings = _dnsWebService._dnsServer.BlockListZoneManager.HasManagedSettings;
+                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings);
+                            bool checkBlockList = blockLists && ownsBlockListSettings;
                             if (checkLog || checkDns || checkBlockList)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))

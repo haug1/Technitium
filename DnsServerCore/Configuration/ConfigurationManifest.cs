@@ -1,4 +1,5 @@
 using DnsServerCore.Dns;
+using DnsServerCore.Dns.ZoneManagers;
 using Json.Schema;
 using System;
 using System.Collections.Generic;
@@ -110,6 +111,9 @@ namespace DnsServerCore.Configuration
                 }
             }
 
+            if (root.TryGetProperty("blocklists", out JsonElement blocklists) && blocklists.TryGetProperty("sources", out JsonElement sources))
+                ReadBlockListSources(sources);
+
             return new ConfigurationManifest(filePath, root.Clone());
         }
 
@@ -155,6 +159,21 @@ namespace DnsServerCore.Configuration
             catch (Exception ex) when (ex is ArgumentException or FormatException or DnsServerException or DnsClientException)
             {
                 throw new InvalidDataException("/dns/serverDomain: Invalid DNS server domain name.");
+            }
+        }
+
+        internal static IReadOnlyList<string> ReadBlockListSources(JsonElement value)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return [];
+
+            try
+            {
+                return BlockListZoneManager.NormalizeBlockListUrls(value.EnumerateArray().Select(item => item.GetString()).ToArray());
+            }
+            catch (ArgumentException)
+            {
+                throw new InvalidDataException("/blocklists/sources: Invalid source URL or comment.");
             }
         }
 

@@ -41,8 +41,11 @@ namespace DnsServerApp
                         JsonElement snapshot = await ReadServerResponseAsync(ParseServerUrl(args[2]), "/api/settings/get");
                         Console.WriteLine(ConfigurationPlan.Export(snapshot, includePreviewOnly).ToJsonString(_exportOptions));
                         Console.Error.WriteLine(includePreviewOnly
-                            ? "Partial export includes preview-only settings. Omitted blocklist source URLs may contain credentials."
-                            : "Partial export includes the settings supported by config apply.");
+                            ? "Partial export includes preview-only settings."
+                            : "Partial export includes settings supported by config apply.");
+                        if (snapshot.TryGetProperty("blockListUrls", out JsonElement sources) &&
+                            sources.ValueKind == JsonValueKind.Array && sources.GetArrayLength() > 0)
+                            Console.Error.WriteLine("Blocklist sources were omitted because URLs can contain credentials. Supply blocklists.sources separately.");
                         return 0;
 
                     default:
