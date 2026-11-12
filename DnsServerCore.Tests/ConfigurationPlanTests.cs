@@ -826,14 +826,18 @@ namespace DnsServerCore.Tests
             });
         }
 
-        [Fact]
-        public async Task WebUnixSocketManifestBindsAndPreservesExistingFiles()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task WebUnixSocketManifestBindsAndPreservesExistingFiles(bool useTls)
         {
             if (!OperatingSystem.IsLinux())
                 return;
 
-            await using var server = await LoopbackWebService.StartAsync();
+            await using var server = await LoopbackWebService.StartAsync(enableTls: useTls);
             int port = server.Client.BaseAddress!.Port;
+            string field = useTls ? "tlsUnixSocket" : "httpUnixSocket";
+            string apiField = useTls ? "webServiceEnableTlsUnixSocket" : "webServiceEnableHttpUnixSocket";
             string socketPath = Path.Combine(server.ConfigurationDirectory, "web.sock");
             string occupiedPath = Path.Combine(server.ConfigurationDirectory, "existing");
             await File.WriteAllTextAsync(occupiedPath, "keep this file");
@@ -854,9 +858,16 @@ namespace DnsServerCore.Tests
             Assert.Equal("applied", await WaitForWebApplyAsync(port, server.AdminToken, operationId));
 
             await server.RestartAsync();
+            using var expectedCertificate = useTls ? X509CertificateLoader.LoadPkcs12FromFile(
+                Path.Combine(server.ConfigurationDirectory, "self-signed-cert.pfx"), null) : null;
             using var client = new HttpClient(new SocketsHttpHandler
             {
                 UseProxy = false,
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = (_, certificate, _, _) =>
+                        expectedCertificate is not null && certificate?.GetCertHashString() == expectedCertificate.Thumbprint
+                },
                 ConnectCallback = async (_, cancellationToken) =>
                 {
                     var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
@@ -872,18 +883,27 @@ namespace DnsServerCore.Tests
                     }
                 }
             });
-            using HttpResponseMessage page = await client.GetAsync("http://localhost/index.html");
+            using HttpResponseMessage page = await client.GetAsync(useTls ? "https://localhost/index.html" : "http://localhost/index.html");
             page.EnsureSuccessStatusCode();
 
-            JsonElement edit = await server.CallAsync("settings/set?webServiceEnableHttpUnixSocket=false", server.AdminToken);
+            JsonElement edit = await server.CallAsync($"settings/set?{apiField}=false", server.AdminToken);
             Assert.Equal("error", edit.GetProperty("status").GetString());
-            Assert.Contains("/web/httpUnixSocket/enabled", edit.GetProperty("errorMessage").GetString());
+            Assert.Contains($"/web/{field}/enabled", edit.GetProperty("errorMessage").GetString());
 
-            static string SocketManifest(string path) => JsonSerializer.Serialize(new
+            string reset = new JsonObject { ["schemaVersion"] = 1, ["web"] = new JsonObject { [field] = null } }.ToJsonString();
+            revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            queued = await ApplyAsync(server, reset, revision);
+            LoopbackWebService.AssertOk(queued);
+            operationId = queued.GetProperty("response").GetProperty("operationId").GetString()!;
+            Assert.Equal("applied", await WaitForWebApplyAsync(port, server.AdminToken, operationId));
+            Assert.False((await server.GetSettingsAsync()).GetProperty(apiField).GetBoolean());
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+
+            string SocketManifest(string path) => new JsonObject
             {
-                schemaVersion = 1,
-                web = new { httpUnixSocket = new { enabled = true, path } }
-            });
+                ["schemaVersion"] = 1,
+                ["web"] = new JsonObject { [field] = new JsonObject { ["enabled"] = true, ["path"] = path } }
+            }.ToJsonString();
         }
 
         private static async Task<string> WaitForWebApplyAsync(int port, string token, string operationId)
