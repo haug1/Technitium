@@ -908,9 +908,15 @@ namespace DnsServerCore.Configuration
             CheckClusterDomainListSupport(manifest, cluster);
             CheckClusterDnsPolicySupport(manifest, cluster);
             CheckClusterWebListenerSupport(manifest, cluster);
-            if (manifest.GetServerDomain() is not null)
-                throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
+            CheckClusterServerDomain(manifest, cluster);
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        internal static void CheckClusterServerDomain(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            string domain = manifest.GetServerDomain();
+            if (domain is not null && !domain.Equals(cluster.DnsWebService.DnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("/dns/serverDomain: The declared server domain must match the initialized cluster node.");
         }
 
         internal static void CheckClusterZoneTarget(ClusterManager cluster, string name, string path)

@@ -102,6 +102,7 @@ namespace DnsServerCore.Tests
             Assert.Equal(originalNode.GetProperty("id").GetInt32(), Assert.Single(second.GetProperty("clusterNodes").EnumerateArray()).GetProperty("id").GetInt32());
             Assert.Equal(120, second.GetProperty("configRefreshIntervalSeconds").GetInt32());
 
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=600", server.AdminToken));
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
             JsonElement response = export.GetProperty("response");
@@ -114,6 +115,31 @@ namespace DnsServerCore.Tests
             JsonElement restoredExport = await restored.CallAsync("settings/config/export", restored.AdminToken);
             LoopbackWebService.AssertOk(restoredExport);
             Assert.True(JsonElement.DeepEquals(cluster, restoredExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")));
+
+            JsonNode migration = JsonNode.Parse(response.GetProperty("manifest").GetRawText())!;
+            JsonElement destinationSettings = await restored.GetSettingsAsync();
+            migration["dns"]!["serverDomain"] = "restored.cluster.test";
+            migration["dns"]!["localEndpoints"] = JsonNode.Parse(destinationSettings.GetProperty("dnsServerLocalEndPoints").GetRawText());
+            migration["web"]!["httpPort"] = destinationSettings.GetProperty("webServiceHttpPort").GetInt32();
+            migration["web"]!["tlsPort"] = destinationSettings.GetProperty("webServiceTlsPort").GetInt32();
+
+            using var previewBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            JsonElement preview = await restored.CallAsync("settings/config/plan", restored.AdminToken, previewBody);
+            LoopbackWebService.AssertOk(preview);
+            using var applyBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await restored.CallAsync("settings/config/apply", restored.AdminToken, applyBody,
+                preview.GetProperty("response").GetProperty("revision").GetString()));
+            Assert.Equal(600, (await restored.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+            using var repeatBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            JsonElement repeat = await restored.CallAsync("settings/config/plan", restored.AdminToken, repeatBody);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+
+            migration["dns"]!["serverDomain"] = "different.cluster.test";
+            using var renameBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            JsonElement rename = await restored.CallAsync("settings/config/plan", restored.AdminToken, renameBody);
+            Assert.Equal("error", rename.GetProperty("status").GetString());
+            Assert.Contains("/dns/serverDomain", rename.GetProperty("errorMessage").GetString());
 
             async Task<JsonElement> ReadStateAsync()
             {
