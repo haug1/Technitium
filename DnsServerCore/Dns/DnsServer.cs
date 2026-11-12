@@ -193,6 +193,22 @@ namespace DnsServerCore.Dns
             ForwardingConcurrency = 1UL << 62
         }
 
+        ManagedDnsSettingsExtension _managedDnsSettingsExtension;
+
+        [Flags]
+        private enum ManagedDnsSettingsExtension : ulong
+        {
+            RateLimitIpv4 = 1,
+            RateLimitIpv6 = 2,
+            RateLimitSampleMinutes = 4,
+            RateLimitUdpTruncation = 8,
+            RateLimitBypass = 16
+        }
+
+        internal readonly record struct RateLimitPolicy(IReadOnlyDictionary<int, (int Udp, int Tcp)> Ipv4,
+            IReadOnlyDictionary<int, (int Udp, int Tcp)> Ipv6, int? SampleMinutes, int? UdpTruncationPercentage,
+            IReadOnlyCollection<NetworkAddress> BypassNetworks);
+
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
         {
             internal bool HasValues => CheckForUpdates.HasValue || UdpPayloadSize.HasValue || DnssecValidation.HasValue;
@@ -283,19 +299,22 @@ namespace DnsServerCore.Dns
         NetworkAddress _eDnsClientSubnetIpv6Override;
 
         //ipv4 prefix: udp, tcp
-        IReadOnlyDictionary<int, (int, int)> _qpmPrefixLimitsIPv4 = new Dictionary<int, (int, int)>()
+        internal static readonly IReadOnlyDictionary<int, (int Udp, int Tcp)> DefaultRateLimitIpv4 = new Dictionary<int, (int, int)>()
         {
             { 32, (600, 600) },
             { 24, (6000, 6000) }
         };
 
         //ipv6 prefix: udp, tcp
-        IReadOnlyDictionary<int, (int, int)> _qpmPrefixLimitsIPv6 = new Dictionary<int, (int, int)>()
+        internal static readonly IReadOnlyDictionary<int, (int Udp, int Tcp)> DefaultRateLimitIpv6 = new Dictionary<int, (int, int)>()
         {
             { 128, (600, 600) },
             { 64, (1200, 1200) },
             { 56, (6000, 6000) }
         };
+
+        IReadOnlyDictionary<int, (int, int)> _qpmPrefixLimitsIPv4 = DefaultRateLimitIpv4;
+        IReadOnlyDictionary<int, (int, int)> _qpmPrefixLimitsIPv6 = DefaultRateLimitIpv6;
 
         int _qpmLimitSampleMinutes = 5;
         int _qpmLimitUdpTruncationPercentage = 50; //percentage of requests that are responded with TC when QPM limit exceeds for UDP (Slip)
@@ -733,14 +752,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -790,7 +809,7 @@ namespace DnsServerCore.Dns
 
         internal bool ManifestOwnsServerDomain => _managedDnsSettings.HasFlag(ManagedDnsSettings.ServerDomain);
         internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
-        internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
+        internal bool HasManagedDnsSettings => _managedDnsSettings != 0 || _managedDnsSettingsExtension != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
         internal bool ManifestOwnsResponsiblePerson => _managedDnsSettings.HasFlag(ManagedDnsSettings.ResponsiblePerson);
         internal bool HasManagedAuthoritativeNetworks => (_managedDnsSettings &
@@ -864,9 +883,14 @@ namespace DnsServerCore.Dns
             ManagedDnsSettings.ForwardingRetries | ManagedDnsSettings.ForwardingTimeout | ManagedDnsSettings.ForwardingConcurrency;
         internal bool HasManagedForwardingPolicy => (_managedDnsSettings & ForwardingOwnership) != 0;
 
+        private const ManagedDnsSettingsExtension RateLimitOwnership = ManagedDnsSettingsExtension.RateLimitIpv4 |
+            ManagedDnsSettingsExtension.RateLimitIpv6 | ManagedDnsSettingsExtension.RateLimitSampleMinutes |
+            ManagedDnsSettingsExtension.RateLimitUdpTruncation | ManagedDnsSettingsExtension.RateLimitBypass;
+        internal bool HasManagedRateLimits => (_managedDnsSettingsExtension & RateLimitOwnership) != 0;
+
         internal bool HasManagedAuthoritativeDefaults =>
             (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership | BlockingOwnership | ForwardingOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -936,6 +960,16 @@ namespace DnsServerCore.Dns
                 yield return "/dns/forwarding/timeoutMs";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrency))
                 yield return "/dns/forwarding/concurrency";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
+                yield return "/dns/rateLimits/ipv4";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv6))
+                yield return "/dns/rateLimits/ipv6";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitSampleMinutes))
+                yield return "/dns/rateLimits/sampleMinutes";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitUdpTruncation))
+                yield return "/dns/rateLimits/udpTruncationPercentage";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitBypass))
+                yield return "/dns/rateLimits/bypassNetworks";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1479,6 +1513,86 @@ namespace DnsServerCore.Dns
             _forwarderConcurrency = policy.Concurrency ?? _forwarderConcurrency;
         }
 
+        private static bool HaveSameRateLimits(IReadOnlyDictionary<int, (int, int)> first, IReadOnlyDictionary<int, (int, int)> second)
+        {
+            return ReferenceEquals(first, second) || (first.Count == second.Count &&
+                first.All(entry => second.TryGetValue(entry.Key, out var limit) && limit == entry.Value));
+        }
+
+        internal RateLimitPolicy CheckManifestRateLimits(RateLimitPolicy policy, bool validateRanges = true)
+        {
+            if (validateRanges)
+            {
+                ValidateTable(policy.Ipv4, 32, "ipv4");
+                ValidateTable(policy.Ipv6, 128, "ipv6");
+                if (policy.SampleMinutes is < 1 or > 60)
+                    throw new DnsWebServiceException("/dns/rateLimits/sampleMinutes: Valid range is from 1 to 60.");
+                if (policy.UdpTruncationPercentage is < 0 or > 100)
+                    throw new DnsWebServiceException("/dns/rateLimits/udpTruncationPercentage: Valid range is from 0 to 100.");
+                if (policy.BypassNetworks?.Count > byte.MaxValue)
+                    throw new DnsWebServiceException("/dns/rateLimits/bypassNetworks: A maximum of 255 entries is allowed.");
+            }
+
+            return new RateLimitPolicy(
+                Check(ManagedDnsSettingsExtension.RateLimitIpv4, policy.Ipv4 is not null && !HaveSameRateLimits(policy.Ipv4, _qpmPrefixLimitsIPv4), "ipv4") ? policy.Ipv4 : null,
+                Check(ManagedDnsSettingsExtension.RateLimitIpv6, policy.Ipv6 is not null && !HaveSameRateLimits(policy.Ipv6, _qpmPrefixLimitsIPv6), "ipv6") ? policy.Ipv6 : null,
+                Check(ManagedDnsSettingsExtension.RateLimitSampleMinutes, policy.SampleMinutes.HasValue && policy.SampleMinutes != _qpmLimitSampleMinutes, "sampleMinutes") ? policy.SampleMinutes : null,
+                Check(ManagedDnsSettingsExtension.RateLimitUdpTruncation, policy.UdpTruncationPercentage.HasValue && policy.UdpTruncationPercentage != _qpmLimitUdpTruncationPercentage, "udpTruncationPercentage") ? policy.UdpTruncationPercentage : null,
+                Check(ManagedDnsSettingsExtension.RateLimitBypass, policy.BypassNetworks is not null && !HaveSameNetworks(policy.BypassNetworks, _qpmLimitBypassList), "bypassNetworks") ? policy.BypassNetworks : null);
+
+            bool Check(ManagedDnsSettingsExtension flag, bool different, string path)
+            {
+                if (!_managedDnsSettingsExtension.HasFlag(flag))
+                    return true;
+                if (different)
+                    throw new DnsWebServiceException($"/dns/rateLimits/{path}: Setting is managed by the configuration manifest.");
+                return false;
+            }
+
+            static void ValidateTable(IReadOnlyDictionary<int, (int Udp, int Tcp)> table, int maxPrefix, string path)
+            {
+                if (table is null)
+                    return;
+                if (table.Count > byte.MaxValue || table.Any(entry => entry.Key < 0 || entry.Key > maxPrefix ||
+                    entry.Value.Udp < 0 || entry.Value.Tcp < 0))
+                    throw new DnsWebServiceException($"/dns/rateLimits/{path}: Invalid prefix or query limit.");
+            }
+        }
+
+        internal void SetRateLimitPolicy(RateLimitPolicy policy)
+        {
+            if (policy.Ipv4 is not null && !HaveSameRateLimits(policy.Ipv4, _qpmPrefixLimitsIPv4))
+                QpmPrefixLimitsIPv4 = policy.Ipv4;
+            if (policy.Ipv6 is not null && !HaveSameRateLimits(policy.Ipv6, _qpmPrefixLimitsIPv6))
+                QpmPrefixLimitsIPv6 = policy.Ipv6;
+            if (policy.SampleMinutes.HasValue)
+                QpmLimitSampleMinutes = policy.SampleMinutes.Value;
+            if (policy.UdpTruncationPercentage.HasValue)
+                QpmLimitUdpTruncationPercentage = policy.UdpTruncationPercentage.Value;
+            if (policy.BypassNetworks is not null)
+                QpmLimitBypassList = policy.BypassNetworks;
+        }
+
+        private static Dictionary<int, (int, int)> ReadRateLimitTable(BinaryReader reader)
+        {
+            int count = reader.ReadByte();
+            var table = new Dictionary<int, (int, int)>(count);
+            for (int i = 0; i < count; i++)
+                table.Add(reader.ReadInt32(), (reader.ReadInt32(), reader.ReadInt32()));
+            return table;
+        }
+
+        private static void WriteRateLimitTable(BinaryWriter writer, IReadOnlyDictionary<int, (int Udp, int Tcp)> table)
+        {
+            writer.Write(Convert.ToByte(table.Count));
+            foreach ((int prefix, (int udp, int tcp)) in table)
+            {
+                writer.Write(prefix);
+                writer.Write(udp);
+                writer.Write(tcp);
+            }
+        }
+
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
         {
             if (ManifestOwnsResolverLogging && settings.IgnoreResolverLogs.HasValue && settings.IgnoreResolverLogs != (_resolverLog is null))
@@ -1745,38 +1859,29 @@ namespace DnsServerCore.Dns
                 _eDnsClientSubnetIpv6Override = subnet.Ipv6Override;
             }
 
-            {
-                int count = bR.ReadByte();
-                Dictionary<int, (int, int)> qpmPrefixLimitsIPv4 = new Dictionary<int, (int, int)>(count);
-
-                for (int i = 0; i < count; i++)
-                    qpmPrefixLimitsIPv4.Add(bR.ReadInt32(), (bR.ReadInt32(), bR.ReadInt32()));
-
-                if (apply)
-                    _qpmPrefixLimitsIPv4 = qpmPrefixLimitsIPv4;
-            }
-
-            {
-                int count = bR.ReadByte();
-                Dictionary<int, (int, int)> qpmPrefixLimitsIPv6 = new Dictionary<int, (int, int)>(count);
-
-                for (int i = 0; i < count; i++)
-                    qpmPrefixLimitsIPv6.Add(bR.ReadInt32(), (bR.ReadInt32(), bR.ReadInt32()));
-
-                if (apply)
-                    _qpmPrefixLimitsIPv6 = qpmPrefixLimitsIPv6;
-            }
-
+            var qpmPrefixLimitsIPv4 = ReadRateLimitTable(bR);
+            var qpmPrefixLimitsIPv6 = ReadRateLimitTable(bR);
             int qpmSampleMinutes = bR.ReadInt32();
-            if (apply)
-                _qpmLimitSampleMinutes = qpmSampleMinutes;
             int qpmTruncationPercentage = bR.ReadInt32();
-            if (apply)
-                _qpmLimitUdpTruncationPercentage = qpmTruncationPercentage;
-
             var qpmBypassList = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
             if (apply)
-                _qpmLimitBypassList = qpmBypassList;
+            {
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
+                    _qpmPrefixLimitsIPv4 = qpmPrefixLimitsIPv4;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv6))
+                    _qpmPrefixLimitsIPv6 = qpmPrefixLimitsIPv6;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitSampleMinutes))
+                    _qpmLimitSampleMinutes = qpmSampleMinutes;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitUdpTruncation))
+                    _qpmLimitUdpTruncationPercentage = qpmTruncationPercentage;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitBypass))
+                    _qpmLimitBypassList = qpmBypassList;
+            }
+            else if (HasManagedRateLimits)
+            {
+                CheckManifestRateLimits(new RateLimitPolicy(qpmPrefixLimitsIPv4, qpmPrefixLimitsIPv6, qpmSampleMinutes,
+                    qpmTruncationPercentage, qpmBypassList ?? []), validateRanges: false);
+            }
 
             int clientTimeout = bR.ReadInt32();
             if (apply)
@@ -2227,22 +2332,25 @@ namespace DnsServerCore.Dns
 
             if (readOwnership)
             {
-                ulong ownership = 0;
-                if (version == 7)
-                {
-                    for (int shift = 0; shift < sizeof(ulong) * 8; shift += 8)
-                    {
-                        int value = s.ReadByte();
-                        if (value < 0)
-                            break;
-                        ownership |= (ulong)value << shift;
-                    }
-                }
-                _managedDnsSettings = (ManagedDnsSettings)ownership;
+                _managedDnsSettings = version == 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
+                _managedDnsSettingsExtension = version == 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding)
+        private static ulong ReadOwnershipWord(Stream stream)
+        {
+            ulong ownership = 0;
+            for (int shift = 0; shift < sizeof(ulong) * 8; shift += 8)
+            {
+                int value = stream.ReadByte();
+                if (value < 0)
+                    break;
+                ownership |= (ulong)value << shift;
+            }
+            return ownership;
+        }
+
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2310,42 +2418,11 @@ namespace DnsServerCore.Dns
             bW.Write(ipv6Override is not null);
             ipv6Override?.WriteTo(bW);
 
-            if (_qpmPrefixLimitsIPv4.Count == 0)
-            {
-                bW.Write((byte)0);
-            }
-            else
-            {
-                bW.Write(Convert.ToByte(_qpmPrefixLimitsIPv4.Count));
-
-                foreach (KeyValuePair<int, (int, int)> qpmPrefixLimit in _qpmPrefixLimitsIPv4)
-                {
-                    bW.Write(qpmPrefixLimit.Key);
-                    bW.Write(qpmPrefixLimit.Value.Item1);
-                    bW.Write(qpmPrefixLimit.Value.Item2);
-                }
-            }
-
-            if (_qpmPrefixLimitsIPv6.Count == 0)
-            {
-                bW.Write((byte)0);
-            }
-            else
-            {
-                bW.Write(Convert.ToByte(_qpmPrefixLimitsIPv6.Count));
-
-                foreach (KeyValuePair<int, (int, int)> qpmPrefixLimit in _qpmPrefixLimitsIPv6)
-                {
-                    bW.Write(qpmPrefixLimit.Key);
-                    bW.Write(qpmPrefixLimit.Value.Item1);
-                    bW.Write(qpmPrefixLimit.Value.Item2);
-                }
-            }
-
-            bW.Write(_qpmLimitSampleMinutes);
-            bW.Write(_qpmLimitUdpTruncationPercentage);
-
-            AuthZoneInfo.WriteNetworkAddressesTo(_qpmLimitBypassList, bW);
+            WriteRateLimitTable(bW, rateLimits.Ipv4 ?? _qpmPrefixLimitsIPv4);
+            WriteRateLimitTable(bW, rateLimits.Ipv6 ?? _qpmPrefixLimitsIPv6);
+            bW.Write(rateLimits.SampleMinutes ?? _qpmLimitSampleMinutes);
+            bW.Write(rateLimits.UdpTruncationPercentage ?? _qpmLimitUdpTruncationPercentage);
+            AuthZoneInfo.WriteNetworkAddressesTo(rateLimits.BypassNetworks ?? _qpmLimitBypassList, bW);
 
             bW.Write(_clientTimeout);
             bW.Write(_tcpSendTimeout);
@@ -2501,9 +2578,18 @@ namespace DnsServerCore.Dns
             bW.Write(dnsLogging.LogQueries ?? (_queryLog is not null));
             bW.Write(statistics.InMemory ?? _statsManager.EnableInMemoryStats);
             bW.Write(statistics.RetentionDays ?? _statsManager.MaxStatFileDays);
-            // The optional little-endian ownership trailer follows the original version 7 payload.
-            for (ulong ownership = (ulong)_managedDnsSettings; ownership != 0; ownership >>= 8)
-                bW.Write((byte)ownership);
+            // Keep the first ownership word byte-compatible with existing version 7 files.
+            if (_managedDnsSettingsExtension == 0)
+            {
+                for (ulong ownership = (ulong)_managedDnsSettings; ownership != 0; ownership >>= 8)
+                    bW.Write((byte)ownership);
+            }
+            else
+            {
+                bW.Write((ulong)_managedDnsSettings);
+                for (ulong ownership = (ulong)_managedDnsSettingsExtension; ownership != 0; ownership >>= 8)
+                    bW.Write((byte)ownership);
+            }
         }
 
         #endregion
@@ -7998,7 +8084,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8015,6 +8101,24 @@ namespace DnsServerCore.Dns
 
                 lock (_saveLock)
                 {
+                    ManagedDnsSettingsExtension previousExtendedOwnership = _managedDnsSettingsExtension;
+                    ManagedDnsSettingsExtension extendedOwnership = 0;
+                    if (rateLimits.Ipv4 is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.RateLimitIpv4;
+                    if (rateLimits.Ipv6 is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.RateLimitIpv6;
+                    if (rateLimits.SampleMinutes is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.RateLimitSampleMinutes;
+                    if (rateLimits.UdpTruncationPercentage is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.RateLimitUdpTruncation;
+                    if (rateLimits.BypassNetworks is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.RateLimitBypass;
+
+                    bool rateLimitsChanged = (rateLimits.Ipv4 is not null && !HaveSameRateLimits(rateLimits.Ipv4, _qpmPrefixLimitsIPv4)) ||
+                        (rateLimits.Ipv6 is not null && !HaveSameRateLimits(rateLimits.Ipv6, _qpmPrefixLimitsIPv6)) ||
+                        (rateLimits.SampleMinutes.HasValue && rateLimits.SampleMinutes != _qpmLimitSampleMinutes) ||
+                        (rateLimits.UdpTruncationPercentage.HasValue && rateLimits.UdpTruncationPercentage != _qpmLimitUdpTruncationPercentage) ||
+                        (rateLimits.BypassNetworks is not null && !HaveSameNetworks(rateLimits.BypassNetworks, _qpmLimitBypassList));
                     ManagedDnsSettings previousOwnership = _managedDnsSettings;
                     ManagedDnsSettings ownership = owned ? ManagedDnsSettings.LocalEndPoints : 0;
                     if (serverDomain is not null)
@@ -8224,7 +8328,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !forwardingChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !forwardingChanged && !rateLimitsChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8233,18 +8337,20 @@ namespace DnsServerCore.Dns
 
                     _localEndPoints = changed ? endpoints : previous;
                     _managedDnsSettings = ownership;
+                    _managedDnsSettingsExtension = extendedOwnership;
                     try
                     {
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits));
                         _pendingSave = false;
                     }
                     catch
                     {
                         _localEndPoints = previous;
                         _managedDnsSettings = previousOwnership;
+                        _managedDnsSettingsExtension = previousExtendedOwnership;
                         SetResolverSettings(previousResolverSettings);
                         SetAuthoritativeDefaults(previousDefaults);
                         SetSourceNetworks(previousSourceNetworks);
@@ -8257,6 +8363,7 @@ namespace DnsServerCore.Dns
                     SetCachePolicy(cache);
                     SetBlockingPolicy(blocking, cancelPause: false);
                     SetForwardingPolicy(forwarding);
+                    SetRateLimitPolicy(rateLimits);
                     if (recursion.NetworkAcl is not null)
                         RecursionNetworkACL = recursion.NetworkAcl;
                     if (recursion.Mode.HasValue)

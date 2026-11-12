@@ -126,6 +126,15 @@ namespace DnsServerCore.Configuration
                     ReadNetworks(bypass, "/dns/blocking/bypassNetworks");
                 if (dns.TryGetProperty("forwarding", out JsonElement forwarding) && forwarding.TryGetProperty("servers", out JsonElement forwarders))
                     ReadForwardingServers(forwarders);
+                if (dns.TryGetProperty("rateLimits", out JsonElement rateLimits))
+                {
+                    if (rateLimits.TryGetProperty("ipv4", out JsonElement limitsIpv4))
+                        ReadRateLimitTable(limitsIpv4, ipv6: false);
+                    if (rateLimits.TryGetProperty("ipv6", out JsonElement limitsIpv6))
+                        ReadRateLimitTable(limitsIpv6, ipv6: true);
+                    if (rateLimits.TryGetProperty("bypassNetworks", out JsonElement limitBypass))
+                        ReadNetworks(limitBypass, "/dns/rateLimits/bypassNetworks");
+                }
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
@@ -282,6 +291,24 @@ namespace DnsServerCore.Configuration
             {
                 throw new InvalidDataException("/blocklists/sources: Invalid source URL or comment.");
             }
+        }
+
+        internal static IReadOnlyDictionary<int, (int Udp, int Tcp)> ReadRateLimitTable(JsonElement value, bool ipv6)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return ipv6 ? DnsServer.DefaultRateLimitIpv6 : DnsServer.DefaultRateLimitIpv4;
+
+            var limits = new Dictionary<int, (int, int)>(value.GetArrayLength());
+            int index = 0;
+            foreach (JsonElement entry in value.EnumerateArray())
+            {
+                int prefix = decimal.ToInt32(entry.GetProperty("prefix").GetDecimal());
+                if (!limits.TryAdd(prefix, (decimal.ToInt32(entry.GetProperty("udpLimit").GetDecimal()),
+                    decimal.ToInt32(entry.GetProperty("tcpLimit").GetDecimal()))))
+                    throw new InvalidDataException($"/dns/rateLimits/{(ipv6 ? "ipv6" : "ipv4")}/{index}/prefix: Duplicate prefix length.");
+                index++;
+            }
+            return limits;
         }
 
         internal static NameServerAddress[] ReadForwardingServers(JsonElement value)

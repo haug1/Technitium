@@ -97,6 +97,11 @@ namespace DnsServerCore.Configuration
             ["/dns/forwarding/retries"] = Field("forwarderRetries", 3, canApply: true),
             ["/dns/forwarding/timeoutMs"] = Field("forwarderTimeout", 2000, canApply: true),
             ["/dns/forwarding/concurrency"] = Field("forwarderConcurrency", 2, canApply: true),
+            ["/dns/rateLimits/ipv4"] = new("qpmPrefixLimitsIPv4", SerializeRateLimits(DnsServer.DefaultRateLimitIpv4), false, CanApply: true),
+            ["/dns/rateLimits/ipv6"] = new("qpmPrefixLimitsIPv6", SerializeRateLimits(DnsServer.DefaultRateLimitIpv6), false, CanApply: true),
+            ["/dns/rateLimits/sampleMinutes"] = Field("qpmLimitSampleMinutes", 5, canApply: true),
+            ["/dns/rateLimits/udpTruncationPercentage"] = Field("qpmLimitUdpTruncationPercentage", 50, canApply: true),
+            ["/dns/rateLimits/bypassNetworks"] = Field("qpmLimitBypassList", Array.Empty<string>(), canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -204,7 +209,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -316,6 +321,26 @@ namespace DnsServerCore.Configuration
             int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
                 ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
             return new DnsServer.StatisticsSettings(inMemory, retention);
+        }
+
+        private static DnsServer.RateLimitPolicy GetRateLimitPolicy(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("rateLimits", out JsonElement limits))
+                return default;
+
+            return new DnsServer.RateLimitPolicy(
+                limits.TryGetProperty("ipv4", out JsonElement ipv4) ? ConfigurationManifest.ReadRateLimitTable(ipv4, ipv6: false) : null,
+                limits.TryGetProperty("ipv6", out JsonElement ipv6) ? ConfigurationManifest.ReadRateLimitTable(ipv6, ipv6: true) : null,
+                Read("sampleMinutes"), Read("udpTruncationPercentage"),
+                limits.TryGetProperty("bypassNetworks", out JsonElement networks)
+                    ? ConfigurationManifest.ReadNetworks(networks, "/dns/rateLimits/bypassNetworks") : null);
+
+            int? Read(string field)
+            {
+                if (!limits.TryGetProperty(field, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/rateLimits/" + field].Default.GetInt32() : decimal.ToInt32(value.GetDecimal());
+            }
         }
 
         internal static void ValidateForwarding(ConfigurationManifest manifest, NetProxyType proxyType)
@@ -530,6 +555,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
+            if (GetRateLimitPolicy(manifest) != default)
+                throw new InvalidDataException("/dns/rateLimits: Applying query-rate limits to a cluster is not implemented.");
             if (GetForwardingPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/forwarding: Applying forwarding policy to a cluster is not implemented.");
             if (GetBlockingPolicy(manifest) != default)
@@ -672,6 +699,9 @@ namespace DnsServerCore.Configuration
         {
             if (!currentSettings.TryGetProperty(setting.ApiField, out JsonElement value))
                 throw new InvalidDataException($"{path}: The server did not return the current setting.");
+
+            if (path is "/dns/rateLimits/ipv4" or "/dns/rateLimits/ipv6")
+                return SerializeRateLimits(ConfigurationManifest.ReadRateLimitTable(value, path.EndsWith("ipv6", StringComparison.Ordinal)));
 
             if (path == ExcludedPortsPath)
                 return JsonSerializer.SerializeToElement(ReadExcludedPorts(value));
@@ -919,7 +949,7 @@ namespace DnsServerCore.Configuration
                         candidate = networks.Length == 0 ? setting.Default : SortAddresses(networks.Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path, family).Select(network => network.ToString()));
                     }
-                    else if (path is "/dns/authoritative/zoneTransferAllowedNetworks" or "/dns/authoritative/notifyAllowedNetworks" or "/dns/blocking/bypassNetworks")
+                    else if (path is "/dns/authoritative/zoneTransferAllowedNetworks" or "/dns/authoritative/notifyAllowedNetworks" or "/dns/blocking/bypassNetworks" or "/dns/rateLimits/bypassNetworks")
                     {
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
@@ -932,6 +962,10 @@ namespace DnsServerCore.Configuration
                         DnsServer.ValidateForwardingServers(servers, proxyType);
                         candidate = SerializeForwardingServers(servers);
                         current = SerializeForwardingServers(ConfigurationManifest.ReadForwardingServers(current));
+                    }
+                    else if (path is "/dns/rateLimits/ipv4" or "/dns/rateLimits/ipv6")
+                    {
+                        candidate = SerializeRateLimits(ConfigurationManifest.ReadRateLimitTable(desired, path.EndsWith("ipv6", StringComparison.Ordinal)));
                     }
                     else if (path == "/dns/blocking/customAddresses")
                     {
@@ -1013,6 +1047,12 @@ namespace DnsServerCore.Configuration
             }
 
             throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Planning for this setting is not implemented.");
+        }
+
+        private static JsonElement SerializeRateLimits(IReadOnlyDictionary<int, (int Udp, int Tcp)> limits)
+        {
+            return JsonSerializer.SerializeToElement(limits.OrderByDescending(entry => entry.Key)
+                .Select(entry => new { prefix = entry.Key, udpLimit = entry.Value.Udp, tcpLimit = entry.Value.Tcp }));
         }
 
         private static JsonElement SerializeForwardingServers(IEnumerable<NameServerAddress> servers)

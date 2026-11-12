@@ -204,6 +204,18 @@ namespace DnsServerCore.Tests
             Assert.Contains("/dns/cache/prefetch/trigger", error.Message);
         }
 
+        [Fact]
+        public void RateLimitManifestRejectsDuplicatePrefixes()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"dns":{"rateLimits":{"ipv4":[{"prefix":24,"udpLimit":10,"tcpLimit":20},
+                    {"prefix":24,"udpLimit":20,"tcpLimit":30}]}}}
+                """);
+
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains("/dns/rateLimits/ipv4/1/prefix", error.Message);
+        }
+
         private string WriteManifest(string json)
         {
             string path = Path.Combine(_directory.FullName, ConfigurationManifest.DefaultFileName);

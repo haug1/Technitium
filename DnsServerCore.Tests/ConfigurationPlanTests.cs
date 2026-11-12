@@ -466,6 +466,54 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task RateLimitsPersistExtendedOwnershipAndRejectConflictingRestore()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"rateLimits":{"ipv4":[{"prefix":32,"udpLimit":40,"tcpLimit":50},{"prefix":24,"udpLimit":400,"tcpLimit":500}],
+                    "ipv6":[],"sampleMinutes":3,"udpTruncationPercentage":75,"bypassNetworks":["192.0.2.10/24"]}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(5, preview.GetProperty("changes").GetArrayLength());
+            Assert.DoesNotContain("192.0.2.", preview.GetRawText());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(5, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            Assert.Empty(settings.GetProperty("qpmPrefixLimitsIPv6").EnumerateArray());
+            JsonNode exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["rateLimits"]!;
+            Assert.Equal("192.0.2.0/24", exported["bypassNetworks"]![0]!.GetValue<string>());
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?qpmPrefixLimitsIPv4=24%7C400%7C500%7C32%7C40%7C50", server.AdminToken));
+
+            JsonElement rejected = await server.CallAsync("settings/set?qpmLimitSampleMinutes=4", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/rateLimits/sampleMinutes", rejected.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/rateLimits/", restored.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"dns":{"rateLimits":{"ipv6":null}}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            settings = await server.GetSettingsAsync();
+            Assert.Equal(3, settings.GetProperty("qpmPrefixLimitsIPv6").GetArrayLength());
+            Assert.Equal("/dns/rateLimits/ipv6", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+        }
+
+        [Fact]
         public async Task DeclarativeForwardingPersistsTransportsAndResolvesThroughTheUpstream()
         {
             await using var upstream = new LoopbackDnsServer();

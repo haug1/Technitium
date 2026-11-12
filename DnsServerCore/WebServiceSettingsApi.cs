@@ -29,6 +29,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
@@ -817,6 +818,29 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("useLocalTime", bool.Parse, out bool useLocalTime) ? useLocalTime : null);
             }
 
+            private static Dictionary<int, (int Udp, int Tcp)> ReadRateLimitTable(HttpRequest request, string parameter, string path)
+            {
+                if (!request.TryQueryOrFormArray(parameter,
+                    value => new KeyValuePair<int, (int, int)>(value.GetProperty("prefix").GetInt32(),
+                        (value.GetProperty("udpLimit").GetInt32(), value.GetProperty("tcpLimit").GetInt32())),
+                    row => new KeyValuePair<int, (int, int)>(int.Parse(row[0]), (int.Parse(row[1]), int.Parse(row[2]))),
+                    3, out KeyValuePair<int, (int, int)>[] rows, '|'))
+                    return null;
+
+                var table = new Dictionary<int, (int, int)>(rows.Length);
+                foreach ((int prefix, (int udp, int tcp)) in rows)
+                {
+                    if (!table.TryAdd(prefix, (udp, tcp)))
+                        throw new DnsWebServiceException($"/dns/rateLimits/{path}: Duplicate prefix length.");
+                }
+                return table;
+            }
+
+            private static string FormatRateLimitTable(IReadOnlyDictionary<int, (int Udp, int Tcp)> table)
+            {
+                return string.Join('|', table.Select(entry => $"{entry.Key}|{entry.Value.Udp}|{entry.Value.Tcp}"));
+            }
+
             public async Task SetDnsSettingsAsync(HttpContext context)
             {
                 User sessionUser = _dnsWebService.GetSessionUser(context);
@@ -1031,6 +1055,12 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("forwarderTimeout", int.Parse, out int forwarderTimeout) ? forwarderTimeout : null,
                     request.TryGetQueryOrForm("forwarderConcurrency", int.Parse, out int forwarderConcurrency) ? forwarderConcurrency : null));
 
+                DnsServer.RateLimitPolicy rateLimits = _dnsWebService._dnsServer.CheckManifestRateLimits(new DnsServer.RateLimitPolicy(
+                    ReadRateLimitTable(request, "qpmPrefixLimitsIPv4", "ipv4"), ReadRateLimitTable(request, "qpmPrefixLimitsIPv6", "ipv6"),
+                    request.TryGetQueryOrForm("qpmLimitSampleMinutes", int.Parse, out int sampleMinutes) ? sampleMinutes : null,
+                    request.TryGetQueryOrForm("qpmLimitUdpTruncationPercentage", int.Parse, out int truncation) ? truncation : null,
+                    request.TryQueryOrFormArray("qpmLimitBypassList", NetworkAddress.Parse, out NetworkAddress[] rateLimitBypass) ? rateLimitBypass : null));
+
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
                 _dnsWebService._dnsServer.CheckManifestDnsLogging(new DnsServer.DnsLoggingSettings(
@@ -1139,112 +1169,17 @@ namespace DnsServerCore
                         if (subnet.HasIpv6Override)
                             clusterParameters.Add("eDnsClientSubnetIpv6Override", ipv6Override);
 
-                        if (request.TryQueryOrFormArray("qpmPrefixLimitsIPv4", delegate (JsonElement jsonObject)
-                        {
-                            int prefix = jsonObject.GetProperty("prefix").GetInt32();
-                            int udpLimit = jsonObject.GetProperty("udpLimit").GetInt32();
-                            int tcpLimit = jsonObject.GetProperty("tcpLimit").GetInt32();
-
-                            return new KeyValuePair<int, (int, int)>(prefix, (udpLimit, tcpLimit));
-                        }, delegate (ArraySegment<string> tableRow)
-                        {
-                            int prefix = int.Parse(tableRow[0]);
-                            int udpLimit = int.Parse(tableRow[1]);
-                            int tcpLimit = int.Parse(tableRow[2]);
-
-                            return new KeyValuePair<int, (int, int)>(prefix, (udpLimit, tcpLimit));
-                        },
-                            3, out KeyValuePair<int, (int, int)>[] qpmPrefixLimitsIPv4, '|'))
-                        {
-                            string strQpmPrefixLimitsIPv4 = "";
-
-                            if (qpmPrefixLimitsIPv4.Length == 0)
-                            {
-                                _dnsWebService._dnsServer.QpmPrefixLimitsIPv4 = null;
-                            }
-                            else
-                            {
-                                Dictionary<int, (int, int)> qpmPrefixLimitsIPv4Map = new Dictionary<int, (int, int)>(qpmPrefixLimitsIPv4.Length);
-
-                                foreach (KeyValuePair<int, (int, int)> qpmPrefixLimit in qpmPrefixLimitsIPv4)
-                                {
-                                    qpmPrefixLimitsIPv4Map.Add(qpmPrefixLimit.Key, qpmPrefixLimit.Value);
-
-                                    if (strQpmPrefixLimitsIPv4.Length == 0)
-                                        strQpmPrefixLimitsIPv4 = qpmPrefixLimit.Key + "|" + qpmPrefixLimit.Value.Item1 + "|" + qpmPrefixLimit.Value.Item2;
-                                    else
-                                        strQpmPrefixLimitsIPv4 += "|" + qpmPrefixLimit.Key + "|" + qpmPrefixLimit.Value.Item1 + "|" + qpmPrefixLimit.Value.Item2;
-                                }
-
-                                _dnsWebService._dnsServer.QpmPrefixLimitsIPv4 = qpmPrefixLimitsIPv4Map;
-                            }
-
-                            clusterParameters.Add("qpmPrefixLimitsIPv4", strQpmPrefixLimitsIPv4);
-                        }
-
-                        if (request.TryQueryOrFormArray("qpmPrefixLimitsIPv6", delegate (JsonElement jsonObject)
-                        {
-                            int prefix = jsonObject.GetProperty("prefix").GetInt32();
-                            int udpLimit = jsonObject.GetProperty("udpLimit").GetInt32();
-                            int tcpLimit = jsonObject.GetProperty("tcpLimit").GetInt32();
-
-                            return new KeyValuePair<int, (int, int)>(prefix, (udpLimit, tcpLimit));
-                        }, delegate (ArraySegment<string> tableRow)
-                        {
-                            int prefix = int.Parse(tableRow[0]);
-                            int udpLimit = int.Parse(tableRow[1]);
-                            int tcpLimit = int.Parse(tableRow[2]);
-
-                            return new KeyValuePair<int, (int, int)>(prefix, (udpLimit, tcpLimit));
-                        },
-                            3, out KeyValuePair<int, (int, int)>[] qpmPrefixLimitsIPv6, '|'))
-                        {
-                            string strQpmPrefixLimitsIPv6 = "";
-
-                            if (qpmPrefixLimitsIPv6.Length == 0)
-                            {
-                                _dnsWebService._dnsServer.QpmPrefixLimitsIPv6 = null;
-                            }
-                            else
-                            {
-                                Dictionary<int, (int, int)> qpmPrefixLimitsIPv6Map = new Dictionary<int, (int, int)>(qpmPrefixLimitsIPv6.Length);
-
-                                foreach (KeyValuePair<int, (int, int)> qpmPrefixLimit in qpmPrefixLimitsIPv6)
-                                {
-                                    qpmPrefixLimitsIPv6Map.Add(qpmPrefixLimit.Key, qpmPrefixLimit.Value);
-
-                                    if (strQpmPrefixLimitsIPv6.Length == 0)
-                                        strQpmPrefixLimitsIPv6 = qpmPrefixLimit.Key + "|" + qpmPrefixLimit.Value.Item1 + "|" + qpmPrefixLimit.Value.Item2;
-                                    else
-                                        strQpmPrefixLimitsIPv6 += "|" + qpmPrefixLimit.Key + "|" + qpmPrefixLimit.Value.Item1 + "|" + qpmPrefixLimit.Value.Item2;
-                                }
-
-                                _dnsWebService._dnsServer.QpmPrefixLimitsIPv6 = qpmPrefixLimitsIPv6Map;
-                            }
-
-                            clusterParameters.Add("qpmPrefixLimitsIPv6", strQpmPrefixLimitsIPv6);
-                        }
-
-                        if (request.TryGetQueryOrForm("qpmLimitSampleMinutes", int.Parse, out int qpmLimitSampleMinutes))
-                        {
-                            _dnsWebService._dnsServer.QpmLimitSampleMinutes = qpmLimitSampleMinutes;
-
-                            clusterParameters.Add("qpmLimitSampleMinutes", qpmLimitSampleMinutes.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("qpmLimitUdpTruncationPercentage", int.Parse, out int qpmLimitUdpTruncationPercentage))
-                        {
-                            _dnsWebService._dnsServer.QpmLimitUdpTruncationPercentage = qpmLimitUdpTruncationPercentage;
-
-                            clusterParameters.Add("qpmLimitUdpTruncationPercentage", qpmLimitUdpTruncationPercentage.ToString());
-                        }
-
-                        if (request.TryQueryOrFormArray("qpmLimitBypassList", NetworkAddress.Parse, out NetworkAddress[] qpmLimitBypassList))
-                        {
-                            _dnsWebService._dnsServer.QpmLimitBypassList = qpmLimitBypassList;
-
-                            clusterParameters.Add("qpmLimitBypassList", qpmLimitBypassList.Join());
-                        }
+                        _dnsWebService._dnsServer.SetRateLimitPolicy(rateLimits);
+                        if (rateLimits.Ipv4 is not null)
+                            clusterParameters.Add("qpmPrefixLimitsIPv4", FormatRateLimitTable(rateLimits.Ipv4));
+                        if (rateLimits.Ipv6 is not null)
+                            clusterParameters.Add("qpmPrefixLimitsIPv6", FormatRateLimitTable(rateLimits.Ipv6));
+                        if (rateLimits.SampleMinutes.HasValue)
+                            clusterParameters.Add("qpmLimitSampleMinutes", rateLimits.SampleMinutes.Value.ToString());
+                        if (rateLimits.UdpTruncationPercentage.HasValue)
+                            clusterParameters.Add("qpmLimitUdpTruncationPercentage", rateLimits.UdpTruncationPercentage.Value.ToString());
+                        if (rateLimits.BypassNetworks is not null)
+                            clusterParameters.Add("qpmLimitBypassList", rateLimits.BypassNetworks.Join());
 
                         if (request.TryGetQueryOrForm("clientTimeout", int.Parse, out int clientTimeout))
                         {
