@@ -645,11 +645,14 @@ namespace DnsServerCore
                     _dnsWebService._dnsServer.CheckManifestLocalEndPoints(requestedDnsEndpoints);
                 }
 
-                var recordTtls = new DnsServer.RecordTtls(
+                var authoritativeDefaults = new DnsServer.AuthoritativeDefaults(
                     request.TryGetQueryOrForm("defaultRecordTtl", ZoneFile.ParseTtl, out uint defaultRecordTtl) ? defaultRecordTtl : null,
                     request.TryGetQueryOrForm("defaultNsRecordTtl", ZoneFile.ParseTtl, out uint defaultNsRecordTtl) ? defaultNsRecordTtl : null,
-                    request.TryGetQueryOrForm("defaultSoaRecordTtl", ZoneFile.ParseTtl, out uint defaultSoaRecordTtl) ? defaultSoaRecordTtl : null);
-                _dnsWebService._dnsServer.CheckManifestRecordTtls(recordTtls);
+                    request.TryGetQueryOrForm("defaultSoaRecordTtl", ZoneFile.ParseTtl, out uint defaultSoaRecordTtl) ? defaultSoaRecordTtl : null,
+                    request.TryGetQueryOrForm("useSoaSerialDateScheme", bool.Parse, out bool useSoaSerialDateScheme) ? useSoaSerialDateScheme : null,
+                    request.TryGetQueryOrForm("minSoaRefresh", ZoneFile.ParseTtl, out uint minSoaRefresh) ? minSoaRefresh : null,
+                    request.TryGetQueryOrForm("minSoaRetry", ZoneFile.ParseTtl, out uint minSoaRetry) ? minSoaRetry : null);
+                _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
 
                 try
                 {
@@ -688,12 +691,12 @@ namespace DnsServerCore
                         if (request.TryQueryOrFormArray("dnsServerIPv6SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] dnsServerIPv6SourceAddresses))
                             DnsClientConnection.IPv6SourceAddresses = dnsServerIPv6SourceAddresses;
 
-                        _dnsWebService._dnsServer.SetRecordTtls(recordTtls);
-                        if (recordTtls.Record.HasValue)
+                        _dnsWebService._dnsServer.SetAuthoritativeDefaults(authoritativeDefaults);
+                        if (authoritativeDefaults.Record.HasValue)
                             clusterParameters.Add("defaultRecordTtl", defaultRecordTtl.ToString());
-                        if (recordTtls.Ns.HasValue)
+                        if (authoritativeDefaults.Ns.HasValue)
                             clusterParameters.Add("defaultNsRecordTtl", defaultNsRecordTtl.ToString());
-                        if (recordTtls.Soa.HasValue)
+                        if (authoritativeDefaults.Soa.HasValue)
                             clusterParameters.Add("defaultSoaRecordTtl", defaultSoaRecordTtl.ToString());
 
                         string defaultResponsiblePerson = request.QueryOrForm("defaultResponsiblePerson");
@@ -709,26 +712,12 @@ namespace DnsServerCore
                             clusterParameters.Add("defaultResponsiblePerson", defaultResponsiblePerson);
                         }
 
-                        if (request.TryGetQueryOrForm("useSoaSerialDateScheme", bool.Parse, out bool useSoaSerialDateScheme))
-                        {
-                            _dnsWebService._dnsServer.AuthZoneManager.UseSoaSerialDateScheme = useSoaSerialDateScheme;
-
+                        if (authoritativeDefaults.SerialDateScheme.HasValue)
                             clusterParameters.Add("useSoaSerialDateScheme", useSoaSerialDateScheme.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("minSoaRefresh", ZoneFile.ParseTtl, out uint minSoaRefresh))
-                        {
-                            _dnsWebService._dnsServer.AuthZoneManager.MinSoaRefresh = minSoaRefresh;
-
+                        if (authoritativeDefaults.MinRefresh.HasValue)
                             clusterParameters.Add("minSoaRefresh", minSoaRefresh.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("minSoaRetry", ZoneFile.ParseTtl, out uint minSoaRetry))
-                        {
-                            _dnsWebService._dnsServer.AuthZoneManager.MinSoaRetry = minSoaRetry;
-
+                        if (authoritativeDefaults.MinRetry.HasValue)
                             clusterParameters.Add("minSoaRetry", minSoaRetry.ToString());
-                        }
 
                         if (request.TryQueryOrFormArray("zoneTransferAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] zoneTransferAllowedNetworks))
                         {

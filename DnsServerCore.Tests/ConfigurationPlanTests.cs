@@ -138,6 +138,7 @@ namespace DnsServerCore.Tests
         [Theory]
         [InlineData(false, "/dns/localEndpoints")]
         [InlineData(true, "/dns/authoritative/defaultRecordTtl")]
+        [InlineData(true, "/dns/authoritative/minSoaRefresh")]
         public async Task LegacyCombinedBackupChecksManagedDnsSettingsBeforeChangingSettings(bool preserveListener, string conflictPath)
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -146,7 +147,7 @@ namespace DnsServerCore.Tests
             string manifest = JsonSerializer.Serialize(new
             {
                 schemaVersion = 1,
-                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600 } }
+                dns = new { localEndpoints = new[] { current.ToString() }, authoritative = new { defaultRecordTtl = 600, minSoaRefresh = 900 } }
             });
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
@@ -172,7 +173,11 @@ namespace DnsServerCore.Tests
                 (preserveListener ? current : LoopbackDnsServer.GetLoopbackEndPoint()).WriteTo(writer);
                 writer.Write((byte)0); // IPv4 source networks
                 writer.Write((byte)0); // IPv6 source networks
-                writer.Write(3600u); // default record TTL
+                writer.Write(conflictPath.EndsWith("defaultRecordTtl", StringComparison.Ordinal) ? 3600u : 600u);
+                writer.Write(string.Empty); // responsible person
+                writer.Write(false); // SOA date serial format
+                writer.Write(300u); // SOA minimum refresh
+                writer.Write(300u); // SOA minimum retry
                 // The prefix is sufficient for ownership preflight.
             }
 
@@ -190,7 +195,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task AuthoritativeTtlDefaultsPersistAndRejectConflictingWrites()
+        public async Task AuthoritativeDefaultsPersistAndRejectConflictingWrites()
         {
             await using var server = await LoopbackWebService.StartAsync();
             using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
@@ -200,10 +205,10 @@ namespace DnsServerCore.Tests
             byte[] original = await backup.Content.ReadAsByteArrayAsync();
 
             const string manifest = """
-                {"schemaVersion":1,"dns":{"authoritative":{"defaultRecordTtl":600,"defaultNsRecordTtl":7200,"defaultSoaRecordTtl":null}}}
+                {"schemaVersion":1,"dns":{"authoritative":{"defaultRecordTtl":600,"defaultNsRecordTtl":7200,"defaultSoaRecordTtl":null,"useSoaSerialDateScheme":true,"minSoaRefresh":900,"minSoaRetry":null}}}
                 """;
             JsonElement preview = await PreviewAsync(server, manifest);
-            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            Assert.Equal(4, preview.GetProperty("changes").GetArrayLength());
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
 
             await server.RestartAsync();
@@ -211,12 +216,19 @@ namespace DnsServerCore.Tests
             Assert.Equal(600u, current.GetProperty("defaultRecordTtl").GetUInt32());
             Assert.Equal(7200u, current.GetProperty("defaultNsRecordTtl").GetUInt32());
             Assert.Equal(900u, current.GetProperty("defaultSoaRecordTtl").GetUInt32());
-            Assert.Equal(3, current.GetProperty("managedSettings").GetArrayLength());
+            Assert.True(current.GetProperty("useSoaSerialDateScheme").GetBoolean());
+            Assert.Equal(900u, current.GetProperty("minSoaRefresh").GetUInt32());
+            Assert.Equal(300u, current.GetProperty("minSoaRetry").GetUInt32());
+            Assert.Equal(6, current.GetProperty("managedSettings").GetArrayLength());
             Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
 
             JsonElement rejected = await server.CallAsync("settings/set?defaultRecordTtl=601&maxLogFileDays=180", server.AdminToken);
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.Contains("/dns/authoritative/defaultRecordTtl", rejected.GetProperty("errorMessage").GetString());
+
+            JsonElement timingConflict = await server.CallAsync("settings/set?minSoaRetry=301", server.AdminToken);
+            Assert.Equal("error", timingConflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/authoritative/minSoaRetry", timingConflict.GetProperty("errorMessage").GetString());
 
             using var form = new MultipartFormDataContent();
             form.Add(new ByteArrayContent(original), "file", "backup.zip");

@@ -39,9 +39,9 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900, canApply: true),
             ["/dns/authoritative/defaultResponsiblePerson"] = new("defaultResponsiblePerson",
                 JsonSerializer.SerializeToElement<string>(null), false, NormalizeResponsiblePerson),
-            ["/dns/authoritative/minSoaRefresh"] = Field("minSoaRefresh", 300),
-            ["/dns/authoritative/minSoaRetry"] = Field("minSoaRetry", 300),
-            ["/dns/authoritative/useSoaSerialDateScheme"] = Field("useSoaSerialDateScheme", false),
+            ["/dns/authoritative/minSoaRefresh"] = Field("minSoaRefresh", 300, canApply: true),
+            ["/dns/authoritative/minSoaRetry"] = Field("minSoaRetry", 300, canApply: true),
+            ["/dns/authoritative/useSoaSerialDateScheme"] = Field("useSoaSerialDateScheme", false, canApply: true),
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232),
@@ -120,7 +120,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetRecordTtls(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetAuthoritativeDefaults(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
@@ -129,28 +129,33 @@ namespace DnsServerCore.Configuration
                 writeDnsConfig));
         }
 
-        private static DnsServer.RecordTtls GetRecordTtls(ConfigurationManifest manifest)
+        private static DnsServer.AuthoritativeDefaults GetAuthoritativeDefaults(ConfigurationManifest manifest)
         {
             if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) ||
                 !dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 return default;
 
-            return new DnsServer.RecordTtls(ReadTtl("defaultRecordTtl"), ReadTtl("defaultNsRecordTtl"), ReadTtl("defaultSoaRecordTtl"));
+            return new DnsServer.AuthoritativeDefaults(ReadTtl("defaultRecordTtl"), ReadTtl("defaultNsRecordTtl"), ReadTtl("defaultSoaRecordTtl"),
+                ReadValue("useSoaSerialDateScheme")?.GetBoolean(), ReadTtl("minSoaRefresh"), ReadTtl("minSoaRetry"));
 
             uint? ReadTtl(string name)
             {
-                if (!authoritative.TryGetProperty(name, out JsonElement ttl))
+                JsonElement? value = ReadValue(name);
+                return value.HasValue ? decimal.ToUInt32(value.Value.GetDecimal()) : null;
+            }
+
+            JsonElement? ReadValue(string name)
+            {
+                if (!authoritative.TryGetProperty(name, out JsonElement value))
                     return null;
-                if (ttl.ValueKind == JsonValueKind.Null)
-                    ttl = _settings["/dns/authoritative/" + name].Default;
-                return decimal.ToUInt32(ttl.GetDecimal());
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/authoritative/" + name].Default : value;
             }
         }
 
         internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)
         {
-            if (clusterInitialized && GetRecordTtls(manifest).HasValues)
-                throw new InvalidDataException("/dns/authoritative: Applying record TTL defaults to a cluster is not implemented.");
+            if (clusterInitialized && GetAuthoritativeDefaults(manifest).HasValues)
+                throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
         }
 
         internal static void CheckApplySupport(ConfigurationManifest manifest)

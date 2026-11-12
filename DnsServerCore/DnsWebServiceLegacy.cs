@@ -198,6 +198,12 @@ namespace DnsServerCore
             return (ipv4, ipv6, reader.ReadUInt32());
         }
 
+        private static DnsServer.AuthoritativeDefaults ReadLegacySoaTiming(BinaryReader reader, int version)
+        {
+            return new DnsServer.AuthoritativeDefaults(null, null, null, version >= 33 && reader.ReadBoolean(),
+                version >= 40 ? reader.ReadUInt32() : 300u, version >= 40 ? reader.ReadUInt32() : 300u);
+        }
+
         private void CheckRestoreManifestDnsSettings(Stream stream, bool isConfigTransfer = false)
         {
             var reader = new BinaryReader(stream);
@@ -216,10 +222,17 @@ namespace DnsServerCore
                     ReadLegacyWebConfiguration(reader, version);
                     stream.ReadShortString(); // server domain
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    if (_dnsServer.ManifestOwnsDefaultRecordTtl)
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming)
                     {
                         var (_, _, recordTtl) = ReadLegacyDnsDefaults(reader, version);
-                        _dnsServer.CheckManifestRecordTtls(new DnsServer.RecordTtls(recordTtl, null, null));
+                        var defaults = new DnsServer.AuthoritativeDefaults(recordTtl, null, null);
+                        if (_dnsServer.HasManagedSoaTiming)
+                        {
+                            if (version >= 36)
+                                reader.ReadString(); // responsible person
+                            defaults = ReadLegacySoaTiming(reader, version) with { Record = recordTtl };
+                        }
+                        _dnsServer.CheckManifestAuthoritativeDefaults(defaults);
                     }
                     return;
                 }
@@ -231,11 +244,11 @@ namespace DnsServerCore
                     else if (_dnsServer.ManifestOwnsLocalEndPoints)
                         throw new InvalidDataException("/dns/localEndpoints: Cannot verify the DNS listeners in this backup format.");
 
-                    if (version < 23)
-                        _dnsServer.CheckManifestRecordTtls(new DnsServer.RecordTtls(3600, null, null));
-                    else if (_dnsServer.ManifestOwnsDefaultRecordTtl)
+                    if (version >= 23 && _dnsServer.ManifestOwnsDefaultRecordTtl)
                         throw new InvalidDataException("/dns/authoritative/defaultRecordTtl: Cannot verify the default record TTL in this backup format.");
 
+                    _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(
+                        version < 23 ? 3600u : null, null, null, false, 300, 300));
                     return;
                 }
             }
@@ -290,7 +303,7 @@ namespace DnsServerCore
                 var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(bR, version);
                 DnsClientConnection.IPv4SourceAddresses = ipv4;
                 DnsClientConnection.IPv6SourceAddresses = ipv6;
-                _dnsServer.SetRecordTtls(new DnsServer.RecordTtls(recordTtl, null, null));
+                _dnsServer.SetAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(recordTtl, null, null));
 
                 if (version >= 36)
                 {
@@ -305,21 +318,7 @@ namespace DnsServerCore
                     _dnsServer.DefaultResponsiblePerson = null;
                 }
 
-                if (version >= 33)
-                    _dnsServer.AuthZoneManager.UseSoaSerialDateScheme = bR.ReadBoolean();
-                else
-                    _dnsServer.AuthZoneManager.UseSoaSerialDateScheme = false;
-
-                if (version >= 40)
-                {
-                    _dnsServer.AuthZoneManager.MinSoaRefresh = bR.ReadUInt32();
-                    _dnsServer.AuthZoneManager.MinSoaRetry = bR.ReadUInt32();
-                }
-                else
-                {
-                    _dnsServer.AuthZoneManager.MinSoaRefresh = 300;
-                    _dnsServer.AuthZoneManager.MinSoaRetry = 300;
-                }
+                _dnsServer.SetAuthoritativeDefaults(ReadLegacySoaTiming(bR, version));
 
                 if (version >= 33)
                     _dnsServer.ZoneTransferAllowedNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(bR);

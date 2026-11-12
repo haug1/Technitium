@@ -131,12 +131,17 @@ namespace DnsServerCore.Dns
             LocalEndPoints = 1,
             RecordTtl = 2,
             NsTtl = 4,
-            SoaTtl = 8
+            SoaTtl = 8,
+            SerialDateScheme = 16,
+            MinRefresh = 32,
+            MinRetry = 64
         }
 
-        internal readonly record struct RecordTtls(uint? Record, uint? Ns, uint? Soa)
+        internal readonly record struct AuthoritativeDefaults(uint? Record, uint? Ns, uint? Soa,
+            bool? SerialDateScheme = null, uint? MinRefresh = null, uint? MinRetry = null)
         {
-            internal bool HasValues => Record.HasValue || Ns.HasValue || Soa.HasValue;
+            internal bool HasValues => Record.HasValue || Ns.HasValue || Soa.HasValue ||
+                SerialDateScheme.HasValue || MinRefresh.HasValue || MinRetry.HasValue;
         }
         readonly LogManager _log;
 
@@ -689,7 +694,9 @@ namespace DnsServerCore.Dns
         internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
         internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
-        internal bool HasManagedRecordTtls => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
+        internal bool HasManagedSoaTiming => (_managedDnsSettings &
+            (ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh | ManagedDnsSettings.MinRetry)) != 0;
+        internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -701,37 +708,66 @@ namespace DnsServerCore.Dns
                 yield return "/dns/authoritative/defaultNsRecordTtl";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SoaTtl))
                 yield return "/dns/authoritative/defaultSoaRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SerialDateScheme))
+                yield return "/dns/authoritative/useSoaSerialDateScheme";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRefresh))
+                yield return "/dns/authoritative/minSoaRefresh";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRetry))
+                yield return "/dns/authoritative/minSoaRetry";
         }
 
-        internal void CheckManifestRecordTtls(RecordTtls ttls)
+        internal void CheckManifestAuthoritativeDefaults(AuthoritativeDefaults defaults)
         {
-            if (ManifestOwnsDefaultRecordTtl && ttls.Record.HasValue && ttls.Record != _authZoneManager.DefaultRecordTtl)
+            if (ManifestOwnsDefaultRecordTtl && defaults.Record.HasValue && defaults.Record != _authZoneManager.DefaultRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultRecordTtl: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl) && ttls.Ns.HasValue && ttls.Ns != _authZoneManager.DefaultNsRecordTtl)
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl) && defaults.Ns.HasValue && defaults.Ns != _authZoneManager.DefaultNsRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultNsRecordTtl: Setting is managed by the configuration manifest.");
-            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SoaTtl) && ttls.Soa.HasValue && ttls.Soa != _authZoneManager.DefaultSoaRecordTtl)
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SoaTtl) && defaults.Soa.HasValue && defaults.Soa != _authZoneManager.DefaultSoaRecordTtl)
                 throw new DnsWebServiceException("/dns/authoritative/defaultSoaRecordTtl: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SerialDateScheme) && defaults.SerialDateScheme.HasValue && defaults.SerialDateScheme != _authZoneManager.UseSoaSerialDateScheme)
+                throw new DnsWebServiceException("/dns/authoritative/useSoaSerialDateScheme: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRefresh) && defaults.MinRefresh.HasValue && defaults.MinRefresh != _authZoneManager.MinSoaRefresh)
+                throw new DnsWebServiceException("/dns/authoritative/minSoaRefresh: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.MinRetry) && defaults.MinRetry.HasValue && defaults.MinRetry != _authZoneManager.MinSoaRetry)
+                throw new DnsWebServiceException("/dns/authoritative/minSoaRetry: Setting is managed by the configuration manifest.");
         }
 
-        private static RecordTtls ReadRecordTtls(BinaryReader reader, int version)
+        private static AuthoritativeDefaults ReadAuthoritativeTtls(BinaryReader reader, int version)
         {
-            return new RecordTtls(reader.ReadUInt32(), version >= 2 ? reader.ReadUInt32() : 14400u,
+            return new AuthoritativeDefaults(reader.ReadUInt32(), version >= 2 ? reader.ReadUInt32() : 14400u,
                 version >= 2 ? reader.ReadUInt32() : 900u);
         }
 
-        private RecordTtls GetRecordTtls()
+        private static AuthoritativeDefaults ReadSoaTiming(BinaryReader reader, AuthoritativeDefaults defaults)
         {
-            return new RecordTtls(_authZoneManager.DefaultRecordTtl, _authZoneManager.DefaultNsRecordTtl, _authZoneManager.DefaultSoaRecordTtl);
+            return defaults with
+            {
+                SerialDateScheme = reader.ReadBoolean(),
+                MinRefresh = reader.ReadUInt32(),
+                MinRetry = reader.ReadUInt32()
+            };
         }
 
-        internal void SetRecordTtls(RecordTtls ttls)
+        private AuthoritativeDefaults GetAuthoritativeDefaults()
         {
-            if (ttls.Record.HasValue && ttls.Record != _authZoneManager.DefaultRecordTtl)
-                _authZoneManager.DefaultRecordTtl = ttls.Record.Value;
-            if (ttls.Ns.HasValue && ttls.Ns != _authZoneManager.DefaultNsRecordTtl)
-                _authZoneManager.DefaultNsRecordTtl = ttls.Ns.Value;
-            if (ttls.Soa.HasValue && ttls.Soa != _authZoneManager.DefaultSoaRecordTtl)
-                _authZoneManager.DefaultSoaRecordTtl = ttls.Soa.Value;
+            return new AuthoritativeDefaults(_authZoneManager.DefaultRecordTtl, _authZoneManager.DefaultNsRecordTtl, _authZoneManager.DefaultSoaRecordTtl,
+                _authZoneManager.UseSoaSerialDateScheme, _authZoneManager.MinSoaRefresh, _authZoneManager.MinSoaRetry);
+        }
+
+        internal void SetAuthoritativeDefaults(AuthoritativeDefaults defaults)
+        {
+            if (defaults.Record.HasValue && defaults.Record != _authZoneManager.DefaultRecordTtl)
+                _authZoneManager.DefaultRecordTtl = defaults.Record.Value;
+            if (defaults.Ns.HasValue && defaults.Ns != _authZoneManager.DefaultNsRecordTtl)
+                _authZoneManager.DefaultNsRecordTtl = defaults.Ns.Value;
+            if (defaults.Soa.HasValue && defaults.Soa != _authZoneManager.DefaultSoaRecordTtl)
+                _authZoneManager.DefaultSoaRecordTtl = defaults.Soa.Value;
+            if (defaults.SerialDateScheme.HasValue && defaults.SerialDateScheme != _authZoneManager.UseSoaSerialDateScheme)
+                _authZoneManager.UseSoaSerialDateScheme = defaults.SerialDateScheme.Value;
+            if (defaults.MinRefresh.HasValue && defaults.MinRefresh != _authZoneManager.MinSoaRefresh)
+                _authZoneManager.MinSoaRefresh = defaults.MinRefresh.Value;
+            if (defaults.MinRetry.HasValue && defaults.MinRetry != _authZoneManager.MinSoaRetry)
+                _authZoneManager.MinSoaRetry = defaults.MinRetry.Value;
         }
 
         internal void CheckManifestLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints)
@@ -747,11 +783,18 @@ namespace DnsServerCore.Dns
             IReadOnlyList<IPEndPoint> endpoints = ReadLocalEndPoints(reader);
             if (!isConfigTransfer)
                 CheckManifestLocalEndPoints(endpoints);
-            if (HasManagedRecordTtls)
+            if (HasManagedAuthoritativeDefaults)
             {
                 AuthZoneInfo.ReadNetworkAddressesFrom(reader);
                 AuthZoneInfo.ReadNetworkAddressesFrom(reader);
-                CheckManifestRecordTtls(ReadRecordTtls(reader, version));
+                AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
+                if (HasManagedSoaTiming)
+                {
+                    reader.ReadString(); // responsible person
+                    defaults = ReadSoaTiming(reader, defaults);
+                }
+
+                CheckManifestAuthoritativeDefaults(defaults);
             }
         }
 
@@ -790,7 +833,7 @@ namespace DnsServerCore.Dns
             if (!isConfigTransfer)
                 DnsClientConnection.IPv6SourceAddresses = ipv6SourceAddresses;
 
-            SetRecordTtls(ReadRecordTtls(bR, version));
+            AuthoritativeDefaults defaults = ReadAuthoritativeTtls(bR, version);
 
             string rp = bR.ReadString();
             if (rp.Length == 0)
@@ -798,9 +841,7 @@ namespace DnsServerCore.Dns
             else
                 _defaultResponsiblePerson = new MailAddress(rp);
 
-            _authZoneManager.UseSoaSerialDateScheme = bR.ReadBoolean();
-            _authZoneManager.MinSoaRefresh = bR.ReadUInt32();
-            _authZoneManager.MinSoaRetry = bR.ReadUInt32();
+            SetAuthoritativeDefaults(ReadSoaTiming(bR, defaults));
 
             _zoneTransferAllowedNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
             _notifyAllowedNetworks = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
@@ -1299,7 +1340,7 @@ namespace DnsServerCore.Dns
             if (readOwnership)
                 {
                 int ownership = version == 7 ? s.ReadByte() : -1;
-                _managedDnsSettings = ownership is >= 0 and <= 15 ? (ManagedDnsSettings)ownership : 0;
+                _managedDnsSettings = ownership is >= 0 and <= 127 ? (ManagedDnsSettings)ownership : 0;
             }
         }
 
@@ -7060,7 +7101,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, RecordTtls ttls, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, AuthoritativeDefaults defaults, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7078,17 +7119,25 @@ namespace DnsServerCore.Dns
                 {
                     ManagedDnsSettings previousOwnership = _managedDnsSettings;
                     ManagedDnsSettings ownership = owned ? ManagedDnsSettings.LocalEndPoints : 0;
-                    if (ttls.Record.HasValue)
+                    if (defaults.Record.HasValue)
                         ownership |= ManagedDnsSettings.RecordTtl;
-                    if (ttls.Ns.HasValue)
+                    if (defaults.Ns.HasValue)
                         ownership |= ManagedDnsSettings.NsTtl;
-                    if (ttls.Soa.HasValue)
+                    if (defaults.Soa.HasValue)
                         ownership |= ManagedDnsSettings.SoaTtl;
+                    if (defaults.SerialDateScheme.HasValue)
+                        ownership |= ManagedDnsSettings.SerialDateScheme;
+                    if (defaults.MinRefresh.HasValue)
+                        ownership |= ManagedDnsSettings.MinRefresh;
+                    if (defaults.MinRetry.HasValue)
+                        ownership |= ManagedDnsSettings.MinRetry;
 
-                    RecordTtls previousTtls = GetRecordTtls();
-                    var effectiveTtls = new RecordTtls(ttls.Record ?? previousTtls.Record,
-                        ttls.Ns ?? previousTtls.Ns, ttls.Soa ?? previousTtls.Soa);
-                    if (!changed && (ownership == previousOwnership) && (effectiveTtls == previousTtls))
+                    AuthoritativeDefaults previousDefaults = GetAuthoritativeDefaults();
+                    var effectiveDefaults = new AuthoritativeDefaults(defaults.Record ?? previousDefaults.Record,
+                        defaults.Ns ?? previousDefaults.Ns, defaults.Soa ?? previousDefaults.Soa,
+                        defaults.SerialDateScheme ?? previousDefaults.SerialDateScheme, defaults.MinRefresh ?? previousDefaults.MinRefresh,
+                        defaults.MinRetry ?? previousDefaults.MinRetry);
+                    if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults))
                     {
                         persist(null);
                         return;
@@ -7096,7 +7145,7 @@ namespace DnsServerCore.Dns
 
                     _localEndPoints = changed ? endpoints : previous;
                     _managedDnsSettings = ownership;
-                    SetRecordTtls(effectiveTtls);
+                    SetAuthoritativeDefaults(effectiveDefaults);
                     try
                     {
                         persist(SaveConfigFileInternal);
@@ -7106,7 +7155,7 @@ namespace DnsServerCore.Dns
                     {
                         _localEndPoints = previous;
                         _managedDnsSettings = previousOwnership;
-                        SetRecordTtls(previousTtls);
+                        SetAuthoritativeDefaults(previousDefaults);
                         throw;
                     }
                 }
