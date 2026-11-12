@@ -1,11 +1,14 @@
+using DnsServerCore.Dns;
 using Json.Schema;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 
 namespace DnsServerCore.Configuration
@@ -82,9 +85,50 @@ namespace DnsServerCore.Configuration
             ValidateSchema(root);
             CheckDnsNameKeys(root, "zones", "", allowRoot: true);
             if (root.TryGetProperty("dns", out JsonElement dns))
+            {
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
+                if (dns.TryGetProperty("localEndpoints", out JsonElement endpoints))
+                    ReadDnsLocalEndPoints(endpoints);
+            }
 
             return new ConfigurationManifest(filePath, root.Clone());
+        }
+
+        internal static IReadOnlyList<IPEndPoint> ReadDnsLocalEndPoints(JsonElement value)
+        {
+            if (value.ValueKind == JsonValueKind.Null || value.GetArrayLength() == 0)
+                return DnsServer.NormalizeLocalEndPoints(null);
+
+            var endpoints = new IPEndPoint[value.GetArrayLength()];
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int index = 0; index < endpoints.Length; index++)
+            {
+                string address = value[index].GetString();
+                int colon = address.LastIndexOf(':');
+                bool hasPort = (colon >= 0) && ((colon == address.IndexOf(':')) || (address[colon - 1] == ']'));
+                if ((hasPort && !ushort.TryParse(address.AsSpan(colon + 1), out _)) ||
+                    !InterfaceEndPoint.TryParse(address, out InterfaceEndPoint endpoint))
+                    throw new InvalidDataException($"/dns/localEndpoints/{index}: Invalid DNS listener endpoint.");
+
+                endpoints[index] = endpoint;
+            }
+
+            try
+            {
+                DnsServer.NormalizeLocalEndPoints(endpoints, useDefaultPort: true);
+            }
+            catch (ArgumentException)
+            {
+                throw new InvalidDataException("/dns/localEndpoints: Port 853 is reserved for DNS-over-TLS.");
+            }
+
+            for (int index = 0; index < endpoints.Length; index++)
+            {
+                if (!seen.Add(endpoints[index].ToString()))
+                    throw new InvalidDataException($"/dns/localEndpoints/{index}: Duplicate DNS listener endpoint.");
+            }
+
+            return endpoints;
         }
 
         public void ValidateReferences()

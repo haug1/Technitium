@@ -42,6 +42,41 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DnsListenerPreviewReportsRestartWithoutChangingListeners()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            JsonElement before = await server.GetSettingsAsync();
+            const string manifest = """{"schemaVersion":1,"dns":{"localEndpoints":[]}}""";
+
+            JsonElement preview = await PreviewAsync(server, manifest);
+            JsonElement change = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal("/dns/localEndpoints", change.GetProperty("path").GetString());
+            Assert.True(change.GetProperty("restartDnsService").GetBoolean());
+            Assert.False(change.GetProperty("restartWebService").GetBoolean());
+            Assert.True(JsonElement.DeepEquals(before.GetProperty("dnsServerLocalEndPoints"),
+                (await server.GetSettingsAsync()).GetProperty("dnsServerLocalEndPoints")));
+        }
+
+        [Fact]
+        public void DnsListenerValidationUsesSettingsDefaultsAndRejectsInvalidEndpoints()
+        {
+            using var snapshot = JsonDocument.Parse("""{"dnsServerLocalEndPoints":["0.0.0.0:53","[::]:53"]}""");
+            ConfigurationManifest manifest = Load("""{"schemaVersion":1,"dns":{"localEndpoints":["::","0.0.0.0:0"]}}""");
+            Assert.Empty(ConfigurationPlan.Create(manifest, snapshot.RootElement));
+
+            Assert.Contains("/dns/localEndpoints/0", Assert.Throws<InvalidDataException>(() =>
+                Load("""{"schemaVersion":1,"dns":{"localEndpoints":["example.test"]}}""")).Message);
+            Assert.Contains("/dns/localEndpoints/0", Assert.Throws<InvalidDataException>(() =>
+                Load("""{"schemaVersion":1,"dns":{"localEndpoints":["[::1]:99999"]}}""")).Message);
+            Assert.Contains("/dns/localEndpoints/0", Assert.Throws<InvalidDataException>(() =>
+                Load("""{"schemaVersion":1,"dns":{"localEndpoints":["127.0.0.1:bogus"]}}""")).Message);
+            Assert.Contains("/dns/localEndpoints/1", Assert.Throws<InvalidDataException>(() =>
+                Load("""{"schemaVersion":1,"dns":{"localEndpoints":["127.0.0.1","127.0.0.1:53"]}}""")).Message);
+            Assert.Contains("853", Assert.Throws<InvalidDataException>(() =>
+                Load("""{"schemaVersion":1,"dns":{"localEndpoints":["127.0.0.1:853"]}}""")).Message);
+        }
+
+        [Fact]
         public async Task ServerRevisionBindsTheManifestAndCurrentSettings()
         {
             await using var server = await LoopbackWebService.StartAsync();

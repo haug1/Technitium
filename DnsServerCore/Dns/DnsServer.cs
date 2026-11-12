@@ -6951,26 +6951,27 @@ namespace DnsServerCore.Dns
         public string ConfigFolder
         { get { return _configFolder; } }
 
+        internal static IReadOnlyList<IPEndPoint> NormalizeLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints, bool useDefaultPort = false)
+        {
+            if ((endpoints is null) || (endpoints.Count == 0))
+                return [new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53)];
+
+            foreach (IPEndPoint endpoint in endpoints)
+            {
+                if (endpoint.Port == 853)
+                    throw new ArgumentException("Port 853 is reserved for DNS-over-TLS service. Please use a different port for DNS Server Local End Points.", nameof(LocalEndPoints));
+
+                if (useDefaultPort && (endpoint.Port == 0))
+                    endpoint.Port = 53;
+            }
+
+            return endpoints;
+        }
+
         public IReadOnlyList<IPEndPoint> LocalEndPoints
         {
             get { return _localEndPoints; }
-            set
-            {
-                if ((value is null) || (value.Count == 0))
-                {
-                    _localEndPoints = [new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53)];
-                }
-                else
-                {
-                    foreach (IPEndPoint ep in value)
-                    {
-                        if (ep.Port == 853)
-                            throw new ArgumentException("Port 853 is reserved for DNS-over-TLS service. Please use a different port for DNS Server Local End Points.", nameof(LocalEndPoints));
-                    }
-
-                    _localEndPoints = value;
-                }
-            }
+            set { _localEndPoints = NormalizeLocalEndPoints(value); }
         }
 
         public LogManager LogManager

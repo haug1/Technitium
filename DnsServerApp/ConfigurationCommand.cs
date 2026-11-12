@@ -92,6 +92,8 @@ namespace DnsServerApp
             foreach (JsonElement change in changes.EnumerateArray())
             {
                 string restart = change.GetProperty("restartWebService").GetBoolean() ? " (web service restart)" : "";
+                if (change.TryGetProperty("restartDnsService", out JsonElement restartDns) && restartDns.GetBoolean())
+                    restart += " (DNS service restart)";
                 Console.WriteLine($"{change.GetProperty("kind").GetString()} {change.GetProperty("path").GetString()}{restart}");
             }
 

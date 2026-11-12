@@ -512,6 +512,7 @@ namespace DnsServerCore
                         response.WriteString("path", change.Path);
                         response.WriteString("kind", change.Kind.ToString());
                         response.WriteBoolean("restartWebService", change.RestartWebService);
+                        response.WriteBoolean("restartDnsService", change.RestartDnsService);
                         response.WriteEndObject();
                     }
                     response.WriteEndArray();
@@ -664,23 +665,11 @@ namespace DnsServerCore
 
                         if (request.TryQueryOrFormArray("dnsServerLocalEndPoints", InterfaceEndPoint.Parse, out IPEndPoint[] dnsServerLocalEndPoints))
                         {
-                            if (dnsServerLocalEndPoints.Length == 0)
-                            {
-                                dnsServerLocalEndPoints = [new IPEndPoint(IPAddress.Any, 53), new IPEndPoint(IPAddress.IPv6Any, 53)];
-                            }
-                            else
-                            {
-                                foreach (IPEndPoint localEndPoint in dnsServerLocalEndPoints)
-                                {
-                                    if (localEndPoint.Port == 0)
-                                        localEndPoint.Port = 53;
-                                }
-                            }
-
-                            if (!_dnsWebService._dnsServer.LocalEndPoints.HasSameItems(dnsServerLocalEndPoints))
+                            IReadOnlyList<IPEndPoint> endpoints = DnsServer.NormalizeLocalEndPoints(dnsServerLocalEndPoints, useDefaultPort: true);
+                            if (!_dnsWebService._dnsServer.LocalEndPoints.HasSameItems(endpoints))
                                 restartDnsService = true;
 
-                            _dnsWebService._dnsServer.LocalEndPoints = dnsServerLocalEndPoints;
+                            _dnsWebService._dnsServer.LocalEndPoints = endpoints;
                         }
 
                         if (request.TryQueryOrFormArray("dnsServerIPv4SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] dnsServerIPv4SourceAddresses))

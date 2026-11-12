@@ -18,15 +18,18 @@ namespace DnsServerCore.Configuration
         Remove
     }
 
-    public sealed record ConfigurationChange(string Path, ConfigurationChangeKind Kind, bool RestartWebService);
+    public sealed record ConfigurationChange(string Path, ConfigurationChangeKind Kind, bool RestartWebService, bool RestartDnsService = false);
 
     public static class ConfigurationPlan
     {
         private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService,
             Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false);
 
+        private const string DnsEndpointsPath = "/dns/localEndpoints";
+
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
+            [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }),
             ["/dns/authoritative/defaultRecordTtl"] = Field("defaultRecordTtl", 3600),
             ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400),
             ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900),
@@ -202,6 +205,12 @@ namespace DnsServerCore.Configuration
                         candidate = JsonSerializer.SerializeToElement(GetManifestLogFolder(desired, log));
                         current = JsonSerializer.SerializeToElement(log.NormalizeLogFolder(current.GetString()));
                     }
+                    else if (path == DnsEndpointsPath)
+                    {
+                        var endpoints = ConfigurationManifest.ReadDnsLocalEndPoints(desired);
+                        candidate = SortEndpoints(endpoints.Select(endpoint => endpoint.ToString()));
+                        current = SortEndpoints(current.EnumerateArray().Select(endpoint => endpoint.GetString()));
+                    }
                     else
                     {
                         candidate = desired.ValueKind == JsonValueKind.Null ? setting.Default : (setting.Normalize?.Invoke(desired) ?? desired);
@@ -216,7 +225,7 @@ namespace DnsServerCore.Configuration
                     ConfigurationChangeKind kind = current.ValueKind == JsonValueKind.Null
                         ? ConfigurationChangeKind.Add
                         : candidate.ValueKind == JsonValueKind.Null ? ConfigurationChangeKind.Remove : ConfigurationChangeKind.Update;
-                    changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService));
+                    changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService, path == DnsEndpointsPath));
                 }
 
                 return;
@@ -231,6 +240,11 @@ namespace DnsServerCore.Configuration
             }
 
             throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Planning for this setting is not implemented.");
+        }
+
+        private static JsonElement SortEndpoints(IEnumerable<string> endpoints)
+        {
+            return JsonSerializer.SerializeToElement(endpoints.OrderBy(endpoint => endpoint, StringComparer.Ordinal).ToArray());
         }
 
         private static string GetManifestLogFolder(JsonElement value, LogManager log)
