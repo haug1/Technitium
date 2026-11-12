@@ -2,8 +2,22 @@ name: Regression tests
 
 on:
   pull_request:
+    paths: &regression-paths
+      - '.github/workflows/regression-tests.yml'
+      - 'DnsServerCore/**'
+      - 'DnsServerCore.ApplicationCommon/**'
+      - 'DnsServerCore.HttpApi/**'
+      - 'DnsServerCore.Tests/**'
+      - 'Apps/FilterAaaaApp/**'
+      - '!**/*.md'
+      - 'Directory.Build.*'
+      - 'Directory.Packages.props'
+      - 'NuGet.Config'
+      - 'nuget.config'
+      - 'global.json'
   push:
     branches: [master]
+    paths: *regression-paths
 
 permissions:
   contents: read
