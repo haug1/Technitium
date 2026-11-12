@@ -308,6 +308,8 @@ namespace DnsServerCore.Configuration
                     dhcpOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestZoneOwnership", out JsonElement zoneOwnership))
                     zoneOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestSsoOwnership", out JsonElement ssoOwnership))
+                    ssoOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestSso", out JsonElement sso))
                     sso.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))

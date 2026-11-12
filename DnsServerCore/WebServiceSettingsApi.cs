@@ -1032,6 +1032,8 @@ namespace DnsServerCore
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedUserPaths);
                     writer.WritePropertyName("manifestGroupOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedGroupPaths);
+                    writer.WritePropertyName("manifestSsoOwnership");
+                    JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedSsoFields);
                     writer.WritePropertyName("manifestLdapOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedLdapFields);
                     writer.WritePropertyName("manifestZoneOwnership");

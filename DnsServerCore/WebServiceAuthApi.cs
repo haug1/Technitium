@@ -442,6 +442,11 @@ namespace DnsServerCore
 
                 jsonWriter.WriteEndArray();
 
+                jsonWriter.WriteStartArray("managedSettings");
+                foreach (string field in _dnsWebService._authManager.ManagedSsoFields)
+                    jsonWriter.WriteStringValue(ConfigurationSso.Path + "/" + field);
+                jsonWriter.WriteEndArray();
+
                 if (includeGroups)
                 {
                     List<Group> groups = new List<Group>(_dnsWebService._authManager.Groups);
@@ -1925,7 +1930,38 @@ namespace DnsServerCore
                     return new Uri(strUri);
                 }
 
+                static KeyValuePair<string, string> ReadMapping(ArraySegment<string> row) => new(row[0], row[1]);
+
                 HttpRequest request = context.Request;
+                var auth = _dnsWebService._authManager;
+                if (auth.ManagedSsoFields.Count > 0)
+                {
+                    ConfigurationSso.Settings current = auth.GetManifestSsoSettings();
+                    Uri authority = request.TryQueryOrForm("ssoAuthority", ParseUri, out Uri configuredAuthority) && configuredAuthority != current.Authority
+                        ? configuredAuthority : current.Authority;
+                    Uri metadata = request.TryQueryOrForm("ssoMetadataAddress", ParseUri, out Uri configuredMetadata) && configuredMetadata != current.MetadataAddress
+                        ? configuredMetadata : current.MetadataAddress;
+                    string clientId = request.TryQueryOrForm("ssoClientId", out string configuredId)
+                        ? string.IsNullOrEmpty(configuredId) ? null : configuredId : current.ClientId;
+                    string secret = request.TryQueryOrForm("ssoClientSecret", out string configuredSecret) && configuredSecret != "************"
+                        ? string.IsNullOrEmpty(configuredSecret) ? null : configuredSecret : current.ClientSecret;
+                    var candidate = current with
+                    {
+                        Enabled = request.GetQueryOrForm("ssoEnabled", bool.Parse, current.Enabled),
+                        Authority = authority,
+                        ClientId = clientId,
+                        ClientSecret = secret,
+                        MetadataAddress = metadata,
+                        Scopes = request.TryQueryOrFormArray("ssoScopes", out string[] configuredScopes, '|')
+                            ? ConfigurationSso.NormalizeScopes(configuredScopes) : current.Scopes,
+                        AllowSignup = request.GetQueryOrForm("ssoAllowSignup", bool.Parse, current.AllowSignup),
+                        AllowSignupOnlyForMappedUsers = request.GetQueryOrForm("ssoAllowSignupOnlyForMappedUsers", bool.Parse, current.AllowSignupOnlyForMappedUsers),
+                        GroupMap = request.TryQueryOrFormArray("ssoGroupMap", ReadMapping, 2, out KeyValuePair<string, string>[] configuredMappings, '|')
+                            ? new Dictionary<string, string>(configuredMappings) : current.GroupMap
+                    };
+                    ConfigurationSso.CheckOwnership(current, candidate, auth.ManagedSsoFields);
+                }
+
                 bool ssoIsStillDisabled = false;
                 bool restartWebService = false;
 
@@ -1995,10 +2031,7 @@ namespace DnsServerCore
                 if (request.TryGetQueryOrForm("ssoAllowSignupOnlyForMappedUsers", bool.Parse, out bool ssoAllowSignupOnlyForMappedUsers))
                     _dnsWebService._authManager.SsoAllowSignupOnlyForMappedUsers = ssoAllowSignupOnlyForMappedUsers;
 
-                if (request.TryQueryOrFormArray("ssoGroupMap", delegate (ArraySegment<string> tableRow)
-                {
-                    return new KeyValuePair<string, string>(tableRow[0], tableRow[1]);
-                }, 2, out KeyValuePair<string, string>[] ssoGroupMapEntries, '|'))
+                if (request.TryQueryOrFormArray("ssoGroupMap", ReadMapping, 2, out KeyValuePair<string, string>[] ssoGroupMapEntries, '|'))
                 {
                     _dnsWebService._authManager.SsoGroupMap = new Dictionary<string, string>(ssoGroupMapEntries);
                 }

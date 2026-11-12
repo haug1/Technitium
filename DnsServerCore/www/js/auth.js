@@ -2254,6 +2254,11 @@ function refreshAdminSsoConfig() {
 }
 
 function loadAdminSsoConfig(responseJSON) {
+    var managedSettings = responseJSON.response.managedSettings || [];
+    $("#lblAdminSsoManaged")
+        .text(managedSettings.length ? "Manifest-managed SSO settings: " + managedSettings.join(", ") : "")
+        .toggle(managedSettings.length > 0);
+
     $("#chkAdminSsoEnabled").prop("checked", responseJSON.response.ssoEnabled);
     $("#txtAdminSsoAuthority").val(responseJSON.response.ssoAuthority);
     $("#txtAdminSsoClientId").val(responseJSON.response.ssoClientId);

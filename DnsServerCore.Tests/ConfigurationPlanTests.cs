@@ -3827,6 +3827,12 @@ namespace DnsServerCore.Tests
         public async Task SsoManifestRestartsTheWebServiceAndKeepsThePreviousConfigOnBindFailure()
         {
             await using var server = await LoopbackWebService.StartAsync();
+            using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+            backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+            backup.EnsureSuccessStatusCode();
+            byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
             const string variable = "TECHNITIUM_TEST_SSO_CLIENT_SECRET";
             const string secret = "fixture-provider-secret";
             string? previous = Environment.GetEnvironmentVariable(variable);
@@ -3877,6 +3883,21 @@ namespace DnsServerCore.Tests
                 Assert.Contains(settings.GetProperty("ssoScopes").EnumerateArray(), scope => scope.ValueEquals("openid"));
                 Assert.Contains(settings.GetProperty("ssoScopes").EnumerateArray(), scope => scope.ValueEquals("profile"));
 
+                Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(),
+                    path => path.ValueEquals("/auth/sso/groupMap/remote-readers"));
+                JsonElement rejected = await server.CallAsync(
+                    "admin/sso/set?ssoAuthority=https%3A%2F%2Fother.test&ssoAllowSignup=true", server.AdminToken);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/auth/sso/authority", rejected.GetProperty("errorMessage").GetString());
+                config = await server.CallAsync("admin/sso/get", server.AdminToken);
+                Assert.False(config.GetProperty("response").GetProperty("ssoAllowSignup").GetBoolean());
+
+                using var form = new MultipartFormDataContent();
+                form.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+                JsonElement restore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, form);
+                Assert.Equal("error", restore.GetProperty("status").GetString());
+                Assert.Contains("/auth/sso/", restore.GetProperty("errorMessage").GetString());
+
                 JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
                 LoopbackWebService.AssertOk(export);
                 Assert.DoesNotContain(secret, export.GetRawText());
@@ -3885,6 +3906,24 @@ namespace DnsServerCore.Tests
                 Assert.Equal("SSO Readers", sso.GetProperty("groupMap").GetProperty("remote-readers").GetString());
                 Assert.False(sso.TryGetProperty("clientSecret", out _));
                 Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/auth/sso/clientSecret"));
+
+                JsonNode releaseGroup = JsonNode.Parse(manifest)!;
+                releaseGroup["auth"]!.AsObject().Remove("groups");
+                string managedSso = releaseGroup.ToJsonString();
+                revision = (await PreviewAsync(server, managedSso)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, managedSso, revision));
+                JsonElement rename = await server.CallAsync("admin/groups/set?group=SSO%20Readers&newGroup=other", server.AdminToken);
+                Assert.Equal("error", rename.GetProperty("status").GetString());
+                Assert.Contains("/auth/sso/groupMap/remote-readers", rename.GetProperty("errorMessage").GetString());
+
+                const string release = """{"schemaVersion":1}""";
+                revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+                await server.RestartAsync();
+                LoopbackWebService.AssertOk(await server.CallAsync("admin/sso/set?ssoAllowSignup=true", server.AdminToken));
+                config = await server.CallAsync("admin/sso/get", server.AdminToken);
+                Assert.True(config.GetProperty("response").GetProperty("ssoAllowSignup").GetBoolean());
+                Assert.True(config.GetProperty("response").GetProperty("ssoEnabled").GetBoolean());
             }
             finally
             {

@@ -93,6 +93,10 @@ namespace DnsServerCore.Auth
         private string[] _managedLdapFields = [];
         internal IReadOnlyList<string> ManagedLdapFields => _managedLdapFields;
 
+        internal const string SsoOwnershipFile = "sso-ownership.config";
+        private string[] _managedSsoFields = [];
+        internal IReadOnlyList<string> ManagedSsoFields => _managedSsoFields;
+
         internal const string GroupOwnershipFile = "group-ownership.config";
         private string[] _managedGroupPaths = [];
         internal IReadOnlyList<string> ManagedGroupPaths => _managedGroupPaths;
@@ -102,7 +106,7 @@ namespace DnsServerCore.Auth
         internal const string PermissionOwnershipFile = "permission-ownership.config";
         private string[] _managedPermissionPaths = [];
         internal IReadOnlyList<string> ManagedPermissionPaths => _managedPermissionPaths;
-        internal bool HasManagedAuthOwnership => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 ||
+        internal bool HasManagedAuthOwnership => _managedSsoFields.Length > 0 || _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 ||
             _managedUserPaths.Length > 0 || _managedPermissionPaths.Length > 0;
         internal bool HasManagedAuthSettings => HasManagedAuthOwnership || _manifestStaticSessionDefinitions.Count > 0;
 
@@ -123,6 +127,7 @@ namespace DnsServerCore.Auth
             _log = log;
 
             _managedLdapFields = ReadOwnership(LdapOwnershipFile);
+            _managedSsoFields = ReadOwnership(SsoOwnershipFile);
             _managedGroupPaths = ReadOwnership(GroupOwnershipFile);
             _managedUserPaths = ReadOwnership(UserOwnershipFile);
             _managedPermissionPaths = ReadOwnership(PermissionOwnershipFile);
@@ -527,9 +532,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, ConfigurationStaticSessions.Candidate staticSessions, ConfigurationSso.Settings sso, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, ConfigurationStaticSessions.Candidate staticSessions, ConfigurationSso.Settings sso, string[] ssoOwnership, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null && sso is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null && sso is null && ssoOwnership is null)
             {
                 persist(null);
                 return;
@@ -650,6 +655,8 @@ namespace DnsServerCore.Auth
                         SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers, sso);
                     if (ldapOwnership is not null)
                         WriteOwnership(LdapOwnershipFile, ldapOwnership);
+                    if (ssoOwnership is not null)
+                        WriteOwnership(SsoOwnershipFile, ssoOwnership);
                     if (groupOwnership is not null)
                         WriteOwnership(GroupOwnershipFile, groupOwnership);
                     if (userOwnership is not null)
@@ -691,6 +698,8 @@ namespace DnsServerCore.Auth
                     PublishStaticSessions(staticSessions, configuredSessions);
                 if (ldapOwnership is not null)
                     _managedLdapFields = ldapOwnership;
+                if (ssoOwnership is not null)
+                    _managedSsoFields = ssoOwnership;
                 if (groupOwnership is not null)
                     _managedGroupPaths = groupOwnership;
                 if (userOwnership is not null)
@@ -788,8 +797,17 @@ namespace DnsServerCore.Auth
         }
 
         internal void CheckManifestRestoreOwnership(Stream stream) =>
-            ReadConfigFrom(stream, false, out _, (ldap, groups, users, permissions, sessions) =>
+            ReadConfigFrom(stream, false, out _, (ldap, sso, groups, users, permissions, sessions) =>
             {
+                ConfigurationSso.CheckOwnership(GetManifestSsoSettings(), sso, _managedSsoFields);
+                if (_managedSsoFields.Length > 0 && sso.GroupMap is not null)
+                {
+                    foreach (string group in sso.GroupMap.Values)
+                    {
+                        if (!groups.ContainsKey(group.ToLowerInvariant()))
+                            ConfigurationSso.CheckGroupReference(sso, _managedSsoFields, group);
+                    }
+                }
                 ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
                 if (_managedGroupPaths.Length > 0)
                     ConfigurationGroups.CheckRestore(this, groups);
@@ -838,7 +856,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>, IReadOnlyDictionary<string, UserSession>> inspect = null)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, ConfigurationSso.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>, IReadOnlyDictionary<PermissionSection, Permission>, IReadOnlyDictionary<string, UserSession>> inspect = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -900,132 +918,21 @@ namespace DnsServerCore.Auth
                         }
                     }
 
-                    if (version >= 2)
+                    ConfigurationSso.Settings currentSso = GetManifestSsoSettings();
+                    ConfigurationSso.Settings sso = version >= 2 ? ReadSsoSettings(bR, version, currentSso.Scopes) : currentSso;
+                    ConfigurationLdap.Settings ldap = version >= 4 ? ReadLdapSettings(bR) : GetManifestLdapSettings();
+                    if (inspect is not null)
                     {
-                        bool ssoIsStillDisabled = false;
-
-                        bool ssoEnabled = bR.ReadBoolean();
-                        if (_ssoEnabled == ssoEnabled)
-                        {
-                            ssoIsStillDisabled = !ssoEnabled;
-                        }
-                        else if (inspect is null)
-                        {
-                            _ssoEnabled = ssoEnabled;
-                            restartWebService = true;
-                        }
-
-                        string strSsoAuthority = s.ReadShortString();
-                        Uri ssoAuthority;
-                        if (strSsoAuthority.Length == 0)
-                            ssoAuthority = null;
-                        else
-                            ssoAuthority = new Uri(strSsoAuthority);
-
-                        if (inspect is null && _ssoAuthority != ssoAuthority)
-                        {
-                            _ssoAuthority = ssoAuthority;
-                            restartWebService = true;
-                        }
-
-                        string ssoClientId = s.ReadShortString();
-                        if (ssoClientId.Length == 0)
-                            ssoClientId = null;
-
-                        if (inspect is null && _ssoClientId != ssoClientId)
-                        {
-                            _ssoClientId = ssoClientId;
-                            restartWebService = true;
-                        }
-
-                        string ssoClientSecret = s.ReadShortString();
-                        if (ssoClientSecret.Length == 0)
-                            ssoClientSecret = null;
-
-                        if (inspect is null && _ssoClientSecret != ssoClientSecret)
-                        {
-                            _ssoClientSecret = ssoClientSecret;
-                            restartWebService = true;
-                        }
-
-                        string strSsoMetadataAddress = s.ReadShortString();
-                        Uri ssoMetadataAddress;
-                        if (strSsoMetadataAddress.Length == 0)
-                            ssoMetadataAddress = null;
-                        else
-                            ssoMetadataAddress = new Uri(strSsoMetadataAddress);
-
-                        if (inspect is null && _ssoMetadataAddress != ssoMetadataAddress)
-                        {
-                            _ssoMetadataAddress = ssoMetadataAddress;
-                            restartWebService = true;
-                        }
-
-                        if (version >= 3)
-                        {
-                            int count = bR.ReadByte();
-                            HashSet<string> ssoScopes = new HashSet<string>(count);
-
-                            for (int i = 0; i < count; i++)
-                                ssoScopes.Add(s.ReadShortString());
-
-                            if (inspect is null && !_ssoScopes.HasSameItems(ssoScopes))
-                            {
-                                _ssoScopes = ssoScopes;
-                                restartWebService = true;
-                            }
-                        }
-
-                        bool allowSignup = bR.ReadBoolean();
-                        bool mappedSignupOnly = bR.ReadBoolean();
-                        if (inspect is null)
-                        {
-                            _ssoAllowSignup = allowSignup;
-                            _ssoAllowSignupOnlyForMappedUsers = mappedSignupOnly;
-                        }
-
-                        {
-                            int count = bR.ReadByte();
-                            if (count > 0)
-                            {
-                                Dictionary<string, string> ssoGroupMap = new Dictionary<string, string>(count);
-
-                                for (int i = 0; i < count; i++)
-                                {
-                                    string key = s.ReadShortString();
-                                    string value = s.ReadShortString();
-
-                                    ssoGroupMap.TryAdd(key, value);
-                                }
-
-                                if (inspect is null)
-                                    _ssoGroupMap = ssoGroupMap;
-                            }
-                            else
-                            {
-                                if (inspect is null)
-                                    _ssoGroupMap = null;
-                            }
-                        }
-
-                        restartWebService = !ssoIsStillDisabled && restartWebService;
-                    }
-
-                    if (version >= 4)
-                    {
-                        ConfigurationLdap.Settings ldap = ReadLdapSettings(bR);
-                        if (inspect is not null)
-                        {
-                            inspect(ldap, groups, users, permissions, sessions);
-                            return;
-                        }
-                        SetLdapSettings(ldap);
-                    }
-                    else if (inspect is not null)
-                    {
-                        inspect(GetManifestLdapSettings(), groups, users, permissions, sessions);
+                        inspect(ldap, sso, groups, users, permissions, sessions);
                         return;
                     }
+                    if (version >= 2)
+                    {
+                        restartWebService = ConfigurationSso.NeedsRestart(currentSso, sso);
+                        SetSsoSettings(sso);
+                    }
+                    if (version >= 4)
+                        SetLdapSettings(ldap);
 
                     break;
 
@@ -1090,6 +997,43 @@ namespace DnsServerCore.Auth
                 _permissions = permissions;
                 _sessions = sessions;
             }
+        }
+
+        private static ConfigurationSso.Settings ReadSsoSettings(BinaryReader reader, int version, IReadOnlySet<string> scopes)
+        {
+            Stream stream = reader.BaseStream;
+            bool enabled = reader.ReadBoolean();
+            Uri authority = ReadUri();
+            string clientId = ReadText();
+            string clientSecret = ReadText();
+            Uri metadataAddress = ReadUri();
+
+            if (version >= 3)
+            {
+                int count = reader.ReadByte();
+                var configured = new HashSet<string>(count, StringComparer.Ordinal);
+                for (int i = 0; i < count; i++)
+                    configured.Add(stream.ReadShortString());
+                scopes = configured;
+            }
+
+            bool allowSignup = reader.ReadBoolean();
+            bool mappedSignupOnly = reader.ReadBoolean();
+            int mappings = reader.ReadByte();
+            Dictionary<string, string> groupMap = mappings == 0 ? null : new(mappings);
+            for (int i = 0; i < mappings; i++)
+                groupMap.TryAdd(stream.ReadShortString(), stream.ReadShortString());
+
+            return new ConfigurationSso.Settings(enabled, authority, clientId, clientSecret, metadataAddress,
+                scopes, allowSignup, mappedSignupOnly, groupMap);
+
+            string ReadText()
+            {
+                string value = stream.ReadShortString();
+                return value.Length == 0 ? null : value;
+            }
+
+            Uri ReadUri() => ReadText() is string value ? new Uri(value) : null;
         }
 
         private static ConfigurationLdap.Settings ReadLdapSettings(BinaryReader reader)
@@ -1801,6 +1745,7 @@ namespace DnsServerCore.Auth
             }
 
             CheckGroupIdentityChanges(group);
+            ConfigurationSso.CheckGroupReference(GetManifestSsoSettings(), _managedSsoFields, group.Name);
             string oldGroupName = group.Name;
             group.Name = newGroupName;
 
@@ -1833,6 +1778,7 @@ namespace DnsServerCore.Auth
                     if (_groups.TryGetValue(name, out Group group))
                     {
                         CheckGroupIdentityChanges(group);
+                        ConfigurationSso.CheckGroupReference(GetManifestSsoSettings(), _managedSsoFields, group.Name);
                         CheckPrincipalGrantChanges(group);
                     }
                     if (_groups.TryRemove(name, out Group deletedGroup))

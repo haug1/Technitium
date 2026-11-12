@@ -799,6 +799,10 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (auth.ManagedLdapFields.SequenceEqual(ldapOwnership))
                 ldapOwnership = null;
 
+            string[] ssoOwnership = ConfigurationSso.GetOwnedFields(manifest);
+            if (auth.ManagedSsoFields.SequenceEqual(ssoOwnership))
+                ssoOwnership = null;
+
             var groupChanges = ConfigurationGroups.Prepare(manifest, auth);
             var userChanges = preparedUsers ?? ConfigurationUsers.Prepare(manifest, auth, groupChanges, actor: creator, ldap: ldap, sso: sso);
             var staticSessions = preparedSessions ?? ConfigurationStaticSessions.Prepare(manifest, auth, userChanges);
@@ -877,7 +881,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 membership.Where(entry => !entry.Value).Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal));
             bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
                 !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
-            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null && sso is null)
+            if (changed.Count == 0 && !ownershipChanged && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null && sso is null && ssoOwnership is null)
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
@@ -887,6 +891,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 files.Add(ManifestOwnershipFile);
             if (ldapOwnership is not null)
                 files.Add(AuthManager.LdapOwnershipFile);
+            if (ssoOwnership is not null)
+                files.Add(AuthManager.SsoOwnershipFile);
             if (groupOwnership is not null)
                 files.Add(AuthManager.GroupOwnershipFile);
             if (userOwnership is not null)
@@ -973,7 +979,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         try
                         {
-                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, groupOwnership, userChanges, userOwnership, grants, permissionOwnership, staticSessions, sso, write =>
+                            auth.ApplyManifestAuth(membership, creator, ldap, ldapOwnership, groupChanges, groupOwnership, userChanges, userOwnership, grants, permissionOwnership, staticSessions, sso, ssoOwnership, write =>
                             {
                                 writeAuth = write;
                                 persist();

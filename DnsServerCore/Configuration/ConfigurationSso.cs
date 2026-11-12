@@ -45,13 +45,9 @@ namespace DnsServerCore.Configuration
                         desired.Add(scope);
                     }
                 }
-                if (desired.Count == 0)
-                    desired.UnionWith(_defaultScopes);
-                else
-                    desired.UnionWith(["openid", "profile"]);
-                if (desired.Count > byte.MaxValue)
+                scopes = NormalizeScopes(desired);
+                if (scopes.Count > byte.MaxValue)
                     throw new InvalidDataException($"{Path}/scopes: At most 255 scopes can be stored.");
-                scopes = desired;
             }
 
             var groups = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -136,6 +132,72 @@ namespace DnsServerCore.Configuration
             allowSignup = settings.AllowSignup, allowSignupOnlyForMappedUsers = settings.AllowSignupOnlyForMappedUsers,
             groupMap = settings.GroupMap?.OrderBy(entry => entry.Key, StringComparer.Ordinal).ToDictionary() ?? []
         }).AsObject();
+
+        internal static string[] GetOwnedFields(ConfigurationManifest manifest)
+        {
+            if (!IsDeclared(manifest))
+                return [];
+            var fields = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (JsonProperty field in manifest.Settings.GetProperty("auth").GetProperty("sso").EnumerateObject())
+            {
+                if (field.NameEquals("groupMap") && field.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (JsonProperty mapping in field.Value.EnumerateObject())
+                        fields.Add(ConfigurationPlan.AppendPath("groupMap", mapping.Name));
+                }
+                else
+                {
+                    fields.Add(field.Name);
+                }
+            }
+            return fields.ToArray();
+        }
+
+        internal static IReadOnlySet<string> NormalizeScopes(IEnumerable<string> scopes)
+        {
+            var result = new SortedSet<string>(scopes, StringComparer.Ordinal);
+            if (result.Count == 0)
+                result.UnionWith(_defaultScopes);
+            else
+                result.UnionWith(["openid", "profile"]);
+            return result;
+        }
+
+        internal static void CheckOwnership(Settings current, Settings desired, IReadOnlyList<string> fields)
+        {
+            if (fields.Count == 0)
+                return;
+            JsonObject before = Export(current);
+            JsonObject after = Export(desired);
+            foreach (string field in fields)
+            {
+                bool changed;
+                if (field == "clientSecret")
+                    changed = current.ClientSecret != desired.ClientSecret;
+                else if (field.StartsWith("groupMap/", StringComparison.Ordinal))
+                {
+                    string key = field["groupMap/".Length..].Replace("~1", "/").Replace("~0", "~");
+                    changed = !JsonNode.DeepEquals(before["groupMap"]?[key], after["groupMap"]?[key]);
+                }
+                else
+                    changed = !JsonNode.DeepEquals(before[field], after[field]);
+                if (changed)
+                    throw new InvalidDataException($"{Path}/{field}: SSO setting is managed by the configuration manifest.");
+            }
+        }
+
+        internal static void CheckGroupReference(Settings settings, IReadOnlyList<string> fields, string group)
+        {
+            if (fields.Count == 0 || settings.GroupMap is null)
+                return;
+            foreach (var (key, target) in settings.GroupMap)
+            {
+                string field = ConfigurationPlan.AppendPath("groupMap", key);
+                if (target.Equals(group, StringComparison.OrdinalIgnoreCase) &&
+                    (fields.Contains("groupMap") || fields.Contains(field)))
+                    throw new InvalidDataException($"{Path}/{field}: The managed SSO mapping references this group.");
+            }
+        }
 
         internal static bool Same(Settings current, Settings desired) =>
             current.ClientSecret == desired.ClientSecret && JsonNode.DeepEquals(Export(current), Export(desired));
