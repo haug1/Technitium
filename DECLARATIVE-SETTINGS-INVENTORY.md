@@ -292,3 +292,105 @@ Transfer expiry, IXFR history, validation failures, last modification timestamps
 ## Explicit allow and block entries
 
 `allowZones` and `blockZones` are sets of normalized DNS names, each initially empty. They map to the `allowed/*` and `blocked/*` APIs, including the bulk `allowedZones` and `blockedZones` inputs. Both apply live and transfer across the cluster. The blocked manager reads legacy `custom-blocked.config` when present. Downloaded blocklist contents belong to the blocklist cache. [Allow and block APIs](DnsServerCore/WebServiceOtherZonesApi.cs#L184) · [Allow persistence](DnsServerCore/Dns/ZoneManagers/AllowedZoneManager.cs#L123) · [Block persistence](DnsServerCore/Dns/ZoneManagers/BlockedZoneManager.cs#L123)
+
+## Authoritative records and DNSSEC
+
+`zones.<name>.records` holds operator-managed records. Use canonical owner name, record type, and normalized RDATA to identify entries, so an RRset can contain several records of the same type. Name and RDATA changes replace the corresponding identity. Apply changes through the zone manager to enforce owner containment, record type rules, and singleton or RRset constraints. The zone file stores each record with its authoritative metadata. Changes take effect live. [Record add](DnsServerCore/WebServiceZonesApi.cs#L3797) · [Record update](DnsServerCore/WebServiceZonesApi.cs#L4613) · [Zone persistence](DnsServerCore/Dns/ZoneManagers/AuthZoneManager.cs#L588)
+
+| Manifest field | API field or alias | Type, default, and validation |
+| --- | --- | --- |
+| `owner` | `domain`, `newDomain` | Canonical DNS name, required. The API's `zone` selects the enclosing zone. |
+| `type` | `type` | Record type, required. Preserve numeric unknown types. |
+| `ttl` | `ttl` | Unsigned seconds. Use the effective NS, SOA, or general zone default when creating a record without an explicit TTL. Export the effective value. |
+| `disabled` | `disable` | Boolean, false. Applies where the record supports disabling. |
+| `comments` | `comments` | Optional string, unset. |
+| `expiryTtl` | `expiryTtl` | Unsigned seconds, 0 for no expiry. Last-modified timestamp and expiry timer are runtime state. |
+| `glue` | `glue` | Address array, empty. Associated with NS RDATA. |
+| `useSerialDateScheme` | `useSerialDateScheme`, creation `useSoaSerialDateScheme` | Boolean on the SOA record, defaults to the server's authoritative setting for new primary zones. |
+| `autoIpv4Hint`, `autoIpv6Hint` | `autoIpv4Hint`, `autoIpv6Hint` | Booleans, false. Generated hints follow address records when enabled. |
+
+Record data is required unless the existing type permits empty fields. Use the existing RDATA constructors and zone parser for normalization and validation. The table identifies API inputs for the structured fields. Update inputs with `new` prefixes select the replacement value for the same field.
+
+| Record type | Data fields and legacy API inputs |
+| --- | --- |
+| A, AAAA | `ipAddress` or `value`, validated against the type's address family. Resolve the API-only `request-ip-address` input before exporting. |
+| NS, CNAME, PTR, DNAME, ANAME | DNS target from `nameServer`, `cname`, `ptrName`, `dname`, or `aname`. These also accept `value`. |
+| SOA | `primaryNameServer`, `responsiblePerson`, `serial`, `refresh`, `retry`, `expire`, and `minimum`. Export numeric values in seconds where applicable. |
+| MX | `preference`, `exchange` or `value`. |
+| TXT | Ordered byte strings from `characterStringsBase64`. Legacy `text` or `value` with `splitText` is an input alias. Preserve chunk boundaries and bytes. |
+| RP | `mailbox`, `txtDomain`, defaulting to the root. |
+| SRV | `priority`, `weight`, `port`, `target` or `value`. |
+| NAPTR | `naptrOrder`, `naptrPreference`, `naptrFlags`, `naptrServices`, `naptrRegexp`, `naptrReplacement`. |
+| DS | `keyTag`, `algorithm`, `digestType`, hexadecimal `digest` or `value`. |
+| SSHFP | `sshfpAlgorithm`, `sshfpFingerprintType`, hexadecimal `sshfpFingerprint`. |
+| TLSA | `tlsaCertificateUsage`, `tlsaSelector`, `tlsaMatchingType`, `tlsaCertificateAssociationData`. |
+| SVCB, HTTPS | `svcPriority`, `svcTargetName`, `svcParams`. Keep automatically generated hints derived when the corresponding flags are enabled. |
+| URI | `uriPriority`, `uriWeight`, `uri`. |
+| CAA | `flags`, `tag`, `value`. |
+| FWD | `forwarder` or `value`, `protocol` (UDP), `forwarderPriority` (0), `dnssecValidation` (false), `proxyType`, `proxyAddress`, `proxyPort`, `proxyUsername`, `proxyPassword`. Password uses a secret reference. Legacy API defaults to the server proxy where supported. |
+| APP | `appName` or `value`, `classPath`, `recordData` (empty). Treat plugin-owned data as opaque and provide a reference when it contains secrets. |
+| Other record types | Use standard zone-file RDATA where supported, or lossless raw RDATA for numeric unknown types. Legacy fallback uses `rdata`. |
+
+`overwrite`, `ptr`, `createPtrZone`, and `updateSvcbHints` control API operations. Reproduce the resulting configuration through the relevant records or auto-hint flags. Generated signing records, replicated records, and records maintained by runtime services need source-aware export and reconciliation so applying the manifest preserves live state.
+
+`zones.<name>.dnssec` describes signing intent for eligible primary zones. The signing and key lifecycle APIs validate algorithms, key formats, and state transitions. Keys are stored with zone metadata. Preserve existing key identity on reapply so a signing policy does not create a new key each time. [Signing API](DnsServerCore/WebServiceZonesApi.cs#L2124) · [Key management](DnsServerCore/WebServiceZonesApi.cs#L2580) · [Zone metadata](DnsServerCore/Dns/Zones/AuthZoneInfo.cs#L1223)
+
+| Manifest field under `dnssec` | API field or operation | Type, default, and validation |
+| --- | --- | --- |
+| `enabled` | sign and unsign | Boolean, false for new primary zones. |
+| `dnsKeyTtl` | `dnsKeyTtl`, DNSKEY TTL update `ttl` | Unsigned seconds, 3600 on signing. |
+| `proof.type` | `nxProof`, NSEC/NSEC3 conversions | Enum, NSEC by default. |
+| `proof.iterations`, `proof.saltLength` | `iterations`, `saltLength` | Unsigned 16-bit and 8-bit values, both default 0. Apply only to NSEC3 and validate with the signing manager. Salt contents are generated state. |
+| `keys` | signing and add-key inputs | Named keys with role, algorithm, hash or curve, applicable key size, and optional private-key reference. Maps `keyType`, `algorithm`, `hashAlgorithm`, `curve`, `keySize`, `kskKeySize`, `zskKeySize`, `pemKskPrivateKey`, `pemZskPrivateKey`, and `pemPrivateKey`. Use the existing supported algorithm combinations. |
+| `keys.<id>.rolloverDays` | `zskRolloverDays`, `rolloverDays` | 0–365 days for ZSKs, with 0 disabling automatic rollover. Initial signing defaults to 30 for a generated ZSK and 0 for an imported ZSK. |
+
+Publish, rollover, retire, and delete are lifecycle operations. Current key state, state-change timestamps, computed key tags, signatures, and denial records are derived or operational state. Private key material stays in referenced inputs.
+
+## Authentication, users, groups, and permissions
+
+`auth.config` version 4 stores users, groups, permission grants, sessions, OIDC SSO, and LDAP settings. Cluster transfer replaces users and groups and synchronizes global permission grants. Per-zone permissions also follow zone and catalog lifecycle rules. The manifest must preserve working administrative access and keep authentication state such as sessions, issued tokens, and prior login metadata in the existing store. [Auth writer](DnsServerCore/Auth/AuthManager.cs#L805) · [Cluster restore](DnsServerCore/Auth/AuthManager.cs#L746) · [User API](DnsServerCore/WebServiceAuthApi.cs#L1122) · [Permission API](DnsServerCore/WebServiceAuthApi.cs#L1665)
+
+| Proposed manifest path | API field or source | Type, default, and validation |
+| --- | --- | --- |
+| `auth.users.<username>` | `user`, `newUser`, local/SSO creation, LDAP signup | Named user, no additional users by default. Normalize through the username validator and enforce uniqueness. The built-in `admin` user and reserved group membership have lifecycle protections. |
+| `auth.users.<username>.type` | Local, SSO, or LDAP user creation path | Enum, Local for local creation. Distinguish local credentials from externally authenticated identities. |
+| `auth.users.<username>.displayName` | `displayName` | String, username on creation. Up to 255 characters. |
+| `auth.users.<username>.externalIdentifier` | `ssoIdentifier` | Required external identifier for explicitly provisioned SSO users. LDAP uses the directory username. |
+| `auth.users.<username>.password` | `pass`, `newPass`, bootstrap environment inputs | Secret reference for local users. Initial admin bootstrap uses `DNS_SERVER_ADMIN_PASSWORD` before `DNS_SERVER_ADMIN_PASSWORD_FILE`, then falls back to the built-in credential. Password hash, salt, and derived metadata remain in auth storage. |
+| `auth.users.<username>.passwordIterations` | `iterations` | Integer 100000–1000000, default 100000 for new or changed local passwords. |
+| `auth.users.<username>.totp.enabled` | `totpEnabled`, 2FA operations | Boolean, false. Supported for local and LDAP users. Enabling requires valid enrollment material. |
+| `auth.users.<username>.totp.enrollment` | Existing TOTP enrollment state | Optional secret reference for enrollment material. Preserve the destination's enrollment when unmanaged. Export a reference or a missing-input marker. |
+| `auth.users.<username>.disabled` | `disabled` | Boolean, false. Apply built-in user and administrative access protections. |
+| `auth.users.<username>.sessionTimeoutSeconds` | `sessionTimeoutSeconds`, user profile setter | Integer seconds, 1800. Range 0–604800. |
+| `auth.users.<username>.groups` | `memberOfGroups`, group-side `members` | Group name set. Keep one canonical membership representation. Built-in membership and external provider mappings can supply effective groups. |
+| `auth.groups.<name>` | `group`, `newGroup` | Named group. Preserve built-in groups. Names must be unique, nonempty, and at most 255 characters. |
+| `auth.groups.<name>.description` | `description` | String, empty. Up to 255 characters. |
+| `auth.permissions.<section>.users`, `auth.permissions.<section>.groups` | `section`, `userPermissions`, `groupPermissions` | Principal-to-permission maps. Reuse View, Modify, and Delete flags and built-in grants. Zone-level grants map to the zone resource. |
+| `auth.staticSessions` | `DNS_SERVER_AUTH_STATIC_SESSIONS` | Optional node-local map of configured credential references, empty. Each entry names an existing user and supplies a unique token through a reference. The legacy environment input uses a 64-character token. Generated sessions and API tokens are runtime state. |
+
+Local user and group changes apply through the authentication manager. OIDC enablement, authority, metadata, client configuration, and scope changes can restart the web service. LDAP settings affect subsequent authentication requests. On a fresh installation, provider environment inputs use the prefixes `DNS_SERVER_SSO_` and `DNS_SERVER_LDAP_` below. These provider settings are persisted and participate in cluster config transfer. [Provider defaults and bootstrap](DnsServerCore/Auth/AuthManager.cs#L260) · [OIDC API](DnsServerCore/WebServiceAuthApi.cs#L1829) · [LDAP API](DnsServerCore/WebServiceAuthApi.cs#L2080)
+
+| Proposed manifest path | API field | Environment suffix | Type, default, and validation |
+| --- | --- | --- | --- |
+| `auth.sso.enabled` | `ssoEnabled` | `ENABLED` | Boolean, false. Effective sign-in depends on usable provider configuration. |
+| `auth.sso.authority` | `ssoAuthority` | `AUTHORITY` | Optional HTTP or HTTPS URI, unset. Up to 255 characters. |
+| `auth.sso.clientId` | `ssoClientId` | `CLIENT_ID` | Optional string, unset. Up to 255 characters. |
+| `auth.sso.clientSecret` | `ssoClientSecret` | `CLIENT_SECRET`, `CLIENT_SECRET_FILE` | Optional secret reference, unset. Inline environment input takes precedence over the file. Masked API placeholder retains the existing secret. |
+| `auth.sso.metadataAddress` | `ssoMetadataAddress` | `METADATA_ADDRESS` | Optional HTTP or HTTPS URI, unset. Up to 255 characters. |
+| `auth.sso.scopes` | `ssoScopes` | `SCOPES` | Set, defaults to `openid`, `profile`, and `email`. Empty selects defaults. The setter supplies mandatory `openid` and `profile`. Up to 255 entries. |
+| `auth.sso.allowSignup` | `ssoAllowSignup` | `ALLOW_SIGNUP` | Boolean, false. |
+| `auth.sso.allowSignupOnlyForMappedUsers` | `ssoAllowSignupOnlyForMappedUsers` | `ALLOW_SIGNUP_ONLY_FOR_MAPPED_USERS` | Boolean, true. Applies to signup when enabled. |
+| `auth.sso.groupMap` | `ssoGroupMap` | `GROUP_MAP` | Map of external to local groups, unset. Up to 255 mappings. Validate referenced local groups. |
+| `auth.ldap.enabled` | `ldapEnabled` | `ENABLED` | Boolean, false. Requires a usable directory configuration. |
+| `auth.ldap.server` | `ldapServer` | `SERVER` | Optional directory host, unset. Up to 255 characters. |
+| `auth.ldap.port` | `ldapPort` | `PORT` | Integer port, 389. Range 1–65535. |
+| `auth.ldap.sslOption` | `ldapSslOption` | `SSL_OPTION` | Enum, None. Also accepts StartTLS or LDAPS. |
+| `auth.ldap.ignoreSslErrors` | `ldapIgnoreSslErrors` | `IGNORE_SSL_ERRORS` | Boolean, false. Applies to TLS certificate validation. |
+| `auth.ldap.bindUsername` | `ldapBindUsername` | `BIND_USERNAME` | Optional string, unset. Up to 255 characters. |
+| `auth.ldap.bindPassword` | `ldapBindPassword` | `BIND_PASSWORD`, `BIND_PASSWORD_FILE` | Optional secret reference, unset. Inline environment input takes precedence over the file. Masked API placeholder retains the existing secret. |
+| `auth.ldap.searchBase` | `ldapSearchBase` | `SEARCH_BASE` | Optional directory base, unset. Up to 255 characters. |
+| `auth.ldap.userSearchFilter` | `ldapUserSearchFilter` | `USER_SEARCH_FILTER` | Optional filter, unset. Up to 255 characters. |
+| `auth.ldap.groupAttribute` | `ldapGroupAttribute` | `GROUP_ATTRIBUTE` | Optional attribute name, unset. Up to 255 characters. |
+| `auth.ldap.allowSignup` | `ldapAllowSignup` | `ALLOW_SIGNUP` | Boolean, false. |
+| `auth.ldap.allowSignupOnlyForMappedUsers` | `ldapAllowSignupOnlyForMappedUsers` | `ALLOW_SIGNUP_ONLY_FOR_MAPPED_USERS` | Boolean, true. Applies to signup when enabled. |
+| `auth.ldap.groupMap` | `ldapGroupMap` | `GROUP_MAP` | Map of external to local groups, unset. Up to 255 mappings. Validate referenced local groups. |
