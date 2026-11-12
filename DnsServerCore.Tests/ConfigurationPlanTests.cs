@@ -452,6 +452,36 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ApplicableExportReproducesSettingsOnACleanInstance()
+        {
+            IPEndPoint endpoint;
+            string exported;
+            await using (var source = await LoopbackWebService.StartAsync())
+            {
+                LoopbackWebService.AssertOk(await source.CallAsync(
+                    "settings/set?maxLogFileDays=180&noStackTrace=true&useLocalTime=true&logFolder=archive", source.AdminToken));
+                JsonElement settings = await source.GetSettingsAsync();
+                endpoint = IPEndPoint.Parse(settings.GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
+                exported = ConfigurationPlan.Export(settings, includePreviewOnly: false).ToJsonString();
+            }
+
+            await using var destination = await LoopbackWebService.StartAsync();
+            string revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, revision));
+
+            await destination.RestartAsync();
+            await AssertListenerAnswersAsync(endpoint);
+            JsonElement applied = await destination.GetSettingsAsync();
+            Assert.Equal(exported, ConfigurationPlan.Export(applied, includePreviewOnly: false).ToJsonString());
+
+            JsonElement preview = await PreviewAsync(destination, exported);
+            Assert.Empty(preview.GetProperty("changes").EnumerateArray());
+            string unchangedRevision = preview.GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, unchangedRevision));
+            Assert.Equal(unchangedRevision, (await PreviewAsync(destination, exported)).GetProperty("revision").GetString());
+        }
+
+        [Fact]
         public void PreviewNormalizesSourcesAndResetsOptionalValues()
         {
             ConfigurationManifest manifest = Load("""

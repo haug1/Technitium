@@ -26,13 +26,13 @@ namespace DnsServerCore.Configuration
     public static class ConfigurationPlan
     {
         private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService,
-            Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false);
+            Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false);
 
         private const string DnsEndpointsPath = "/dns/localEndpoints";
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
-            [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }),
+            [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }, canApply: true),
             ["/dns/authoritative/defaultRecordTtl"] = Field("defaultRecordTtl", 3600),
             ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400),
             ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900),
@@ -46,11 +46,11 @@ namespace DnsServerCore.Configuration
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true),
-            ["/logging/destination"] = Field("loggingType", "File"),
-            ["/logging/folder"] = Field("logFolder", "logs"),
-            ["/logging/noStackTrace"] = Field("noStackTrace", false),
-            ["/logging/useLocalTime"] = Field("useLocalTime", false),
-            ["/logging/retentionDays"] = Field("maxLogFileDays", 365),
+            ["/logging/destination"] = Field("loggingType", "File", canApply: true),
+            ["/logging/folder"] = Field("logFolder", "logs", canApply: true),
+            ["/logging/noStackTrace"] = Field("noStackTrace", false, canApply: true),
+            ["/logging/useLocalTime"] = Field("useLocalTime", false, canApply: true),
+            ["/logging/retentionDays"] = Field("maxLogFileDays", 365, canApply: true),
             ["/logging/ignoreResolverLogs"] = Field("ignoreResolverLogs", false),
             ["/logging/logQueries"] = Field("logQueries", false),
             ["/statistics/inMemory"] = Field("enableInMemoryStats", false),
@@ -133,26 +133,24 @@ namespace DnsServerCore.Configuration
             {
                 if (section.Name is "schemaVersion" or "$schema")
                     continue;
-                if (section.Name == "dns")
-                {
-                    foreach (JsonProperty field in section.Value.EnumerateObject())
-                    {
-                        if (field.Name != "localEndpoints")
-                            throw new InvalidDataException($"/dns/{JsonEncodedText.Encode(field.Name)}: Applying this setting is not implemented.");
-                    }
-
-                    continue;
-                }
-
-                if (section.Name != "logging")
-                    throw new InvalidDataException($"/{JsonEncodedText.Encode(section.Name)}: Applying this section is not implemented.");
-
-                foreach (JsonProperty field in section.Value.EnumerateObject())
-                {
-                    if (field.Name is not ("destination" or "folder" or "noStackTrace" or "retentionDays" or "useLocalTime"))
-                        throw new InvalidDataException($"/logging/{JsonEncodedText.Encode(field.Name)}: Applying this setting is not implemented.");
-                }
+                CheckApplySupport(section.Value, AppendPath("", section.Name));
             }
+        }
+
+        private static void CheckApplySupport(JsonElement value, string path)
+        {
+            if (_settings.TryGetValue(path, out Setting setting) && setting.CanApply)
+                return;
+
+            if ((value.ValueKind == JsonValueKind.Object) &&
+                _settings.Any(entry => entry.Value.CanApply && entry.Key.StartsWith(path + "/", StringComparison.Ordinal)))
+            {
+                foreach (JsonProperty field in value.EnumerateObject())
+                    CheckApplySupport(field.Value, AppendPath(path, field.Name));
+                return;
+            }
+
+            throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Applying this setting is not implemented.");
         }
 
         private static JsonElement? GetLoggingValue(JsonElement logging, string name)
@@ -164,12 +162,17 @@ namespace DnsServerCore.Configuration
 
         public static JsonObject Export(JsonElement currentSettings)
         {
+            return Export(currentSettings, includePreviewOnly: true);
+        }
+
+        public static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly)
+        {
             RequireSettingsObject(currentSettings);
             var manifest = new JsonObject { ["schemaVersion"] = ConfigurationManifest.CurrentSchemaVersion };
 
             foreach (var (path, setting) in _settings.OrderBy(entry => entry.Key, StringComparer.Ordinal))
             {
-                if (setting.OmitFromExport)
+                if (setting.OmitFromExport || (!includePreviewOnly && !setting.CanApply))
                     continue;
 
                 JsonElement value = GetCurrentSetting(currentSettings, path, setting);
@@ -286,9 +289,9 @@ namespace DnsServerCore.Configuration
             return JsonSerializer.SerializeToElement(BlockListZoneManager.NormalizeBlockListUrls(urls));
         }
 
-        private static Setting Field<T>(string apiField, T defaultValue, bool restartWebService = false)
+        private static Setting Field<T>(string apiField, T defaultValue, bool restartWebService = false, bool canApply = false)
         {
-            return new Setting(apiField, JsonSerializer.SerializeToElement(defaultValue), restartWebService);
+            return new Setting(apiField, JsonSerializer.SerializeToElement(defaultValue), restartWebService, CanApply: canApply);
         }
 
         private static string AppendPath(string path, string name)

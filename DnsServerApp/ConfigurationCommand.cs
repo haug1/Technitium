@@ -33,17 +33,20 @@ namespace DnsServerApp
                         Console.WriteLine("Configuration applied.");
                         return 0;
 
-                    case "export" when args.Length == 3:
+                    case "export" when args.Length == 3 || (args.Length == 4 && args[3] == "--include-preview-only"):
+                        bool includePreviewOnly = args.Length == 4;
                         JsonElement snapshot = await ReadServerResponseAsync(ParseServerUrl(args[2]), "/api/settings/get");
-                        Console.WriteLine(ConfigurationPlan.Export(snapshot).ToJsonString(_exportOptions));
-                        Console.Error.WriteLine("Partial export of supported settings. Supply blocklist sources separately if needed.");
+                        Console.WriteLine(ConfigurationPlan.Export(snapshot, includePreviewOnly).ToJsonString(_exportOptions));
+                        Console.Error.WriteLine(includePreviewOnly
+                            ? "Partial export includes preview-only settings. Omitted blocklist source URLs may contain credentials."
+                            : "Partial export includes the settings supported by config apply.");
                         return 0;
 
                     default:
                         Console.Error.WriteLine("Usage: DnsServerApp config validate [manifest]");
                         Console.Error.WriteLine("       DnsServerApp config plan <manifest> <server-url>");
                         Console.Error.WriteLine("       DnsServerApp config apply <manifest> <server-url> <revision>");
-                        Console.Error.WriteLine("       DnsServerApp config export <server-url>");
+                        Console.Error.WriteLine("       DnsServerApp config export <server-url> [--include-preview-only]");
                         return 2;
                 }
             }

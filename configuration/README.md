@@ -58,7 +58,9 @@ The current preview covers DNS listener endpoints, authoritative DNS defaults, s
 
 ## Exporting supported settings
 
-Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config export https://dns.example.test > technitium.json` with the same token. The command writes stable manifest JSON for the supported preview fields. It omits blocklist source URLs because they can contain credentials, and reports the partial export on standard error. Supply those sources separately if the manifest needs to manage them.
+Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config export https://dns.example.test > technitium.json` with the same token. The command writes stable manifest JSON for fields supported by apply and reports the partial export on standard error. Use `--include-preview-only` after the server URL to include additional fields for inspection. The export omits blocklist source URLs because they can contain credentials.
+
+To reproduce the exported settings, validate the file, preview it against the destination, then apply using the destination revision. Check the declared DNS listener addresses and log directory against the destination host before applying.
 
 ## Applying DNS listener and logging settings
 
