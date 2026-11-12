@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Configuration;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -470,15 +471,15 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void SaveConfigFileInternal(Permission zonePermissions = null)
+        private void SaveConfigFileInternal(Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, zonePermissions);
-                if (zonePermissions is not null)
+                WriteConfigTo(fS, zonePermissions, ldap);
+                if (zonePermissions is not null || ldap is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -487,9 +488,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestZonePermissions(IReadOnlyDictionary<string, bool> membership, User creator, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, Action<Action> persist)
         {
-            if (membership.Count == 0)
+            if (membership.Count == 0 && ldap is null)
             {
                 persist(null);
                 return;
@@ -497,7 +498,7 @@ namespace DnsServerCore.Auth
 
             lock (_saveLock)
             {
-                Permission permissions = GetPermission(PermissionSection.Zones).CopySection();
+                Permission permissions = membership.Count == 0 ? null : GetPermission(PermissionSection.Zones).CopySection();
                 Group admins = GetGroup(Group.ADMINISTRATORS);
                 Group dnsAdmins = GetGroup(Group.DNS_ADMINISTRATORS);
                 foreach (var (name, create) in membership)
@@ -511,10 +512,31 @@ namespace DnsServerCore.Auth
                     permissions.SetSubItemPermission(name, dnsAdmins, PermissionFlag.ViewModifyDelete);
                 }
 
-                persist(() => SaveConfigFileInternal(permissions));
-                _permissions[PermissionSection.Zones] = permissions;
+                persist(() => SaveConfigFileInternal(permissions, ldap));
+                if (permissions is not null)
+                    _permissions[PermissionSection.Zones] = permissions;
+                if (ldap is not null)
+                {
+                    _ldapServer = ldap.Server;
+                    _ldapPort = ldap.Port;
+                    _ldapSslOption = ldap.SslOption;
+                    _ldapIgnoreSslErrors = ldap.IgnoreSslErrors;
+                    _ldapBindUsername = ldap.BindUsername;
+                    _ldapBindPassword = ldap.BindPassword;
+                    _ldapSearchBase = ldap.SearchBase;
+                    _ldapUserSearchFilter = ldap.UserSearchFilter;
+                    _ldapGroupAttribute = ldap.GroupAttribute;
+                    _ldapAllowSignup = ldap.AllowSignup;
+                    _ldapAllowSignupOnlyForMappedUsers = ldap.AllowSignupOnlyForMappedUsers;
+                    _ldapGroupMap = ldap.GroupMap?.Count > 0 ? ldap.GroupMap : null;
+                    _ldapEnabled = ldap.Enabled;
+                }
             }
         }
+
+        internal ConfigurationLdap.Settings GetManifestLdapSettings() => new(
+            _ldapEnabled, _ldapServer, _ldapPort, _ldapSslOption, _ldapIgnoreSslErrors, _ldapBindUsername, _ldapBindPassword,
+            _ldapSearchBase, _ldapUserSearchFilter, _ldapGroupAttribute, _ldapAllowSignup, _ldapAllowSignupOnlyForMappedUsers, _ldapGroupMap);
 
         public void SaveConfigFile(bool immediately = false)
         {
@@ -833,7 +855,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void WriteConfigTo(Stream s, Permission zonePermissions = null)
+        private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -906,28 +928,29 @@ namespace DnsServerCore.Auth
                 }
             }
 
-            bW.Write(_ldapEnabled);
-            s.WriteShortString(_ldapServer ?? "");
-            bW.Write(_ldapPort);
-            bW.Write((byte)_ldapSslOption);
-            bW.Write(_ldapIgnoreSslErrors);
-            s.WriteShortString(_ldapBindUsername ?? "");
-            s.WriteShortString(_ldapBindPassword ?? "");
-            s.WriteShortString(_ldapSearchBase ?? "");
-            s.WriteShortString(_ldapUserSearchFilter ?? "");
-            s.WriteShortString(_ldapGroupAttribute ?? "");
-            bW.Write(_ldapAllowSignup);
-            bW.Write(_ldapAllowSignupOnlyForMappedUsers);
+            ldap ??= GetManifestLdapSettings();
+            bW.Write(ldap.Enabled);
+            s.WriteShortString(ldap.Server ?? "");
+            bW.Write(ldap.Port);
+            bW.Write((byte)ldap.SslOption);
+            bW.Write(ldap.IgnoreSslErrors);
+            s.WriteShortString(ldap.BindUsername ?? "");
+            s.WriteShortString(ldap.BindPassword ?? "");
+            s.WriteShortString(ldap.SearchBase ?? "");
+            s.WriteShortString(ldap.UserSearchFilter ?? "");
+            s.WriteShortString(ldap.GroupAttribute ?? "");
+            bW.Write(ldap.AllowSignup);
+            bW.Write(ldap.AllowSignupOnlyForMappedUsers);
 
-            if ((_ldapGroupMap is null) || (_ldapGroupMap.Count == 0))
+            if ((ldap.GroupMap is null) || (ldap.GroupMap.Count == 0))
             {
                 bW.Write((byte)0);
             }
             else
             {
-                bW.Write(Convert.ToByte(_ldapGroupMap.Count));
+                bW.Write(Convert.ToByte(ldap.GroupMap.Count));
 
-                foreach (KeyValuePair<string, string> entry in _ldapGroupMap)
+                foreach (KeyValuePair<string, string> entry in ldap.GroupMap)
                 {
                     s.WriteShortString(entry.Key);
                     s.WriteShortString(entry.Value);

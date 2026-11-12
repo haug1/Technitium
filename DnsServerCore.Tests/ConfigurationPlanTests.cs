@@ -3266,6 +3266,52 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LdapManifestPersistsSettingsAndExportsWithoutTheBindPassword()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_LDAP_BIND_SECRET";
+            const string secret = "test-directory-bind-password";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, secret);
+            try
+            {
+                const string manifest = """
+                    {"schemaVersion":1,"auth":{"ldap":{
+                        "enabled":true,"server":"directory.test","port":636,"sslOption":"LDAPS",
+                        "bindUsername":"cn=reader,dc=example","bindPassword":{"environment":"TECHNITIUM_TEST_LDAP_BIND_SECRET"},
+                        "searchBase":"dc=example","groupMap":{"remote-dns":"DNS Administrators"}
+                    }}}
+                    """;
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change => change.GetProperty("path").ValueEquals("/auth/ldap/bindPassword"));
+                Assert.DoesNotContain(secret, preview.GetRawText());
+                string revision = preview.GetProperty("revision").GetString()!;
+
+                Environment.SetEnvironmentVariable(variable, "rotated-directory-bind-password");
+                Assert.Equal("error", (await ApplyAsync(server, manifest, revision)).GetProperty("status").GetString());
+                Environment.SetEnvironmentVariable(variable, secret);
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement response = export.GetProperty("response");
+                JsonElement ldap = response.GetProperty("manifest").GetProperty("auth").GetProperty("ldap");
+                Assert.True(ldap.GetProperty("enabled").GetBoolean());
+                Assert.Equal(636, ldap.GetProperty("port").GetInt32());
+                Assert.Equal("DNS Administrators", ldap.GetProperty("groupMap").GetProperty("remote-dns").GetString());
+                Assert.False(ldap.TryGetProperty("bindPassword", out _));
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/auth/ldap/bindPassword"));
+                Assert.DoesNotContain(secret, export.GetRawText());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task ZoneTransferKeysResolveAgainstCandidateAndRemainManaged()
         {
             await using var server = await LoopbackWebService.StartAsync();

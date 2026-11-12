@@ -789,8 +789,12 @@ namespace DnsServerCore.Dns.ZoneManagers
         internal bool OwnsManifestZoneField(string name, string field) =>
             _manifestOwnedZones.TryGetValue(name, out string[] fields) && fields.Contains(field, StringComparer.Ordinal);
 
-        internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZones(ConfigurationManifest manifest, AuthManager auth, User creator, IReadOnlyDictionary<string, TsigKey> tsigKeys)
+        internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneAndAuthChanges(ConfigurationManifest manifest, AuthManager auth, User creator,
+            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap)
         {
+            if (ldap is not null && ConfigurationLdap.Same(ldap, auth.GetManifestLdapSettings()))
+                ldap = null;
+
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
@@ -851,11 +855,11 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
                 !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
-            if (changed.Count == 0 && !ownershipChanged)
+            if (changed.Count == 0 && !ownershipChanged && ldap is null)
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
-            if (membership.Count > 0)
+            if (membership.Count > 0 || ldap is not null)
                 files.Add("auth.config");
             if (ownershipChanged)
                 files.Add(ManifestOwnershipFile);
@@ -937,7 +941,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         try
                         {
-                            auth.ApplyManifestZonePermissions(membership, creator, write =>
+                            auth.ApplyManifestAuth(membership, creator, ldap, write =>
                             {
                                 writeAuth = write;
                                 persist();

@@ -202,6 +202,8 @@ namespace DnsServerCore.Configuration
 
                 if (section.Name == "zones" && currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     CompareZones(section.Value, zones, changes);
+                else if (section.Name == "auth" && currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
+                    ConfigurationLdap.Compare(section.Value, ldap, changes);
                 else if (section.Name == "dhcp" && currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
                     ConfigurationDhcp.Compare(section.Value, scopes, changes);
                 else
@@ -277,6 +279,8 @@ namespace DnsServerCore.Configuration
                     dhcpOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestZoneOwnership", out JsonElement zoneOwnership))
                     zoneOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
+                    ldap.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
@@ -784,6 +788,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (ConfigurationLdap.IsDeclared(manifest))
+                throw new InvalidDataException("/auth/ldap: Applying LDAP settings to a cluster is not implemented.");
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
                 throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
             if (manifest.Settings.TryGetProperty("allowZones", out _) || manifest.Settings.TryGetProperty("blockZones", out _))
@@ -894,12 +900,12 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (path is "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationLdap.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
             if ((value.ValueKind == JsonValueKind.Object) &&
-                (path == "/dhcp" || _settings.Any(entry => entry.Value.CanApply && entry.Key.StartsWith(path + "/", StringComparison.Ordinal))))
+                (path is "/auth" or "/dhcp" || _settings.Any(entry => entry.Value.CanApply && entry.Key.StartsWith(path + "/", StringComparison.Ordinal))))
             {
                 foreach (JsonProperty field in value.EnumerateObject())
                     CheckApplySupport(field.Value, AppendPath(path, field.Name));

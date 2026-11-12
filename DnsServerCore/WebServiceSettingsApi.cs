@@ -583,6 +583,20 @@ namespace DnsServerCore
                         manifest.Add("zones", zones);
                 }
 
+                if (_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.View))
+                {
+                    ConfigurationLdap.Settings ldap = _dnsWebService._authManager.GetManifestLdapSettings();
+                    if (!ConfigurationLdap.Same(ldap, ConfigurationLdap.Default))
+                    {
+                        if (_dnsWebService._clusterManager.ClusterInitialized)
+                            missingInputs.Add(ConfigurationLdap.Path);
+                        else
+                            manifest.Add("auth", new System.Text.Json.Nodes.JsonObject { ["ldap"] = ConfigurationLdap.Export(ldap) });
+                        if (ldap.BindPassword is not null)
+                            missingInputs.Add(ConfigurationLdap.Path + "/bindPassword");
+                    }
+                }
+
                 if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
                 if (dns.Forwarders?.Count > 0 && manifest["dns"]?["forwarding"]?["servers"] is null)
@@ -698,7 +712,7 @@ namespace DnsServerCore
                         await _dnsWebService._dhcpServer.EnterManifestGateAsync(context.RequestAborted);
                         dhcpGate = true;
                     }
-                    var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
+                    var (proxy, dnsCertificate, webCertificate, tsig, ldap) = CheckApplyRevision(manifest, expected, sessionUser);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
 
@@ -716,7 +730,7 @@ namespace DnsServerCore
                     }
                     else
                     {
-                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate, zoneCreator: sessionUser);
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate, zoneCreator: sessionUser, ldap: ldap);
                     }
                 }
                 catch (InvalidDataException ex)
@@ -738,7 +752,7 @@ namespace DnsServerCore
                 }
             }
 
-            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
+            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig, ConfigurationLdap.Settings Ldap) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
                 if ((_dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList &&
                      !manifest.Settings.TryGetProperty("allowZones", out _) &&
@@ -757,7 +771,8 @@ namespace DnsServerCore
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
-                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot);
+                ConfigurationLdap.Settings ldap = PrepareLdapForSession(manifest, sessionUser);
+                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot, preparedLdap: ldap);
                 if (dhcpSnapshot is not null)
                 {
                     var changes = new List<ConfigurationChange>();
@@ -805,7 +820,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
                 ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, ConfigurationPlan.GetDnsBindings(manifest),
                     _dnsWebService._dnsServer.CaptureDnsBindings(), _dnsWebService._dnsServer.HasDnsListenerCertificate);
-                return (proxy, dnsCertificate, webCertificate, tsig);
+                return (proxy, dnsCertificate, webCertificate, tsig, ldap);
             }
 
             private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation, User sessionUser)
@@ -820,9 +835,9 @@ namespace DnsServerCore
                             await _dnsWebService._dhcpServer.EnterManifestGateAsync();
                         try
                         {
-                            var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
+                            var (proxy, dnsCertificate, webCertificate, tsig, ldap) = CheckApplyRevision(manifest, expected, sessionUser);
                             _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
-                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig, sessionUser);
+                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig, sessionUser, ldap);
                         }
                         finally
                         {
@@ -931,7 +946,16 @@ namespace DnsServerCore
                 return new ConfigurationDhcp.ScopeSnapshot(scopes, _dnsWebService._dhcpServer.Scopes);
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null)
+            private ConfigurationLdap.Settings PrepareLdapForSession(ConfigurationManifest manifest, User sessionUser)
+            {
+                if (manifest is null || !ConfigurationLdap.IsDeclared(manifest))
+                    return null;
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
+                    throw new DnsWebServiceException("Access was denied.");
+                return ConfigurationLdap.Prepare(manifest, _dnsWebService._authManager);
+            }
+
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
@@ -944,6 +968,9 @@ namespace DnsServerCore
                     foreach (string path in _dnsWebService._dhcpServer.ManagedPaths)
                         writer.WriteStringValue(path);
                     writer.WriteEndArray();
+                    ConfigurationLdap.Settings ldap = preparedLdap ?? PrepareLdapForSession(manifest, sessionUser);
+                    if (ldap is not null)
+                        ConfigurationLdap.WriteSnapshot(writer, _dnsWebService._authManager.GetManifestLdapSettings(), ldap, _configurationRevisionKey);
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
                     if (webCertificate.HasValue)
