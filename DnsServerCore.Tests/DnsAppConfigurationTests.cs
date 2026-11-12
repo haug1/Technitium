@@ -16,6 +16,30 @@ namespace DnsServerCore.Tests
     public sealed class DnsAppConfigurationTests
     {
         [Fact]
+        public async Task RemotePackagePreviewDoesNotDownloadAndFailedApplyLeavesTheAppAbsent()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            int port = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+            string manifest = $$$$$"""
+                {"schemaVersion":1,"apps":{"packages":{"RemoteFixture":{
+                    "source":{"url":"https://127.0.0.1:{{{{{port}}}}}/fixture.zip"},"version":"1.0"
+                }}}}
+                """;
+            using var previewBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement plan = await server.CallAsync("settings/config/plan", server.AdminToken, previewBody);
+            LoopbackWebService.AssertOk(plan);
+            Assert.Contains(plan.GetProperty("response").GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/apps/packages/RemoteFixture") &&
+                    change.GetProperty("kind").ValueEquals("Add"));
+            using var applyBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement applied = await server.CallAsync("settings/config/apply", server.AdminToken, applyBody,
+                plan.GetProperty("response").GetProperty("revision").GetString());
+            Assert.Equal("error", applied.GetProperty("status").GetString());
+            Assert.Contains("/apps/packages/RemoteFixture/source", applied.GetProperty("errorMessage").GetString());
+            Assert.False(Directory.Exists(Path.Combine(server.ConfigurationDirectory, "apps", "RemoteFixture")));
+        }
+
+        [Fact]
         public async Task AppConfigurationChangesDnsResponsesAndSurvivesRestart()
         {
             await using var server = await LoopbackWebService.StartAsync();

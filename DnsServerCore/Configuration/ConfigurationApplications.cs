@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -41,7 +42,7 @@ namespace DnsServerCore.Configuration
             return paths.ToArray();
         }
 
-        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false, string InstallName = null, byte[] Package = null, string Version = null, bool HasConfig = false)
+        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false, string InstallName = null, byte[] Package = null, string Version = null, bool HasConfig = false, Uri RemoteSource = null)
         {
             internal string Name => InstallName ?? Application.Name;
             internal string SettingPath => AppPath(Name) + (Remove || InstallName is not null ? "" : "/configuration");
@@ -75,31 +76,46 @@ namespace DnsServerCore.Configuration
                         entries.Add(Removal(installed));
                     continue;
                 }
-                if (item.Value.TryGetProperty("source", out JsonElement source) && source.ValueKind != JsonValueKind.Null &&
-                    (!source.TryGetProperty("file", out _) || manifest.FilePath is null))
-                    throw new InvalidDataException($"{path}/source: A local package requires a file reference in the startup manifest.");
+                Uri remoteSource = null;
+                if (item.Value.TryGetProperty("source", out JsonElement source) && source.ValueKind == JsonValueKind.Object)
+                {
+                    if (source.TryGetProperty("url", out JsonElement url))
+                    {
+                        if (!Uri.TryCreate(url.GetString(), UriKind.Absolute, out remoteSource) ||
+                            remoteSource.Scheme != Uri.UriSchemeHttps || remoteSource.Host.Length == 0 ||
+                            remoteSource.UserInfo.Length != 0 || remoteSource.Fragment.Length != 0)
+                            throw new InvalidDataException($"{path}/source: Expected an HTTPS URL without credentials or a fragment.");
+                    }
+                    else if (manifest.FilePath is null)
+                    {
+                        throw new InvalidDataException($"{path}/source: A local package requires a file reference in the startup manifest.");
+                    }
+                }
                 if (!manager.Applications.TryGetValue(item.Name, out DnsApplication app))
                 {
                     if (source.ValueKind != JsonValueKind.Object)
                         throw new InvalidDataException($"{path}: The DNS app is not installed and needs a package source.");
-                    byte[] package;
-                    try
+                    byte[] package = null;
+                    if (remoteSource is null)
                     {
-                        using FileStream input = OpenLocalSource(manifest, source, path + "/source");
-                        using var copy = new MemoryStream();
-                        input.CopyTo(copy);
-                        package = copy.ToArray();
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
-                    {
-                        throw new InvalidDataException($"{path}/source: Could not read the app package.");
+                        try
+                        {
+                            using FileStream input = OpenLocalSource(manifest, source, path + "/source");
+                            using var copy = new MemoryStream();
+                            input.CopyTo(copy);
+                            package = copy.ToArray();
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
+                        {
+                            throw new InvalidDataException($"{path}/source: Could not read the app package.");
+                        }
                     }
 
                     string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
                     if (pin is not null && !System.Version.TryParse(pin, out _))
                         throw new InvalidDataException($"{path}/version: Invalid app version.");
                     entries.Add(new Entry(null, null, ReadConfig(item.Value, null, path), InstallName: item.Name,
-                        Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _)));
+                        Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _), RemoteSource: remoteSource));
                     continue;
                 }
                 if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null &&
@@ -242,6 +258,24 @@ namespace DnsServerCore.Configuration
                     if (!ReferenceEquals(current, entry.Application) || (current is not null && current.ReadManifestConfig() != entry.Before))
                         throw new InvalidDataException($"{entry.SettingPath}: The app changed during apply. Create a new preview.");
                 }
+                var packages = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+                foreach (Entry entry in entries.Where(entry => entry.InstallName is not null))
+                {
+                    if (entry.RemoteSource is null)
+                    {
+                        packages.Add(entry.Name, entry.Package);
+                        continue;
+                    }
+                    try
+                    {
+                        packages.Add(entry.Name, await manager.DownloadManifestPackageAsync(entry.RemoteSource));
+                    }
+                    catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or OperationCanceledException)
+                    {
+                        throw new InvalidDataException($"{entry.SettingPath}/source: Could not download the app package.");
+                    }
+                }
+
                 Entry[] changed = entries.Where(entry => entry.InstallName is null && !entry.Remove && entry.Before != entry.After).ToArray();
                 Entry[] removals = entries.Where(entry => entry.Remove).ToArray();
                 string[] files = changed.Select(entry => entry.FileName).ToArray();
@@ -264,7 +298,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (Entry entry in entries.Where(entry => entry.InstallName is not null))
                 {
-                    DnsApplication app = await manager.InstallManifestAppAsync(entry.Name, entry.Package, entry.Version,
+                    DnsApplication app = await manager.InstallManifestAppAsync(entry.Name, packages[entry.Name], entry.Version,
                         entry.After, entry.HasConfig);
                     installed.Add(app);
                 }

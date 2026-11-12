@@ -512,6 +512,41 @@ namespace DnsServerCore.Dns.Applications
 
         internal void PublishManifestOwnership(string[] paths) => _manifestOwnedPaths = paths;
 
+        internal async Task<byte[]> DownloadManifestPackageAsync(Uri uri)
+        {
+            using var handler = new HttpClientNetworkHandler
+            {
+                Proxy = _dnsServer.Proxy,
+                NetworkType = HttpClientNetworkHandler.GetNetworkType(_dnsServer.IPv6Mode),
+                DnsClient = _dnsServer
+            };
+            handler.InnerHandler.AllowAutoRedirect = false;
+            using var client = new HttpClient(handler, disposeHandler: false);
+            return await DownloadManifestPackageAsync(client, uri);
+        }
+
+        internal static async Task<byte[]> DownloadManifestPackageAsync(HttpClient client, Uri uri)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            for (int redirects = 0; redirects <= 10; redirects++)
+            {
+                if (uri.Scheme != Uri.UriSchemeHttps || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+                    throw new InvalidDataException("An app package must use HTTPS without credentials or a fragment.");
+
+                using HttpResponseMessage response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308 &&
+                    response.Headers.Location is Uri location)
+                {
+                    uri = location.IsAbsoluteUri ? location : new Uri(uri, location);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsByteArrayAsync(timeout.Token);
+            }
+            throw new InvalidDataException("The app package download exceeded the redirect limit.");
+        }
+
         internal async Task<DnsApplication> InstallManifestAppAsync(string name, byte[] package, string version, string config, bool hasConfig)
         {
             string path = ConfigurationApplications.AppPath(name);
