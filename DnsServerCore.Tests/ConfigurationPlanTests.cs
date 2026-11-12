@@ -4404,6 +4404,60 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ServiceRecordHintsFollowTheDeclaredAddressRecords()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"hints.test":{"type":"Primary","records":[
+                    {"owner":"www.hints.test","type":"HTTPS","autoIpv4Hint":true,"autoIpv6Hint":true,
+                     "data":{"zoneFile":"1 . alpn=h2"}},
+                    {"owner":"www.hints.test","type":"A","data":{"zoneFile":"192.0.2.42"}},
+                    {"owner":"www.hints.test","type":"AAAA","data":{"zoneFile":"2001:db8::42"}}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await AssertHintsAsync(server, "192.0.2.42", "2001:db8::42");
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            string changed = manifest.Replace("192.0.2.42", "192.0.2.43", StringComparison.Ordinal)
+                .Replace("\"type\":\"AAAA\",", "\"type\":\"AAAA\",\"disabled\":true,", StringComparison.Ordinal);
+            JsonElement plan = await PreviewAsync(server, changed);
+            Assert.Contains(plan.GetProperty("changes").EnumerateArray(), change =>
+                change.GetProperty("path").ValueEquals("/zones/hints.test/records/0"));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, changed, plan.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            await AssertHintsAsync(server, "192.0.2.43", null);
+
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zone = export.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("hints.test");
+            JsonElement service = Assert.Single(zone.GetProperty("records").EnumerateArray(),
+                record => record.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.HTTPS);
+            Assert.True(service.GetProperty("autoIpv4Hint").GetBoolean());
+            Assert.True(service.GetProperty("autoIpv6Hint").GetBoolean());
+
+            await using var restored = await LoopbackWebService.StartAsync();
+            string exported = $$"""{"schemaVersion":1,"zones":{"hints.test":{{zone.GetRawText()}} } }""";
+            revision = (await PreviewAsync(restored, exported)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(restored, exported, revision));
+            await AssertHintsAsync(restored, "192.0.2.43", null);
+            Assert.Empty((await PreviewAsync(restored, exported)).GetProperty("changes").EnumerateArray());
+
+            static async Task AssertHintsAsync(LoopbackWebService service, string ipv4, string? ipv6)
+            {
+                var answer = Assert.Single((await service.QueryAsync("www.hints.test", DnsResourceRecordType.HTTPS)).Answer);
+                var data = Assert.IsType<DnsSVCBRecordData>(answer.RDATA);
+                Assert.True(data.SvcParams.ContainsKey(DnsSvcParamKey.ALPN));
+                Assert.Equal(IPAddress.Parse(ipv4), Assert.Single(Assert.IsType<DnsSvcIPv4HintParamValue>(data.SvcParams[DnsSvcParamKey.IPv4Hint]).Addresses));
+                if (ipv6 is null)
+                    Assert.False(data.SvcParams.ContainsKey(DnsSvcParamKey.IPv6Hint));
+                else
+                    Assert.Equal(IPAddress.Parse(ipv6), Assert.Single(Assert.IsType<DnsSvcIPv6HintParamValue>(data.SvcParams[DnsSvcParamKey.IPv6Hint]).Addresses));
+            }
+        }
+
+        [Fact]
         public async Task ZoneGlueAppliesExportsAndClears()
         {
             await using var server = await LoopbackWebService.StartAsync();

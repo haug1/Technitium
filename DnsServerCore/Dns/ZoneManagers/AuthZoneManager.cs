@@ -1198,7 +1198,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         DnsResourceRecord record = edit.Existing is null
                             ? new DnsResourceRecord(edit.Owner, edit.Type, DnsClass.IN, ttl, edit.Data)
-                            : CopyRecord(edit.Existing, ttl, edit.Type == DnsResourceRecordType.SOA ? edit.Data : null);
+                            : CopyRecord(edit.Existing, ttl, edit.Data is DnsSOARecordData or DnsSVCBRecordData ? edit.Data : null);
                         GenericRecordInfo info = record.GetAuthGenericRecordInfo();
                         if (edit.Disabled.HasValue)
                             info.Disabled = edit.Disabled.Value;
@@ -1213,6 +1213,12 @@ namespace DnsServerCore.Dns.ZoneManagers
                             record.SetGlueRecords(edit.Glue);
                         if (edit.UseSerialDateScheme.HasValue)
                             record.GetAuthSOARecordInfo().UseSoaSerialDateScheme = edit.UseSerialDateScheme.Value;
+                        if (edit.Data is DnsSVCBRecordData)
+                        {
+                            SVCBRecordInfo hints = record.GetAuthSVCBRecordInfo();
+                            hints.AutoIpv4Hint = edit.AutoIpv4Hint;
+                            hints.AutoIpv6Hint = edit.AutoIpv6Hint;
+                        }
                         replacement.Add(record);
                     }
                     if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count > 1)

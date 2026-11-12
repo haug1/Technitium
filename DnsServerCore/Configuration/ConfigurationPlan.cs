@@ -1475,7 +1475,7 @@ namespace DnsServerCore.Configuration
 
         internal sealed record ZoneRecordEdit(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data,
             DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, IPAddress[] Glue,
-            bool? UseSerialDateScheme, ConfigurationChangeKind? Kind);
+            bool? UseSerialDateScheme, ConfigurationChangeKind? Kind, bool AutoIpv4Hint = false, bool AutoIpv6Hint = false);
 
         internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
             JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords) =>
@@ -1496,7 +1496,8 @@ namespace DnsServerCore.Configuration
                 string recordPath = $"{path}/{index}";
                 foreach (JsonProperty field in record.EnumerateObject())
                 {
-                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments" or "expiryTtl" or "glue" or "useSerialDateScheme"))
+                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments" or "expiryTtl" or "glue" or
+                        "useSerialDateScheme" or "autoIpv4Hint" or "autoIpv6Hint"))
                         throw new InvalidDataException($"{AppendPath(recordPath, field.Name)}: Planning for this record setting is not implemented.");
                 }
 
@@ -1523,11 +1524,20 @@ namespace DnsServerCore.Configuration
                 declaresSoa |= isSoa;
                 if (!isSoa && IsGeneratedRecord(zoneName, serverDomain, owner, type, rdata))
                     throw new InvalidDataException($"{recordPath}: This record is managed by the zone lifecycle.");
+                bool? autoIpv4 = record.TryGetProperty("autoIpv4Hint", out JsonElement ipv4) ? ipv4.GetBoolean() : null;
+                bool? autoIpv6 = record.TryGetProperty("autoIpv6Hint", out JsonElement ipv6) ? ipv6.GetBoolean() : null;
+                if (rdata is DnsSVCBRecordData service)
+                    rdata = WithoutAutomaticHints(service, autoIpv4 == true, autoIpv6 == true);
                 if (!declared.Add((owner, type, rdata)))
                     throw new InvalidDataException($"{recordPath}: Duplicate record.");
 
                 DnsResourceRecord existing = current[(owner, type)].FirstOrDefault(candidate => candidate.Class == DnsClass.IN &&
-                    (isSoa || candidate.RDATA.Equals(rdata)));
+                    (isSoa || SameRecordData(candidate)));
+                if (existing is not null && matched.Contains(existing))
+                    throw new InvalidDataException($"{recordPath}: Duplicate record.");
+                var existingHints = existing?.Tag as SVCBRecordInfo;
+                bool effectiveAutoIpv4 = autoIpv4 ?? existingHints?.AutoIpv4Hint ?? false;
+                bool effectiveAutoIpv6 = autoIpv6 ?? existingHints?.AutoIpv6Hint ?? false;
                 uint? ttl = record.TryGetProperty("ttl", out JsonElement ttlValue) ? decimal.ToUInt32(ttlValue.GetDecimal()) : null;
                 if (rdata is DnsSOARecordData soa &&
                     (soa.Retry > soa.Refresh || soa.Refresh > soa.Expire || (ttl ?? existing?.OriginalTtlValue) > soa.Expire))
@@ -1562,6 +1572,8 @@ namespace DnsServerCore.Configuration
                     bool usesDateScheme = metadata is SOARecordInfo { UseSoaSerialDateScheme: true };
                     if ((isSoa && SoaNeedsUpdate((DnsSOARecordData)existing.RDATA, (DnsSOARecordData)rdata, useSerialDateScheme ?? usesDateScheme)) ||
                         (useSerialDateScheme.HasValue && useSerialDateScheme.Value != usesDateScheme) ||
+                        (effectiveAutoIpv4 != (existingHints?.AutoIpv4Hint ?? false)) ||
+                        (effectiveAutoIpv6 != (existingHints?.AutoIpv6Hint ?? false)) ||
                         (ttl.HasValue && ttl.Value != existing.OriginalTtlValue) ||
                         (disabled.HasValue && disabled.Value != (metadata?.Disabled ?? false)) ||
                         (comments is not null && comments != (metadata?.Comments ?? string.Empty)) ||
@@ -1570,8 +1582,19 @@ namespace DnsServerCore.Configuration
                             (metadata as NSRecordInfo)?.GlueRecords?.Select(address => address.RDATA.ToString()) ?? [], StringComparer.Ordinal)))
                         kind = ConfigurationChangeKind.Update;
                 }
-                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, expiry, glue, useSerialDateScheme, kind));
+                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, expiry, glue,
+                    useSerialDateScheme, kind, effectiveAutoIpv4, effectiveAutoIpv6));
                 index++;
+
+                bool SameRecordData(DnsResourceRecord candidate)
+                {
+                    if (candidate.RDATA is not DnsSVCBRecordData svc || rdata is not DnsSVCBRecordData desired)
+                        return candidate.RDATA.Equals(rdata);
+                    bool normalizeIpv4 = autoIpv4 == true || candidate.Tag is SVCBRecordInfo { AutoIpv4Hint: true };
+                    bool normalizeIpv6 = autoIpv6 == true || candidate.Tag is SVCBRecordInfo { AutoIpv6Hint: true };
+                    return WithoutAutomaticHints(svc, normalizeIpv4, normalizeIpv6)
+                        .Equals(WithoutAutomaticHints(desired, normalizeIpv4, normalizeIpv6));
+                }
             }
 
             foreach (DnsResourceRecord record in currentRecords)
@@ -1587,6 +1610,7 @@ namespace DnsServerCore.Configuration
                 }
             }
 
+            ReconcileAutomaticHints(changes, currentRecords);
             return changes;
 
             static bool SoaNeedsUpdate(DnsSOARecordData current, DnsSOARecordData desired, bool usesDateScheme) =>
@@ -1595,6 +1619,67 @@ namespace DnsServerCore.Configuration
                 current.Refresh != desired.Refresh || current.Retry != desired.Retry || current.Expire != desired.Expire ||
                 current.Minimum != desired.Minimum ||
                 !usesDateScheme && desired.Serial > current.Serial;
+        }
+
+        internal static DnsSVCBRecordData WithoutAutomaticHints(DnsSVCBRecordData data, bool autoIpv4, bool autoIpv6)
+        {
+            if (!autoIpv4 && !autoIpv6)
+                return data;
+            var parameters = new Dictionary<DnsSvcParamKey, DnsSvcParamValue>(data.SvcParams);
+            if (autoIpv4)
+                parameters.Remove(DnsSvcParamKey.IPv4Hint);
+            if (autoIpv6)
+                parameters.Remove(DnsSvcParamKey.IPv6Hint);
+            return new DnsSVCBRecordData(data.SvcPriority, data.TargetName, parameters);
+        }
+
+        private static void ReconcileAutomaticHints(List<ZoneRecordEdit> changes, IReadOnlyList<DnsResourceRecord> currentRecords)
+        {
+            if (!changes.Any(edit => edit.AutoIpv4Hint || edit.AutoIpv6Hint))
+                return;
+
+            var addresses = changes
+                .Where(edit => edit.Type is DnsResourceRecordType.A or DnsResourceRecordType.AAAA &&
+                    edit.Kind != ConfigurationChangeKind.Remove &&
+                    !(edit.Disabled ?? (edit.Existing?.Tag is GenericRecordInfo { Disabled: true })))
+                .Select(edit => (edit.Owner, edit.Type, edit.Data))
+                .Concat(currentRecords.Where(record => record.Type == DnsResourceRecordType.A &&
+                    IsLeaseRecord(record) && record.Tag is not GenericRecordInfo { Disabled: true })
+                    .Select(record => (Owner: record.Name.ToLowerInvariant(), record.Type, Data: record.RDATA)))
+                .ToLookup(record => (record.Owner, record.Type), record => record.Data);
+
+            for (int index = 0; index < changes.Count; index++)
+            {
+                ZoneRecordEdit edit = changes[index];
+                if (!edit.AutoIpv4Hint && !edit.AutoIpv6Hint)
+                    continue;
+                var svc = WithoutAutomaticHints((DnsSVCBRecordData)edit.Data, edit.AutoIpv4Hint, edit.AutoIpv6Hint);
+                var parameters = new Dictionary<DnsSvcParamKey, DnsSvcParamValue>(svc.SvcParams);
+                string target = svc.TargetName.Length == 0 ? (svc.SvcPriority == 0 ? null : edit.Owner) : svc.TargetName.ToLowerInvariant();
+                if (target is not null)
+                {
+                    if (edit.AutoIpv4Hint)
+                    {
+                        IPAddress[] hints = addresses[(target, DnsResourceRecordType.A)].Cast<DnsARecordData>().Select(record => record.Address)
+                            .Distinct().OrderBy(address => address.ToString(), StringComparer.Ordinal).ToArray();
+                        if (hints.Length > 0)
+                            parameters[DnsSvcParamKey.IPv4Hint] = new DnsSvcIPv4HintParamValue(hints);
+                    }
+                    if (edit.AutoIpv6Hint)
+                    {
+                        IPAddress[] hints = addresses[(target, DnsResourceRecordType.AAAA)].Cast<DnsAAAARecordData>().Select(record => record.Address)
+                            .Distinct().OrderBy(address => address.ToString(), StringComparer.Ordinal).ToArray();
+                        if (hints.Length > 0)
+                            parameters[DnsSvcParamKey.IPv6Hint] = new DnsSvcIPv6HintParamValue(hints);
+                    }
+                }
+                var data = new DnsSVCBRecordData(svc.SvcPriority, svc.TargetName, parameters);
+                changes[index] = edit with
+                {
+                    Data = data,
+                    Kind = edit.Kind ?? (data.Equals(edit.Existing.RDATA) ? null : ConfigurationChangeKind.Update)
+                };
+            }
         }
 
         internal static bool IsGeneratedRecord(string zoneName, string serverDomain, string owner, DnsResourceRecordType type, DnsResourceRecordData data)

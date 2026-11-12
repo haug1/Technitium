@@ -617,6 +617,9 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{DisplayPath(recordPath)}: SOA must be an enabled apex record without expiry.");
                     if (record.TryGetProperty("useSerialDateScheme", out _) && type != DnsResourceRecordType.SOA)
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/useSerialDateScheme")}: A serial date scheme requires an SOA record.");
+                    if (type is not (DnsResourceRecordType.SVCB or DnsResourceRecordType.HTTPS) &&
+                        (record.TryGetProperty("autoIpv4Hint", out _) || record.TryGetProperty("autoIpv6Hint", out _)))
+                        throw new InvalidDataException($"{DisplayPath(recordPath)}: Automatic address hints require an SVCB or HTTPS record.");
                     if (record.TryGetProperty("glue", out _) && type != DnsResourceRecordType.NS)
                         throw new InvalidDataException($"{DisplayPath(recordPath + "/glue")}: Glue addresses require an NS record.");
                     JsonElement data = record.GetProperty("data");

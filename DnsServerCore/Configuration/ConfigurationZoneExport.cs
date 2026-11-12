@@ -72,7 +72,8 @@ namespace DnsServerCore.Configuration
 
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
-            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl, string[] Glue, bool? UseSerialDateScheme)>();
+            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
+                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -81,8 +82,7 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 var info = record.Tag as GenericRecordInfo;
-                if (record.Class != DnsClass.IN || record.Type is DnsResourceRecordType.APP or DnsResourceRecordType.FWD ||
-                    info is SVCBRecordInfo { AutoIpv4Hint: true } or SVCBRecordInfo { AutoIpv6Hint: true })
+                if (record.Class != DnsClass.IN || record.Type is DnsResourceRecordType.APP or DnsResourceRecordType.FWD)
                 {
                     missingInputs.Add(path + "/records");
                     return null;
@@ -90,8 +90,12 @@ namespace DnsServerCore.Configuration
 
                 using var wire = new MemoryStream();
                 DnsResourceRecordData data = record.RDATA;
+                bool autoIpv4 = info is SVCBRecordInfo { AutoIpv4Hint: true };
+                bool autoIpv6 = info is SVCBRecordInfo { AutoIpv6Hint: true };
                 if (data is DnsSOARecordData soa)
                     data = new DnsSOARecordData(soa.PrimaryNameServer, soa.ResponsiblePerson, 0, soa.Refresh, soa.Retry, soa.Expire, soa.Minimum);
+                else if (data is DnsSVCBRecordData svc)
+                    data = ConfigurationPlan.WithoutAutomaticHints(svc, autoIpv4, autoIpv6);
                 data.WriteTo(wire);
                 string hex = Convert.ToHexString(wire.GetBuffer().AsSpan(sizeof(ushort), (int)wire.Length - sizeof(ushort)));
                 string owner = record.Name.ToLowerInvariant();
@@ -128,7 +132,7 @@ namespace DnsServerCore.Configuration
 
                 entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false,
                     info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue,
-                    record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null));
+                    record.Type == DnsResourceRecordType.SOA ? info is SOARecordInfo { UseSoaSerialDateScheme: true } : null, autoIpv4, autoIpv6));
             }
 
             var exported = new JsonArray();
@@ -149,6 +153,10 @@ namespace DnsServerCore.Configuration
                     record["glue"] = JsonSerializer.SerializeToNode(entry.Glue);
                 if (entry.UseSerialDateScheme.HasValue)
                     record["useSerialDateScheme"] = entry.UseSerialDateScheme.Value;
+                if (entry.AutoIpv4Hint)
+                    record["autoIpv4Hint"] = true;
+                if (entry.AutoIpv6Hint)
+                    record["autoIpv6Hint"] = true;
                 exported.Add(record);
             }
             return exported;
