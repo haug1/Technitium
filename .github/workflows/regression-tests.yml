@@ -56,6 +56,12 @@ jobs:
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer
         run: dotnet run --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json
+      - name: Verify declarative settings propagate between cluster nodes
+        working-directory: DnsServer
+        timeout-minutes: 8
+        run: |
+          dotnet publish DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-build"
+          python3 DnsServerCore.Tests/mixed_cluster.py "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" --propagation
       - uses: actions/upload-artifact@v7
         if: always()
         with:

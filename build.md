@@ -51,6 +51,8 @@ To verify propagation, use the same build for both nodes. This mode configures t
 python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll --propagation
 ```
 
+The GitHub Actions regression workflow publishes the current console host and runs the same-build propagation fixture.
+
 ## For Windows
 
 To build the Technitium DNS Server Windows Setup, you need to install [Microsoft Visual Studio Community](https://visualstudio.microsoft.com/vs/) and [Inno Setup](https://jrsoftware.org/isinfo.php) on your computer. Once you have it installed, follow the steps below:
