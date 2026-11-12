@@ -4890,6 +4890,10 @@ namespace DnsServerCore
 
                             if ((zoneInfo.Type == AuthZoneType.Primary) && zoneInfo.Name.Equals(domain, StringComparison.OrdinalIgnoreCase) && _dnsWebService._clusterManager.ClusterInitialized && _dnsWebService._clusterManager.IsClusterCatalogZone(zoneInfo.CatalogZoneName))
                             {
+                                if (_dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(zoneInfo.Name, "catalog/apexNameServerTtl") &&
+                                    zoneInfo.ApexZone.GetRecords(DnsResourceRecordType.NS).Any(record => record.OriginalTtlValue != ttl))
+                                    throw new DnsWebServiceException($"{AuthZoneManager.GetManifestZonePath(zoneInfo.Name)}/catalog/apexNameServerTtl: The apex name server TTL is managed by the configuration manifest.");
+
                                 if (disable)
                                     throw new DnsWebServiceException("Cannot disable NS records for Primary zones that are members of the Cluster Catalog zone. These NS records are automatically managed by the Cluster and only their TTL values can be updated.");
 

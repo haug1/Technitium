@@ -126,9 +126,17 @@ namespace DnsServerCore.Configuration
                     {
                         var apexNameServers = records.Where(record => record.Type == DnsResourceRecordType.NS &&
                             record.Name.Equals(zone.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
-                        replaceApexNameServers = apexNameServers.Length == 0 ||
-                            apexNameServers.Any(record => !ConfigurationPlan.IsGeneratedRecord(zone.Name, dns.ServerDomain, record.Name, record.Type, record.RDATA) ||
-                                HasCustomizedNameServer(record, defaultNsTtl));
+                        if (canExportClusterCatalogMember(zone))
+                        {
+                            declaration["catalog"]["apexNameServerTtl"] = apexNameServers.FirstOrDefault()?.OriginalTtlValue ?? defaultNsTtl;
+                            records.RemoveAll(record => record.Type == DnsResourceRecordType.NS && record.Name.Equals(zone.Name, StringComparison.OrdinalIgnoreCase));
+                        }
+                        else
+                        {
+                            replaceApexNameServers = apexNameServers.Length == 0 ||
+                                apexNameServers.Any(record => !ConfigurationPlan.IsGeneratedRecord(zone.Name, dns.ServerDomain, record.Name, record.Type, record.RDATA) ||
+                                    HasCustomizedNameServer(record, defaultNsTtl));
+                        }
                     }
                     JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, defaultNsTtl, replaceApexNameServers, path, records, missingInputs);
                     if (exportedRecords is not null)

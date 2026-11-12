@@ -1723,7 +1723,7 @@ namespace DnsServerCore.Cluster
             uint ttl;
 
             if (existingNSRecords.Count > 0)
-                ttl = existingNSRecords[0].TTL;
+                ttl = existingNSRecords[0].OriginalTtlValue;
             else
                 ttl = _dnsWebService.DnsServer.AuthZoneManager.DefaultNsRecordTtl;
 
@@ -1744,8 +1744,17 @@ namespace DnsServerCore.Cluster
                 DnsResourceRecord existingSoaRecord = existingSoaRecords[0];
                 DnsSOARecordData existingSoa = existingSoaRecord.RDATA as DnsSOARecordData;
 
-                //set SOA record
-                _dnsWebService.DnsServer.AuthZoneManager.SetRecords(zoneInfo.Name, [new DnsResourceRecord(zoneInfo.Name, DnsResourceRecordType.SOA, DnsClass.IN, existingSoaRecord.TTL, new DnsSOARecordData(_dnsWebService.DnsServer.ServerDomain, existingSoa.ResponsiblePerson, existingSoa.Serial, existingSoa.Refresh, existingSoa.Retry, existingSoa.Expire, existingSoa.Minimum))]);
+                string serverDomain = _dnsWebService.DnsServer.ServerDomain;
+                if (!existingSoa.PrimaryNameServer.Equals(serverDomain, StringComparison.OrdinalIgnoreCase))
+                {
+                    var soa = new DnsResourceRecord(zoneInfo.Name, DnsResourceRecordType.SOA, DnsClass.IN, existingSoaRecord.OriginalTtlValue,
+                        new DnsSOARecordData(serverDomain, existingSoa.ResponsiblePerson, existingSoa.Serial, existingSoa.Refresh, existingSoa.Retry, existingSoa.Expire, existingSoa.Minimum));
+                    var previous = existingSoaRecord.GetAuthSOARecordInfo();
+                    var next = soa.GetAuthSOARecordInfo();
+                    next.UseSoaSerialDateScheme = previous.UseSoaSerialDateScheme;
+                    next.Comments = previous.Comments;
+                    _dnsWebService.DnsServer.AuthZoneManager.SetRecords(zoneInfo.Name, [soa]);
+                }
             }
         }
 

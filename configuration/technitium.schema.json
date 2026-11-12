@@ -811,7 +811,8 @@
             "name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
             "overrideQueryAccess": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
             "overrideZoneTransfer": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
-            "overrideNotify": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+            "overrideNotify": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "apexNameServerTtl": {"type": "integer", "minimum": 0, "maximum": 4294967295}
           }
         },
         "primary": {

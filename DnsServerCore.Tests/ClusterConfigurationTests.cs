@@ -106,6 +106,13 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "zones/create?zone=route.test&type=Forwarder&catalog=cluster-catalog.cluster.test&forwarder=192.0.2.53",
                 server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/create?zone=member.test&type=Primary&catalog=cluster-catalog.cluster.test", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/update?zone=member.test&domain=member.test&type=NS&nameServer=primary.cluster.test&ttl=733",
+                server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/records/add?zone=member.test&domain=www.member.test&type=A&ipAddress=192.0.2.42", server.AdminToken));
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
             JsonElement response = export.GetProperty("response");
@@ -115,6 +122,9 @@ namespace DnsServerCore.Tests
                     path.ValueEquals("/zones/route.test"));
             Assert.Equal("cluster-catalog.cluster.test", response.GetProperty("manifest").GetProperty("zones")
                 .GetProperty("route.test").GetProperty("catalog").GetProperty("name").GetString());
+            JsonElement member = response.GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
+            Assert.Equal(733, member.GetProperty("catalog").GetProperty("apexNameServerTtl").GetInt32());
+            Assert.False(member.TryGetProperty("replaceApexNameServers", out _));
             Assert.Equal("Primary", cluster.GetProperty("bootstrap").GetProperty("role").GetString());
             string bootstrapManifest = JsonSerializer.Serialize(new { schemaVersion = 1, cluster });
             await using var restored = await LoopbackWebService.StartAsync("restored.cluster.test", enableTls: true, startupManifest: bootstrapManifest);
@@ -143,6 +153,13 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(restoredZones);
             Assert.True(JsonElement.DeepEquals(response.GetProperty("manifest").GetProperty("zones").GetProperty("route.test"),
                 restoredZones.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("route.test")));
+            var nameServer = Assert.Single((await restored.QueryAsync("member.test", DnsResourceRecordType.NS)).Answer);
+            Assert.Equal("restored.cluster.test", Assert.IsType<DnsNSRecordData>(nameServer.RDATA).NameServer);
+            Assert.Equal(733u, nameServer.OriginalTtlValue);
+            var soa = Assert.Single((await restored.QueryAsync("member.test", DnsResourceRecordType.SOA)).Answer);
+            Assert.Equal("restored.cluster.test", Assert.IsType<DnsSOARecordData>(soa.RDATA).PrimaryNameServer);
+            var address = Assert.Single((await restored.QueryAsync("www.member.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(address.RDATA).Address);
             await AssertMigrationReapplyAsync(restored, migration.ToJsonString());
 
             migration["dns"]!["serverDomain"] = "different.cluster.test";
@@ -150,6 +167,35 @@ namespace DnsServerCore.Tests
             JsonElement rename = await restored.CallAsync("settings/config/plan", restored.AdminToken, renameBody);
             Assert.Equal("error", rename.GetProperty("status").GetString());
             Assert.Contains("/dns/serverDomain", rename.GetProperty("errorMessage").GetString());
+
+            await using var peer = await LoopbackWebService.StartAsync("peer.cluster.test", enableTls: true,
+                adminPassword: restored.AdminPassword);
+            var restoredNode = Assert.Single((await restored.CallAsync("admin/cluster/state", restored.AdminToken))
+                .GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
+            using var join = new FormUrlEncodedContent([
+                new("secondaryNodeIpAddresses", "127.0.0.1"),
+                new("primaryNodeUrl", restoredNode.GetProperty("url").GetString()!),
+                new("primaryNodeIpAddress", "127.0.0.1"),
+                new("primaryNodeUsername", "admin"),
+                new("primaryNodePassword", restored.AdminPassword),
+                new("ignoreCertificateErrors", "true")
+            ]);
+            LoopbackWebService.AssertOk(await peer.CallAsync("admin/cluster/initJoin", peer.AdminToken, join));
+            using var catalog = new FormUrlEncodedContent([
+                new("zone", "cluster-catalog.cluster.test"),
+                new("primaryZoneTransferProtocol", "Tcp"),
+                new("primaryNameServerAddresses", $"127.0.0.1:{restored.DnsPort}")
+            ]);
+            LoopbackWebService.AssertOk(await peer.CallAsync("zones/options/set", peer.AdminToken, catalog));
+            await peer.RestartAsync();
+            Assert.True(await WaitForAsync(async () =>
+                (await peer.QueryAsync("www.member.test", DnsResourceRecordType.A)).Answer
+                    .Any(record => record.RDATA is DnsARecordData answer && answer.Address.Equals(IPAddress.Parse("192.0.2.42")))),
+                "The Secondary did not transfer the restored member zone.");
+            var replicatedNameServers = (await peer.QueryAsync("member.test", DnsResourceRecordType.NS)).Answer;
+            Assert.Equal(new[] { "peer.cluster.test", "restored.cluster.test" }, replicatedNameServers
+                .Select(record => Assert.IsType<DnsNSRecordData>(record.RDATA).NameServer).Order(StringComparer.Ordinal));
+            Assert.All(replicatedNameServers, record => Assert.Equal(733u, record.OriginalTtlValue));
 
             async Task<JsonElement> ReadStateAsync()
             {
@@ -721,18 +767,6 @@ namespace DnsServerCore.Tests
                 return result.GetProperty("response");
             }
 
-            static async Task<bool> WaitForAsync(Func<Task<bool>> condition)
-            {
-                DateTime deadline = DateTime.UtcNow.AddSeconds(25);
-                do
-                {
-                    if (await condition())
-                        return true;
-                    await Task.Delay(1000);
-                }
-                while (DateTime.UtcNow < deadline);
-                return false;
-            }
         }
 
         [Fact]
@@ -940,6 +974,19 @@ namespace DnsServerCore.Tests
                 using var body = new StringContent(declaration, Encoding.UTF8, "application/json");
                 return await server.CallAsync("settings/config/plan", token, body);
             }
+        }
+
+        private static async Task<bool> WaitForAsync(Func<Task<bool>> condition)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(25);
+            do
+            {
+                if (await condition())
+                    return true;
+                await Task.Delay(1000);
+            }
+            while (DateTime.UtcNow < deadline);
+            return false;
         }
 
         private static async Task AssertMigrationReapplyAsync(LoopbackWebService server, string manifest)

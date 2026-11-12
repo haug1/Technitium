@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Auth;
+using DnsServerCore.Cluster;
 using DnsServerCore.Configuration;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.ResourceRecords;
@@ -863,7 +864,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
             if (!SupportsManifestCatalogMembership(type) ||
                 !catalog.TryGetProperty("name", out JsonElement value) ||
-                catalog.EnumerateObject().Any(field => field.Name is not ("name" or "overrideNotify" or "overrideQueryAccess" or "overrideZoneTransfer")))
+                catalog.EnumerateObject().Any(field => field.Name is not ("name" or "overrideNotify" or "overrideQueryAccess" or "overrideZoneTransfer" or "apexNameServerTtl")))
                 throw new InvalidDataException($"{path}/catalog: Specify a catalog name and supported overrides for this zone type.");
             if (type == AuthZoneType.Stub && catalog.TryGetProperty("overrideZoneTransfer", out _))
                 throw new InvalidDataException($"{path}/catalog/overrideZoneTransfer: Stub zones do not have a transfer override.");
@@ -898,7 +899,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Secondary or AuthZoneType.Stub;
 
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZoneAndAuthChanges(ConfigurationManifest manifest, AuthManager auth, User creator,
-            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions, ConfigurationSso.Settings sso, bool isClusterSecondary)
+            IReadOnlyDictionary<string, TsigKey> tsigKeys, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers, ConfigurationStaticSessions.Candidate preparedSessions, ConfigurationSso.Settings sso, bool isClusterSecondary, ClusterManager cluster)
         {
             if (ldap is not null && ConfigurationLdap.Same(ldap, auth.GetManifestLdapSettings()))
                 ldap = null;
@@ -932,6 +933,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             var desiredCatalogs = new Dictionary<string, string>(StringComparer.Ordinal);
             var catalogEdits = new Dictionary<string, List<ManifestCatalogMemberEdit>>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            var clusterApexEdits = new Dictionary<string, ConfigurationPlan.ClusterMemberApex>(StringComparer.Ordinal);
             var signingChanges = new Dictionary<string, ConfigurationZoneDnssec.Signing>(StringComparer.Ordinal);
             var stagedKeyAdditions = new Dictionary<string, List<DnssecPrivateKey>>(StringComparer.Ordinal);
             var ownedZones = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
@@ -975,6 +977,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, path, zone, tsigKeys);
                     var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, tsigKeys, path);
                     string catalog = PrepareManifestCatalogMembership(zones, declaration.Value, zone, type, path);
+                    var clusterApex = ConfigurationPlan.PrepareClusterMemberApex(cluster, declaration.Value, type, catalog, zone, path);
                     ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, name, path, zone);
                     if (catalog is not null)
                     {
@@ -1008,18 +1011,21 @@ namespace DnsServerCore.Dns.ZoneManagers
                             recordRevisions[name] = zone.LastModified;
                     }
                     bool editRecords = declaration.Value.TryGetProperty("records", out JsonElement records);
+                    editRecords |= clusterApex is not null;
                     if (editRecords && zone is not null)
                     {
                         DateTime revision = zone.LastModified;
                         var currentRecords = new List<DnsResourceRecord>();
                         ListAllZoneRecords(name, currentRecords);
-                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"), type == AuthZoneType.Forwarder)
+                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, name, serverDomain, records, currentRecords, OwnsManifestZoneField(name, "records"), type == AuthZoneType.Forwarder, clusterApex)
                             .Any(edit => edit.Kind.HasValue);
                         if (editRecords)
                             recordRevisions[name] = revision;
                     }
                     if (!editRecords)
                         records = default;
+                    else if (clusterApex is not null)
+                        clusterApexEdits.Add(name, clusterApex);
                     if (zone is null)
                     {
                         if (!declaration.Value.TryGetProperty("type", out _))
@@ -1085,11 +1091,13 @@ namespace DnsServerCore.Dns.ZoneManagers
                 foreach (var (name, current, remove, disabled, policies, records, type, primary) in changed)
                 {
                     string path = Path.Combine(_dnsServer.ConfigFolder, "zones", name + ".zone");
+                    clusterApexEdits.TryGetValue(name, out var clusterApex);
+                    bool editRecords = records.ValueKind != JsonValueKind.Undefined || clusterApex is not null;
                     if (remove)
                     {
                         File.Delete(path);
                     }
-                    else if (current is not null && records.ValueKind == JsonValueKind.Undefined && type != AuthZoneType.Catalog && !signingChanges.ContainsKey(name))
+                    else if (current is not null && !editRecords && type != AuthZoneType.Catalog && !signingChanges.ContainsKey(name))
                     {
                         SaveZoneFileInternal(name, disabled, policies, primary, desiredCatalogs.GetValueOrDefault(name));
                     }
@@ -1097,7 +1105,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         ApexZone zone;
                         signingChanges.TryGetValue(name, out var signing);
-                        bool refreshSignedRecords = records.ValueKind != JsonValueKind.Undefined && signing?.Disable != true &&
+                        bool refreshSignedRecords = editRecords && signing?.Disable != true &&
                             current?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned };
                         var allRecords = new List<DnsResourceRecord>();
                         if (current is null)
@@ -1143,9 +1151,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             changedSets = StageManifestCatalogRecords(catalog, allRecords, policies, current is null, catalogEdits.GetValueOrDefault(name));
                         }
-                        else if (records.ValueKind != JsonValueKind.Undefined)
+                        else if (editRecords)
                         {
-                            var recordSets = StageManifestRecords(manifest, zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain);
+                            var recordSets = StageManifestRecords(manifest, zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain, clusterApex);
                             recordSets.UnionWith(changedSets ?? []);
                             changedSets = recordSets;
                         }
@@ -1653,10 +1661,10 @@ namespace DnsServerCore.Dns.ZoneManagers
         }
 
         private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(ConfigurationManifest manifest, ApexZone zone, JsonElement declaration, List<DnsResourceRecord> records,
-            IReadOnlyDictionary<string, bool> membership, string serverDomain)
+            IReadOnlyDictionary<string, bool> membership, string serverDomain, ConfigurationPlan.ClusterMemberApex clusterApex)
         {
             string path = ConfigurationPlan.AppendPath("/zones", zone.Name) + "/records";
-            var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"), zone is ForwarderZone);
+            var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, zone.Name, zone.Name, serverDomain, declaration, records, OwnsManifestZoneField(zone.Name, "records"), zone is ForwarderZone, clusterApex);
             var owners = DnsResourceRecord.GroupRecords(records);
             var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
             // The staging zone uses the normal record setters and SOA history, with notifications disabled.

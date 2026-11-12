@@ -933,7 +933,7 @@ namespace DnsServerCore.Configuration
         }
 
         internal static bool CanManageClusterCatalogMember(ClusterManager cluster, AuthZoneType type) =>
-            cluster.GetSelfNode().Type == ClusterNodeType.Primary && type != AuthZoneType.Primary &&
+            cluster.GetSelfNode().Type == ClusterNodeType.Primary &&
             AuthZoneManager.SupportsManifestCatalogMembership(type);
 
         internal static void CheckClusterCatalogMembershipTarget(ClusterManager cluster, string catalog, AuthZoneType type, string path)
@@ -1499,6 +1499,8 @@ namespace DnsServerCore.Configuration
                 ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
                 if (current.TryGetProperty("catalogChanged", out JsonElement catalogChanged) && catalogChanged.GetBoolean())
                     changes.Add(new ConfigurationChange(path + "/catalog/name", ConfigurationChangeKind.Update, false));
+                if (current.TryGetProperty("clusterApexChanged", out JsonElement apexChanged) && apexChanged.GetBoolean())
+                    changes.Add(new ConfigurationChange(path + "/catalog/apexNameServerTtl", ConfigurationChangeKind.Update, false));
                 if (current.TryGetProperty("catalogOverrides", out JsonElement overrides))
                 {
                     foreach (JsonProperty field in overrides.EnumerateObject())
@@ -1551,10 +1553,31 @@ namespace DnsServerCore.Configuration
 
         internal sealed record ZoneRecordEdit(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data,
             DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, (IPAddress Address, uint? Ttl)[] Glue,
-            bool? UseSerialDateScheme, ConfigurationChangeKind? Kind, bool AutoIpv4Hint = false, bool AutoIpv6Hint = false);
+            bool? UseSerialDateScheme, ConfigurationChangeKind? Kind, bool AutoIpv4Hint = false, bool AutoIpv6Hint = false, bool ClusterManaged = false);
+
+        internal sealed record ClusterMemberApex(string[] NameServers, uint Ttl);
+
+        internal static ClusterMemberApex PrepareClusterMemberApex(ClusterManager cluster, JsonElement declaration,
+            AuthZoneType type, string catalog, AuthZoneInfo current, string path)
+        {
+            JsonElement ttl = default;
+            bool declaresTtl = declaration.TryGetProperty("catalog", out JsonElement options) &&
+                options.TryGetProperty("apexNameServerTtl", out ttl);
+            if (!cluster.ClusterInitialized || type != AuthZoneType.Primary || !cluster.IsClusterCatalogZone(catalog) ||
+                !CanManageClusterCatalogMember(cluster, type))
+            {
+                if (declaresTtl)
+                    throw new InvalidDataException($"{path}/catalog/apexNameServerTtl: This setting requires a primary zone in the cluster catalog.");
+                return null;
+            }
+
+            return new(cluster.ClusterNodes.Values.Select(node => node.Name).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                declaresTtl ? decimal.ToUInt32(ttl.GetDecimal()) : current?.ApexZone.GetRecords(DnsResourceRecordType.NS).FirstOrDefault()?.OriginalTtlValue ??
+                    cluster.DnsWebService.DnsServer.AuthZoneManager.DefaultNsRecordTtl);
+        }
 
         internal static IReadOnlyList<ZoneRecordEdit> PrepareZoneRecordEdits(ConfigurationManifest manifest, string zoneName, string declarationName, string serverDomain,
-            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords, bool forwarderZone)
+            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords, bool forwarderZone, ClusterMemberApex clusterApex = null)
         {
             string path = AppendPath("/zones", declarationName) + "/records";
             var changes = new List<ZoneRecordEdit>();
@@ -1564,7 +1587,7 @@ namespace DnsServerCore.Configuration
             bool declaresSoa = false;
             var appOwners = new HashSet<string>(StringComparer.Ordinal);
             int index = 0;
-            foreach (JsonElement record in records.ValueKind == JsonValueKind.Null ? [] : records.EnumerateArray().ToArray())
+            foreach (JsonElement record in records.ValueKind == JsonValueKind.Array ? records.EnumerateArray().ToArray() : [])
             {
                 string recordPath = $"{path}/{index}";
                 foreach (JsonProperty field in record.EnumerateObject())
@@ -1575,6 +1598,8 @@ namespace DnsServerCore.Configuration
                 }
 
                 (string owner, DnsResourceRecordType type) = ConfigurationManifest.ReadZoneRecordIdentity(zoneName, record, recordPath);
+                if (clusterApex is not null && owner == zoneName && type == DnsResourceRecordType.NS)
+                    throw new InvalidDataException($"{recordPath}: The cluster manages this apex name server set. Use catalog.apexNameServerTtl to configure its TTL.");
                 if (type == DnsResourceRecordType.FWD && !forwarderZone)
                     throw new InvalidDataException($"{recordPath}: FWD records require a forwarder zone.");
                 JsonElement data = record.GetProperty("data");
@@ -1603,6 +1628,8 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{recordPath}/data: Planning for this record data format is not implemented.");
 
                 bool isSoa = type == DnsResourceRecordType.SOA;
+                if (clusterApex is not null && rdata is DnsSOARecordData declaredSoa)
+                    rdata = WithSoaPrimary(declaredSoa);
                 bool isApp = type == DnsResourceRecordType.APP;
                 if (isSoa && declaresSoa)
                     throw new InvalidDataException($"{recordPath}: Declare at most one apex SOA record.");
@@ -1697,24 +1724,49 @@ namespace DnsServerCore.Configuration
             bool replaceApexNameServers = manifest.ReplacesApexNameServers(zoneName);
             if (replaceApexNameServers && forwarderZone)
                 throw new InvalidDataException($"{path}: Apex name server replacement requires a primary zone.");
+            if (clusterApex is not null)
+            {
+                if (replaceApexNameServers)
+                    throw new InvalidDataException($"{path}: The cluster manages this apex name server set.");
+                foreach (string nameServer in clusterApex.NameServers)
+                {
+                    var data = new DnsNSRecordData(nameServer);
+                    DnsResourceRecord existing = current[(zoneName, DnsResourceRecordType.NS)].FirstOrDefault(record => record.RDATA.Equals(data));
+                    if (existing is not null)
+                        matched.Add(existing);
+                    ConfigurationChangeKind? kind = existing is null ? ConfigurationChangeKind.Add :
+                        existing.OriginalTtlValue != clusterApex.Ttl ? ConfigurationChangeKind.Update : null;
+                    changes.Add(new(zoneName, DnsResourceRecordType.NS, data, existing, clusterApex.Ttl,
+                        null, null, null, null, null, kind, ClusterManaged: true));
+                }
+                if (!declaresSoa && current[(zoneName, DnsResourceRecordType.SOA)].FirstOrDefault() is { RDATA: DnsSOARecordData soa } existingSoa &&
+                    !soa.PrimaryNameServer.Equals(serverDomain, StringComparison.OrdinalIgnoreCase))
+                    changes.Add(new(zoneName, DnsResourceRecordType.SOA, WithSoaPrimary(soa), existingSoa,
+                        null, null, null, null, null, null, ConfigurationChangeKind.Update, ClusterManaged: true));
+            }
 
             foreach (DnsResourceRecord record in currentRecords)
             {
-                bool replaceNameServer = replaceApexNameServers && record.Type == DnsResourceRecordType.NS &&
+                bool replaceNameServer = (replaceApexNameServers || clusterApex is not null) && record.Type == DnsResourceRecordType.NS &&
                     record.Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase);
                 if (!matched.Contains(record) && !IsLeaseRecord(record) &&
-                    (replaceNameServer || !IsGeneratedRecord(zoneName, serverDomain, record.Name, record.Type, record.RDATA)))
+                    (replaceNameServer || (records.ValueKind != JsonValueKind.Undefined &&
+                        !IsGeneratedRecord(zoneName, serverDomain, record.Name, record.Type, record.RDATA))))
                 {
                     if (!ownsRecords && !replaceNameServer)
                         throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
 
                     changes.Add(new ZoneRecordEdit(record.Name.ToLowerInvariant(), record.Type, record.RDATA,
-                        record, null, null, null, null, null, null, ConfigurationChangeKind.Remove));
+                        record, null, null, null, null, null, null, ConfigurationChangeKind.Remove,
+                        ClusterManaged: clusterApex is not null && replaceNameServer));
                 }
             }
 
             ReconcileAutomaticHints(changes, currentRecords);
             return changes;
+
+            DnsSOARecordData WithSoaPrimary(DnsSOARecordData soa) =>
+                new(serverDomain, soa.ResponsiblePerson, soa.Serial, soa.Refresh, soa.Retry, soa.Expire, soa.Minimum);
 
             static bool SoaNeedsUpdate(DnsSOARecordData current, DnsSOARecordData desired, bool usesDateScheme) =>
                 !current.PrimaryNameServer.Equals(desired.PrimaryNameServer, StringComparison.OrdinalIgnoreCase) ||

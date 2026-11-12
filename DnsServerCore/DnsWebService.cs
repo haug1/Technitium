@@ -3189,7 +3189,7 @@ namespace DnsServerCore
             {
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
                     ldap, users, staticSessions,
-                    sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso, secondary);
+                    sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso, secondary, _clusterManager);
                 var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager,
                     webCertificate is { Changed: true }, previousClusterCertificate, WebServiceTlsCertificate);
                 Action writeCluster = null;

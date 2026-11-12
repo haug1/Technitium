@@ -5337,7 +5337,7 @@ The response contains a versioned `manifest` and a sorted `missingInputs` array 
 
 Entries in `blocklists.sources` can be strings or environment references. Preview and apply resolve the references on the server, and a change to the effective source list invalidates the preview revision. Use a local startup manifest for file references.
 
-The Primary exports Forwarder, Secondary, and Stub members of its cluster catalog with their `catalog.name` declarations. The destination cluster catalog must already exist before applying those zones.
+The Primary exports Primary, Forwarder, Secondary, and Stub members of its cluster catalog with their `catalog.name` declarations. The destination cluster catalog must already exist before applying those zones. For Primary member zones, export includes `catalog.apexNameServerTtl`. Apply generates the apex NS set and uses the destination Primary as the SOA primary name server.
 
 ### Apply Declarative Configuration
 

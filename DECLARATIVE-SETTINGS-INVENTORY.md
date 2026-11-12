@@ -263,6 +263,7 @@ Use the normalized zone name as the resource key under `zones.<name>`. Zone sett
 | `type` | `type`, zone conversion | Enum, `Primary` on API creation | Supports Primary, Secondary, Stub, Forwarder, SecondaryForwarder, Catalog, and SecondaryCatalog. Validate type transitions against zone manager capabilities. |
 | `enabled` | `disabled`, enable and disable | Boolean, true for new zones | Inverse of the API flag. Special and catalog-managed zones have additional restrictions. |
 | `catalog.name` | `catalog` | Optional zone reference, unset | Must reference a compatible catalog. Membership changes can provision or remove secondary catalog members. |
+| `catalog.apexNameServerTtl` | Apex NS record TTL | Unsigned seconds, inherited from the current apex NS set or server default | Applies to a Primary zone enrolled in the cluster catalog. The destination cluster generates the apex NS identities and supplies the SOA primary name server. |
 | `catalog.overrideQueryAccess` | `overrideCatalogQueryAccess` | Boolean, false | Applies to eligible catalog member types and controls inheritance. |
 | `catalog.overrideZoneTransfer` | `overrideCatalogZoneTransfer` | Boolean, false | Applies to primary, secondary, and forwarder zones with compatible membership. |
 | `catalog.overrideNotify` | `overrideCatalogNotify` | Boolean, false | Primary and forwarder zones can override inherited notification settings. |

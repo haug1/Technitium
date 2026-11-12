@@ -1395,9 +1395,11 @@ namespace DnsServerCore
                     }
 
                     ConfigurationZoneDnssec.Signing signing = null;
+                    ConfigurationPlan.ClusterMemberApex clusterApex = null;
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                     {
                         string catalog = _dnsWebService._dnsServer.AuthZoneManager.PrepareManifestCatalogMembership(zones, declaration.Value, zone, type, zonePath);
+                        clusterApex = ConfigurationPlan.PrepareClusterMemberApex(_dnsWebService._clusterManager, declaration.Value, type, catalog, zone, zonePath);
                         if (catalog is not null)
                         {
                             string before = zone?.CatalogZoneName ?? "";
@@ -1463,8 +1465,9 @@ namespace DnsServerCore
                         }
                     }
 
-                    if (declaration.Value.ValueKind == JsonValueKind.Object &&
-                        declaration.Value.TryGetProperty("records", out JsonElement records))
+                    JsonElement records = default;
+                    if ((declaration.Value.ValueKind == JsonValueKind.Object &&
+                        declaration.Value.TryGetProperty("records", out records)) || clusterApex is not null)
                     {
                         var currentRecords = new List<DnsResourceRecord>();
                         if (zone is not null)
@@ -1475,14 +1478,20 @@ namespace DnsServerCore
                         var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, declaration.Name,
                             _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
                             _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"),
-                            type == AuthZoneType.Forwarder);
+                            type == AuthZoneType.Forwarder, clusterApex);
                         if (signing?.Disable != true && (signing is not null ||
                             zone?.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned }) &&
                             edits.Any(edit => edit.Kind is ConfigurationChangeKind.Add or ConfigurationChangeKind.Update &&
                                 (edit.Type is DnsResourceRecordType.ANAME or DnsResourceRecordType.APP || edit.Disabled == true)))
                             throw new InvalidDataException($"{zonePath}/records: Signed primary zones require enabled records and do not support ANAME or APP records.");
+                        if (clusterApex is not null)
+                        {
+                            writer.WritePropertyName("clusterApex");
+                            JsonSerializer.Serialize(writer, clusterApex);
+                            writer.WriteBoolean("clusterApexChanged", edits.Any(edit => edit.ClusterManaged && edit.Kind.HasValue));
+                        }
                         writer.WriteStartArray("recordChanges");
-                        foreach (var edit in edits)
+                        foreach (var edit in edits.Where(edit => !edit.ClusterManaged))
                         {
                             if (edit.Kind.HasValue)
                                 writer.WriteNumberValue((int)edit.Kind.Value);
