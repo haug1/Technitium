@@ -6526,6 +6526,61 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneExportMigratesImportedInZoneNameServerAddresses()
+        {
+            await using var source = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await source.CallAsync("zones/create?zone=imported.test&type=Primary", source.AdminToken));
+            using var zoneFile = new StringContent("""
+                @ 300 IN NS ns.imported.test.
+                ns 120 IN A 192.0.2.53
+                ns 240 IN AAAA 2001:db8::53
+                www 60 IN A 192.0.2.42
+                """, Encoding.UTF8, "text/plain");
+            zoneFile.Headers.ContentType!.CharSet = null;
+            LoopbackWebService.AssertOk(await source.CallAsync("zones/import?zone=imported.test", source.AdminToken, zoneFile));
+            DnsDatagram sourceNameServers = await source.QueryAsync("imported.test", DnsResourceRecordType.NS);
+
+            JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement response = export.GetProperty("response");
+            Assert.DoesNotContain(response.GetProperty("missingInputs").EnumerateArray(),
+                input => input.ValueEquals("/zones/imported.test/records"));
+            JsonElement zone = response.GetProperty("manifest").GetProperty("zones").GetProperty("imported.test");
+            Assert.True(zone.GetProperty("replaceApexNameServers").GetBoolean());
+            JsonElement ns = Assert.Single(zone.GetProperty("records").EnumerateArray(),
+                record => record.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.NS);
+            Assert.False(ns.TryGetProperty("glue", out _));
+
+            string manifest = $$"""{"schemaVersion":1,"zones":{"imported.test":{{zone.GetRawText()}} } }""";
+            Assert.Empty((await PreviewAsync(source, manifest)).GetProperty("changes").EnumerateArray());
+            await using var destination = await LoopbackWebService.StartAsync();
+            string revision = (await PreviewAsync(destination, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, manifest, revision));
+            await destination.RestartAsync();
+
+            DnsDatagram migratedNameServers = await destination.QueryAsync("imported.test", DnsResourceRecordType.NS);
+            var nameServer = Assert.Single(migratedNameServers.Answer);
+            Assert.Equal("ns.imported.test", Assert.IsType<DnsNSRecordData>(nameServer.RDATA).NameServer);
+            Assert.Equal(300u, nameServer.OriginalTtlValue);
+            var sourceAddresses = AdditionalAddresses(sourceNameServers).ToArray();
+            Assert.Equal(2, sourceAddresses.Length);
+            Assert.Equal(sourceAddresses, AdditionalAddresses(migratedNameServers));
+            var ipv4 = Assert.Single((await destination.QueryAsync("ns.imported.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.53"), Assert.IsType<DnsARecordData>(ipv4.RDATA).Address);
+            Assert.Equal(120u, ipv4.OriginalTtlValue);
+            var ipv6 = Assert.Single((await destination.QueryAsync("ns.imported.test", DnsResourceRecordType.AAAA)).Answer);
+            Assert.Equal(IPAddress.Parse("2001:db8::53"), Assert.IsType<DnsAAAARecordData>(ipv6.RDATA).Address);
+            Assert.Equal(240u, ipv6.OriginalTtlValue);
+            var other = Assert.Single((await destination.QueryAsync("www.imported.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(other.RDATA).Address);
+            Assert.Empty((await PreviewAsync(destination, manifest)).GetProperty("changes").EnumerateArray());
+
+            static IEnumerable<(DnsResourceRecordType Type, string Address, uint Ttl)> AdditionalAddresses(DnsDatagram response) =>
+                response.Additional.Where(record => record.Type is DnsResourceRecordType.A or DnsResourceRecordType.AAAA)
+                    .OrderBy(record => record.Type).Select(record => (record.Type, record.RDATA.ToString(), record.OriginalTtlValue));
+        }
+
+        [Fact]
         public async Task ApplicableExportReproducesSettingsOnACleanInstance()
         {
             const string blockListSource = "https://example.test/list?token=fixture-secret";

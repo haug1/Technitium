@@ -135,7 +135,7 @@ namespace DnsServerCore.Configuration
                         {
                             replaceApexNameServers = apexNameServers.Length == 0 ||
                                 apexNameServers.Any(record => !ConfigurationPlan.IsGeneratedRecord(zone.Name, dns.ServerDomain, record.Name, record.Type, record.RDATA) ||
-                                    HasCustomizedNameServer(record, defaultNsTtl));
+                                    HasCustomizedNameServer(zone.Name, record, defaultNsTtl, records));
                         }
                     }
                     JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, defaultNsTtl, replaceApexNameServers, path, records, missingInputs);
@@ -151,12 +151,25 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        private static bool HasCustomizedNameServer(DnsResourceRecord record, uint defaultNsTtl)
+        private static bool HasCustomizedNameServer(string zone, DnsResourceRecord record, uint defaultNsTtl, List<DnsResourceRecord> records)
         {
             var info = record.Tag as GenericRecordInfo;
             return record.OriginalTtlValue != defaultNsTtl || info?.Disabled == true ||
-                !string.IsNullOrEmpty(info?.Comments) || info?.ExpiryTtl > 0 || info is NSRecordInfo { GlueRecords.Count: > 0 };
+                !string.IsNullOrEmpty(info?.Comments) || info?.ExpiryTtl > 0 ||
+                (info is NSRecordInfo { GlueRecords.Count: > 0 } && !HasRedundantApexGlue(zone, record, records));
         }
+
+        private static bool HasRedundantApexGlue(string zone, DnsResourceRecord record, List<DnsResourceRecord> records) =>
+            record.Name.Equals(zone, StringComparison.OrdinalIgnoreCase) && record.RDATA is DnsNSRecordData ns &&
+            AuthZoneManager.DomainBelongsToZone(zone, ns.NameServer) &&
+            record.Tag is NSRecordInfo { GlueRecords.Count: > 0 } metadata &&
+            metadata.GlueRecords.All(address => address.Class == DnsClass.IN &&
+                address.Name.Equals(ns.NameServer, StringComparison.OrdinalIgnoreCase) &&
+                address.Type is DnsResourceRecordType.A or DnsResourceRecordType.AAAA &&
+                records.Any(candidate => candidate.Class == DnsClass.IN &&
+                    candidate.Name.Equals(address.Name, StringComparison.OrdinalIgnoreCase) && candidate.Type == address.Type &&
+                    candidate.RDATA.Equals(address.RDATA) && candidate.OriginalTtlValue == address.OriginalTtlValue &&
+                    candidate.Tag is not GenericRecordInfo { Disabled: true } && !ConfigurationPlan.IsLeaseRecord(candidate)));
 
         private static JsonArray ExportRecords(string zone, string serverDomain, uint defaultNsTtl, bool replaceApexNameServers, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
@@ -167,7 +180,7 @@ namespace DnsServerCore.Configuration
                 var info = record.Tag as GenericRecordInfo;
                 bool preserveNameServer = record.Type == DnsResourceRecordType.NS &&
                     (replaceApexNameServers && record.Name.Equals(zone, StringComparison.OrdinalIgnoreCase) ||
-                        HasCustomizedNameServer(record, defaultNsTtl));
+                        HasCustomizedNameServer(zone, record, defaultNsTtl, records));
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
                     (record.Type != DnsResourceRecordType.SOA &&
                         !preserveNameServer &&
@@ -256,22 +269,32 @@ namespace DnsServerCore.Configuration
                 if (record.RDATA is DnsNSRecordData ns)
                 {
                     IReadOnlyList<DnsResourceRecord> glueRecords = (info as NSRecordInfo)?.GlueRecords ?? [];
-                    if (glueRecords.Any(address => address.Class != DnsClass.IN ||
-                        !address.Name.Equals(ns.NameServer, StringComparison.OrdinalIgnoreCase) ||
-                        address.Type is not (DnsResourceRecordType.A or DnsResourceRecordType.AAAA)) ||
-                        (glueRecords.Count > 0 && owner == zone && (zone.Length == 0 ||
-                            ns.NameServer.Equals(zone, StringComparison.OrdinalIgnoreCase) ||
-                            ns.NameServer.EndsWith("." + zone, StringComparison.OrdinalIgnoreCase))))
+                    bool inZoneApex = owner == zone && AuthZoneManager.DomainBelongsToZone(zone, ns.NameServer);
+                    if (inZoneApex)
                     {
-                        missingInputs.Add(path + "/records");
-                        return null;
+                        // Zone-file import attaches copies of the authoritative addresses to the apex NS.
+                        if (glueRecords.Count > 0 && !HasRedundantApexGlue(zone, record, records))
+                        {
+                            missingInputs.Add(path + "/records");
+                            return null;
+                        }
                     }
-                    glue = new JsonArray();
-                    foreach (DnsResourceRecord address in glueRecords)
+                    else
                     {
-                        string ip = address.RDATA.ToString();
-                        glue.Add(address.OriginalTtlValue == record.OriginalTtlValue
-                            ? JsonValue.Create(ip) : new JsonObject { ["address"] = ip, ["ttl"] = address.OriginalTtlValue });
+                        if (glueRecords.Any(address => address.Class != DnsClass.IN ||
+                            !address.Name.Equals(ns.NameServer, StringComparison.OrdinalIgnoreCase) ||
+                            address.Type is not (DnsResourceRecordType.A or DnsResourceRecordType.AAAA)))
+                        {
+                            missingInputs.Add(path + "/records");
+                            return null;
+                        }
+                        glue = new JsonArray();
+                        foreach (DnsResourceRecord address in glueRecords)
+                        {
+                            string ip = address.RDATA.ToString();
+                            glue.Add(address.OriginalTtlValue == record.OriginalTtlValue
+                                ? JsonValue.Create(ip) : new JsonObject { ["address"] = ip, ["ttl"] = address.OriginalTtlValue });
+                        }
                     }
                 }
 

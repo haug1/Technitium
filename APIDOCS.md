@@ -5339,6 +5339,8 @@ Entries in `blocklists.sources` can be strings or environment references. Previe
 
 The Primary exports Primary, Forwarder, Secondary, and Stub members of its cluster catalog with their `catalog.name` declarations. The destination cluster catalog must already exist before applying those zones. For Primary member zones, export includes `catalog.apexNameServerTtl`. Apply generates the apex NS set and uses the destination Primary as the SOA primary name server.
 
+For imported zones, export uses standalone A and AAAA records when they match the addresses attached to an in-zone apex NS record.
+
 ### Apply Declarative Configuration
 
 Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header. A stale revision returns `status: error` with `errorCode: stale-preview` before applying any changes.
