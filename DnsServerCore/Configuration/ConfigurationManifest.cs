@@ -117,6 +117,8 @@ namespace DnsServerCore.Configuration
                     ReadWebHeader(realIp, realIp: true);
                 if (web.TryGetProperty("frameAncestors", out JsonElement frameAncestors))
                     ReadWebHeader(frameAncestors, realIp: false);
+                if (web.TryGetProperty("reverseProxyAcl", out JsonElement reverseProxyAcl))
+                    ReadWebReverseProxyAcl(reverseProxyAcl);
             }
 
             if (root.TryGetProperty("blocklists", out JsonElement blocklists) && blocklists.TryGetProperty("sources", out JsonElement sources))
@@ -168,6 +170,23 @@ namespace DnsServerCore.Configuration
             {
                 throw new InvalidDataException("/dns/serverDomain: Invalid DNS server domain name.");
             }
+        }
+
+        internal static NetworkAccessControl[] ReadWebReverseProxyAcl(JsonElement value)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return DnsWebService.CreateDefaultReverseProxyAcl();
+
+            var rules = new NetworkAccessControl[value.GetArrayLength()];
+            for (int i = 0; i < rules.Length; i++)
+            {
+                string entry = value[i].GetString();
+                int slash = entry.IndexOf('/');
+                if (!NetworkAccessControl.TryParse(entry, out rules[i]) ||
+                    (slash >= 0 && (!byte.TryParse(entry.AsSpan(slash + 1), out byte prefix) || prefix != rules[i].NetworkAddress.PrefixLength)))
+                    throw new InvalidDataException($"/web/reverseProxyAcl/{i}: Invalid network ACL rule.");
+            }
+            return rules;
         }
 
         internal static string ReadWebHeader(JsonElement value, bool realIp)

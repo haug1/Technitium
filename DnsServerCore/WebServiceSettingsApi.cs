@@ -468,6 +468,8 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue("/web/realIpHeader");
                 if (_dnsWebService._manifestOwnsFrameAncestors)
                     jsonWriter.WriteStringValue("/web/frameAncestors");
+                if (_dnsWebService._manifestOwnsReverseProxyAcl)
+                    jsonWriter.WriteStringValue("/web/reverseProxyAcl");
                 foreach (string path in _dnsWebService._dnsServer.GetManagedDnsPaths())
                     jsonWriter.WriteStringValue(path);
                 if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
@@ -650,10 +652,14 @@ namespace DnsServerCore
                 if (jsonDocument is not null)
                     context.Items["jsonContent"] = jsonDocument;
 
-                var webHeaders = new WebHeaders(
+                request.TryQueryOrFormArray("webServiceReverseProxyAddresses", NetworkAccessControl.Parse, out NetworkAccessControl[] reverseProxyAcl);
+                if (reverseProxyAcl?.Length > byte.MaxValue)
+                    throw new ArgumentOutOfRangeException("WebServiceReverseProxyAddresses", "Web Service Reverse Proxy Addresses list cannot have more than 255 entries.");
+
+                var webHeaders = new WebLiveSettings(
                     request.TryGetQueryOrForm("webServiceRealIpHeader", out string realIpHeader) ? NormalizeWebHeader(realIpHeader, realIp: true) : null,
-                    request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null);
-                _dnsWebService.CheckManifestWebHeaders(webHeaders);
+                    request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null, reverseProxyAcl);
+                _dnsWebService.CheckManifestWebLiveSettings(webHeaders);
 
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
                 request.TryGetQueryOrForm("logFolder", out string logFolder);
@@ -1151,15 +1157,8 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryQueryOrFormArray("webServiceReverseProxyAddresses", NetworkAccessControl.Parse, out NetworkAccessControl[] webServiceReverseProxyAddresses))
-                        {
-                            if ((webServiceReverseProxyAddresses is null) || (webServiceReverseProxyAddresses.Length == 0))
-                                _dnsWebService._webServiceReverseProxyAddresses = null;
-                            else if (webServiceReverseProxyAddresses.Length > byte.MaxValue)
-                                throw new ArgumentOutOfRangeException("WebServiceReverseProxyAddresses", "Web Service Reverse Proxy Addresses list cannot have more than 255 entries.");
-                            else
-                                _dnsWebService._webServiceReverseProxyAddresses = webServiceReverseProxyAddresses;
-                        }
+                        if (reverseProxyAcl is not null && !_dnsWebService._manifestOwnsReverseProxyAcl)
+                            _dnsWebService._webServiceReverseProxyAddresses = reverseProxyAcl.Length == 0 ? null : reverseProxyAcl;
 
                         if (webHeaders.RealIp is not null && !_dnsWebService._manifestOwnsRealIpHeader)
                             _dnsWebService._webServiceRealIpHeader = webHeaders.RealIp;
@@ -2033,7 +2032,7 @@ namespace DnsServerCore
                             bool ownsBlockListSettings = _dnsWebService._dnsServer.BlockListZoneManager.HasManagedSettings;
                             bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListSettings || _dnsWebService._manifestOwnsRealIpHeader);
                             bool checkBlockList = blockLists && ownsBlockListSettings;
-                            bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors);
+                            bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors || _dnsWebService._manifestOwnsReverseProxyAcl);
                             if (checkLog || checkDns || checkBlockList || checkWeb)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
@@ -2051,7 +2050,7 @@ namespace DnsServerCore
                                     if (checkWeb && archive.GetEntry("webservice.config") is ZipArchiveEntry webEntry)
                                     {
                                         using Stream webConfiguration = webEntry.Open();
-                                        _dnsWebService.CheckManifestWebHeaders(_dnsWebService.ReadConfigFrom(webConfiguration, apply: false));
+                                        _dnsWebService.CheckManifestWebLiveSettings(_dnsWebService.ReadConfigFrom(webConfiguration, apply: false));
                                     }
                                     if (checkBlockList && archive.GetEntry("blocklist.config") is ZipArchiveEntry blockListEntry)
                                     {

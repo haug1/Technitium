@@ -676,6 +676,43 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ReverseProxyAclPreservesFirstMatchOrderAndTakesEffectLive()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string denyFirst = """{"schemaVersion":1,"web":{"reverseProxyAcl":["!127.0.0.1","127.0.0.0/8"]}}""";
+            string revision = (await PreviewAsync(server, denyFirst)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, denyFirst, revision));
+            Assert.Equal("127.0.0.1", await ReportedRemoteAddressAsync());
+
+            const string allowFirst = """{"schemaVersion":1,"web":{"reverseProxyAcl":["127.0.0.0/8","!127.0.0.1"]}}""";
+            JsonElement preview = await PreviewAsync(server, allowFirst);
+            Assert.Equal("/web/reverseProxyAcl", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("path").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, allowFirst, preview.GetProperty("revision").GetString()!));
+            Assert.Equal("192.0.2.42", await ReportedRemoteAddressAsync());
+
+            await server.RestartAsync();
+            Assert.Equal("192.0.2.42", await ReportedRemoteAddressAsync());
+            Assert.Empty((await PreviewAsync(server, allowFirst)).GetProperty("changes").EnumerateArray());
+            JsonElement rejected = await server.CallAsync("settings/set?webServiceReverseProxyAddresses=", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/web/reverseProxyAcl", rejected.GetProperty("errorMessage").GetString());
+
+            async Task<string?> ReportedRemoteAddressAsync()
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, "/api/admin/sessions/list");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+                request.Headers.Add(LoopbackWebService.LegacyRealIpHeader, "192.0.2.42");
+                using HttpResponseMessage response = await server.Client.SendAsync(request);
+                response.EnsureSuccessStatusCode();
+                using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+                LoopbackWebService.AssertOk(body.RootElement);
+                JsonElement session = Assert.Single(body.RootElement.GetProperty("response").GetProperty("sessions").EnumerateArray(),
+                    entry => entry.GetProperty("isCurrentSession").GetBoolean());
+                return session.GetProperty("lastSeenRemoteAddress").GetString();
+            }
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

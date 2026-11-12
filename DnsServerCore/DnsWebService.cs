@@ -120,7 +120,11 @@ namespace DnsServerCore
         bool _webServiceHttpToTlsRedirect;
         bool _webServiceUseSelfSignedTlsCertificate;
 
-        IReadOnlyCollection<NetworkAccessControl> _webServiceReverseProxyAddresses =
+        IReadOnlyCollection<NetworkAccessControl> _webServiceReverseProxyAddresses = CreateDefaultReverseProxyAcl();
+
+        internal static NetworkAccessControl[] CreateDefaultReverseProxyAcl()
+        {
+            return
             [
                 new NetworkAccessControl(IPAddress.Parse("127.0.0.0"), 8),
                 new NetworkAccessControl(IPAddress.Parse("10.0.0.0"), 8),
@@ -131,12 +135,14 @@ namespace DnsServerCore
                 new NetworkAccessControl(IPAddress.Parse("2000::"), 3, true),
                 new NetworkAccessControl(IPAddress.IPv6Any, 0)
             ];
+        }
 
         string _webServiceTlsCertificatePath;
         string _webServiceTlsCertificatePassword;
         bool _manifestOwnsRealIpHeader;
         bool _manifestOwnsFrameAncestors;
-        internal readonly record struct WebHeaders(string RealIp, string FrameAncestors);
+        bool _manifestOwnsReverseProxyAcl;
+        internal readonly record struct WebLiveSettings(string RealIp, string FrameAncestors, IReadOnlyCollection<NetworkAccessControl> ReverseProxyAcl = null);
         string _webServiceRealIpHeader = "X-Real-IP";
         string _webServiceCspFrameAncestorsHeader = "'none'";
 
@@ -475,7 +481,7 @@ namespace DnsServerCore
                 _authManager.SaveConfigFile();
         }
 
-        private WebHeaders ReadConfigFrom(Stream s, bool readOwnership = false, bool apply = true)
+        private WebLiveSettings ReadConfigFrom(Stream s, bool readOwnership = false, bool apply = true)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "WC") //format
                 throw new InvalidDataException("Web Service config file format is invalid.");
@@ -501,19 +507,10 @@ namespace DnsServerCore
             bool http3Enabled = bR.ReadBoolean();
             bool redirectToTls = bR.ReadBoolean();
             bool selfSignedCertificate = bR.ReadBoolean();
-            IReadOnlyList<NetworkAccessControl> proxyAddresses = version >= 2 ? AuthZoneInfo.ReadNetworkACLFrom(bR) :
-                [
-                    new NetworkAccessControl(IPAddress.Parse("127.0.0.0"), 8),
-                    new NetworkAccessControl(IPAddress.Parse("10.0.0.0"), 8),
-                    new NetworkAccessControl(IPAddress.Parse("100.64.0.0"), 10),
-                    new NetworkAccessControl(IPAddress.Parse("172.16.0.0"), 12),
-                    new NetworkAccessControl(IPAddress.Parse("192.168.0.0"), 16),
-                    new NetworkAccessControl(IPAddress.Parse("2000::"), 3, true),
-                    new NetworkAccessControl(IPAddress.IPv6Any, 0)
-                ];
+            NetworkAccessControl[] proxyAddresses = version >= 2 ? AuthZoneInfo.ReadNetworkACLFrom(bR) ?? [] : CreateDefaultReverseProxyAcl();
             string certificatePath = s.ReadShortString();
             string certificatePassword = s.ReadShortString();
-            var headers = new WebHeaders(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'");
+            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses);
             if (!apply)
                 return headers;
 
@@ -528,7 +525,7 @@ namespace DnsServerCore
             _webServiceEnableHttp3 = http3Enabled;
             _webServiceHttpToTlsRedirect = redirectToTls;
             _webServiceUseSelfSignedTlsCertificate = selfSignedCertificate;
-            _webServiceReverseProxyAddresses = proxyAddresses;
+
             _webServiceTlsCertificatePath = certificatePath;
             _webServiceTlsCertificatePassword = certificatePassword;
 
@@ -562,11 +559,14 @@ namespace DnsServerCore
                 int ownership = version == 4 ? s.ReadByte() : -1;
                 _manifestOwnsRealIpHeader = ownership >= 0 && (ownership & 1) != 0;
                 _manifestOwnsFrameAncestors = ownership >= 0 && (ownership & 2) != 0;
+                _manifestOwnsReverseProxyAcl = ownership >= 0 && (ownership & 4) != 0;
             }
             if (readOwnership || !_manifestOwnsRealIpHeader)
                 _webServiceRealIpHeader = headers.RealIp;
             if (readOwnership || !_manifestOwnsFrameAncestors)
                 _webServiceCspFrameAncestorsHeader = headers.FrameAncestors;
+            if (readOwnership || !_manifestOwnsReverseProxyAcl)
+                _webServiceReverseProxyAddresses = proxyAddresses.Length == 0 ? null : proxyAddresses;
 
             return headers;
         }
@@ -613,8 +613,8 @@ namespace DnsServerCore
 
             s.WriteShortString(_webServiceRealIpHeader);
             s.WriteShortString(_webServiceCspFrameAncestorsHeader);
-            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors)
-                bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0)));
+            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors || _manifestOwnsReverseProxyAcl)
+                bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0) | (_manifestOwnsReverseProxyAcl ? 4 : 0)));
         }
 
         #endregion
@@ -2796,16 +2796,19 @@ namespace DnsServerCore
             return value;
         }
 
-        private void CheckManifestWebHeaders(WebHeaders headers)
+        private void CheckManifestWebLiveSettings(WebLiveSettings headers)
         {
             if (_manifestOwnsRealIpHeader && headers.RealIp is not null &&
                 !string.Equals(headers.RealIp, _webServiceRealIpHeader, StringComparison.OrdinalIgnoreCase))
                 throw new DnsWebServiceException("/web/realIpHeader: Setting is managed by the configuration manifest.");
             if (_manifestOwnsFrameAncestors && headers.FrameAncestors is not null && headers.FrameAncestors != _webServiceCspFrameAncestorsHeader)
                 throw new DnsWebServiceException("/web/frameAncestors: Setting is managed by the configuration manifest.");
+            if (_manifestOwnsReverseProxyAcl && headers.ReverseProxyAcl is not null &&
+                !headers.ReverseProxyAcl.SequenceEqual(_webServiceReverseProxyAddresses ?? []))
+                throw new DnsWebServiceException("/web/reverseProxyAcl: Setting is managed by the configuration manifest.");
         }
 
-        private void ApplyManifestWebHeaders(WebHeaders headers, Action<Action> persist)
+        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, Action<Action> persist)
         {
             lock (_saveLock)
             {
@@ -2813,9 +2816,13 @@ namespace DnsServerCore
                 string oldAncestors = _webServiceCspFrameAncestorsHeader;
                 bool oldRealIpOwned = _manifestOwnsRealIpHeader;
                 bool oldAncestorsOwned = _manifestOwnsFrameAncestors;
+                var oldAcl = _webServiceReverseProxyAddresses;
+                bool oldAclOwned = _manifestOwnsReverseProxyAcl;
+                bool aclChanged = headers.ReverseProxyAcl is not null && !headers.ReverseProxyAcl.SequenceEqual(oldAcl ?? []);
                 string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
                 string ancestors = headers.FrameAncestors ?? oldAncestors;
-                if (realIp == oldRealIp && ancestors == oldAncestors &&
+                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged &&
+                    (headers.ReverseProxyAcl is not null) == oldAclOwned &&
                     (headers.RealIp is not null) == oldRealIpOwned && (headers.FrameAncestors is not null) == oldAncestorsOwned)
                 {
                     persist(null);
@@ -2826,6 +2833,9 @@ namespace DnsServerCore
                 _webServiceCspFrameAncestorsHeader = ancestors;
                 _manifestOwnsRealIpHeader = headers.RealIp is not null;
                 _manifestOwnsFrameAncestors = headers.FrameAncestors is not null;
+                _manifestOwnsReverseProxyAcl = headers.ReverseProxyAcl is not null;
+                if (aclChanged)
+                    _webServiceReverseProxyAddresses = headers.ReverseProxyAcl.Count == 0 ? null : headers.ReverseProxyAcl;
                 try
                 {
                     persist(SaveConfigFileInternal);
@@ -2837,6 +2847,8 @@ namespace DnsServerCore
                     _webServiceCspFrameAncestorsHeader = oldAncestors;
                     _manifestOwnsRealIpHeader = oldRealIpOwned;
                     _manifestOwnsFrameAncestors = oldAncestorsOwned;
+                    _webServiceReverseProxyAddresses = oldAcl;
+                    _manifestOwnsReverseProxyAcl = oldAclOwned;
                     throw;
                 }
             }
@@ -2853,7 +2865,7 @@ namespace DnsServerCore
             DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
             try
             {
-                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate, ApplyManifestWebHeaders, alreadyActive);
+                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate, ApplyManifestWebLiveSettings, alreadyActive);
             }
             catch
             {

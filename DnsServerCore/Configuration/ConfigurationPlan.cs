@@ -57,6 +57,7 @@ namespace DnsServerCore.Configuration
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true),
+            ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
             ["/logging/destination"] = Field("loggingType", "File", canApply: true),
@@ -121,7 +122,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, Action<DnsWebService.WebHeaders, Action<Action>> applyWebHeaders, bool alreadyActive)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive)
         {
             CheckApplySupport(manifest);
 
@@ -135,7 +136,7 @@ namespace DnsServerCore.Configuration
 
             return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
-                    applyWebHeaders(GetWebHeaders(manifest), writeWebConfig => log.ApplyManifestSettings(
+                    applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
@@ -144,14 +145,15 @@ namespace DnsServerCore.Configuration
                 writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig))));
         }
 
-        private static DnsWebService.WebHeaders GetWebHeaders(ConfigurationManifest manifest)
+        private static DnsWebService.WebLiveSettings GetWebLiveSettings(ConfigurationManifest manifest)
         {
             if (!manifest.Settings.TryGetProperty("web", out JsonElement web))
                 return default;
 
-            return new DnsWebService.WebHeaders(
+            return new DnsWebService.WebLiveSettings(
                 web.TryGetProperty("realIpHeader", out JsonElement realIp) ? ConfigurationManifest.ReadWebHeader(realIp, realIp: true) : null,
-                web.TryGetProperty("frameAncestors", out JsonElement ancestors) ? ConfigurationManifest.ReadWebHeader(ancestors, realIp: false) : null);
+                web.TryGetProperty("frameAncestors", out JsonElement ancestors) ? ConfigurationManifest.ReadWebHeader(ancestors, realIp: false) : null,
+                web.TryGetProperty("reverseProxyAcl", out JsonElement acl) ? ConfigurationManifest.ReadWebReverseProxyAcl(acl) : null);
         }
 
         private static IReadOnlyList<string> GetBlockListSources(ConfigurationManifest manifest)
@@ -388,6 +390,11 @@ namespace DnsServerCore.Configuration
                     {
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
+                    }
+                    else if (path == "/web/reverseProxyAcl")
+                    {
+                        var rules = ConfigurationManifest.ReadWebReverseProxyAcl(desired);
+                        candidate = JsonSerializer.SerializeToElement(rules.Select(rule => rule.ToString()).ToArray());
                     }
                     else if (path is "/web/realIpHeader" or "/web/frameAncestors")
                     {

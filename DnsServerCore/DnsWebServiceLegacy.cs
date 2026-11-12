@@ -226,7 +226,7 @@ namespace DnsServerCore
                 if (version is >= 28 and <= 42)
                 {
                     LegacyWebConfiguration web = ReadLegacyWebConfiguration(reader, version);
-                    CheckManifestWebHeaders(new WebHeaders(web.RealIpHeader, null));
+                    CheckManifestWebLiveSettings(new WebLiveSettings(web.RealIpHeader, null));
                     string domain = stream.ReadShortString();
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
@@ -271,7 +271,7 @@ namespace DnsServerCore
 
                 if (version is >= 2 and <= 27)
                 {
-                    CheckManifestWebHeaders(new WebHeaders("X-Real-IP", null));
+                    CheckManifestWebLiveSettings(new WebLiveSettings("X-Real-IP", null));
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(stream.ReadShortString()));
 
