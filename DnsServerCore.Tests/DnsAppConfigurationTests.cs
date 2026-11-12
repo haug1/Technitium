@@ -104,6 +104,47 @@ namespace DnsServerCore.Tests
             Assert.Single(reloaded.Answer);
             await PreviewAsync(manifest, expectChanges: false);
 
+            JsonElement managed = await server.CallAsync("apps/config/get?name=FilterAaaa", server.AdminToken);
+            LoopbackWebService.AssertOk(managed);
+            Assert.Contains(managed.GetProperty("response").GetProperty("managedSettings").EnumerateArray(),
+                path => path.ValueEquals("/apps/packages/FilterAaaa/configuration"));
+            using (var deniedConfig = new FormUrlEncodedContent([
+                new("config", """{"enableFilterAaaa":true,"defaultTtl":30,"filterDomains":[]}""")
+            ]))
+            {
+                JsonElement denied = await server.CallAsync("apps/config/set?name=FilterAaaa", server.AdminToken, deniedConfig);
+                Assert.Equal("error", denied.GetProperty("status").GetString());
+                Assert.Contains("/apps/packages/FilterAaaa/configuration", denied.GetProperty("errorMessage").GetString());
+            }
+            JsonElement deniedRemoval = await server.CallAsync("apps/uninstall?name=FilterAaaa", server.AdminToken);
+            Assert.Equal("error", deniedRemoval.GetProperty("status").GetString());
+            Assert.Contains("/apps/packages/FilterAaaa", deniedRemoval.GetProperty("errorMessage").GetString());
+
+            using var backup = new MemoryStream();
+            using (var archive = new ZipArchive(backup, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                using var writer = new StreamWriter(archive.CreateEntry("apps/FilterAaaa/dnsApp.config").Open());
+                writer.Write("""{"enableFilterAaaa":true,"defaultTtl":30,"filterDomains":[]}""");
+            }
+            backup.Position = 0;
+            using var restore = new MultipartFormDataContent();
+            restore.Add(new StreamContent(backup), "file", "apps-backup.zip");
+            JsonElement deniedRestore = await server.CallAsync("settings/restore?apps=true", server.AdminToken, restore);
+            Assert.Equal("error", deniedRestore.GetProperty("status").GetString());
+            Assert.Contains("/apps/packages/FilterAaaa/configuration", deniedRestore.GetProperty("errorMessage").GetString());
+            Assert.Single((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+
+            const string release = """{"schemaVersion":1}""";
+            revision = await PreviewAsync(release, expectChanges: false);
+            using (var body = new StringContent(release, Encoding.UTF8, "application/json"))
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/config/apply", server.AdminToken, body, revision));
+            await server.RestartAsync();
+            using var enabled = new FormUrlEncodedContent([
+                new("config", """{"enableFilterAaaa":true,"defaultTtl":30,"filterDomains":[]}""")
+            ]);
+            LoopbackWebService.AssertOk(await server.CallAsync("apps/config/set?name=FilterAaaa", server.AdminToken, enabled));
+            Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+
             async Task<string> PreviewAsync(string input, bool expectChanges = true)
             {
                 using var body = new StringContent(input, Encoding.UTF8, "application/json");

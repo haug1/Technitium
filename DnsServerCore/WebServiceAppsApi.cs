@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore.ApplicationCommon;
 using DnsServerCore.Auth;
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns.Applications;
 using Microsoft.AspNetCore.Http;
 using System;
@@ -58,6 +59,7 @@ namespace DnsServerCore
                 jsonWriter.WriteString("name", application.Name);
                 jsonWriter.WriteString("description", application.Description);
                 jsonWriter.WriteString("version", DnsWebService.GetCleanVersion(application.Version));
+                WriteManagedAppPaths(jsonWriter, application.Name);
 
                 if (jsonStoreAppsArray.ValueKind != JsonValueKind.Undefined)
                 {
@@ -320,6 +322,7 @@ namespace DnsServerCore
                 if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                     throw new DnsWebServiceException("Parameter 'url' value must start with 'https://'.");
 
+                _dnsWebService._dnsServer.DnsApplicationManager.CheckPackageUpdate(name);
                 DnsApplication application = await _dnsWebService._dnsServer.DnsApplicationManager.DownloadAndUpdateAppAsync(name, new Uri(url));
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DNS application '" + name + "' was updated successfully from: " + url);
@@ -473,6 +476,19 @@ namespace DnsServerCore
 
                 Utf8JsonWriter jsonWriter = context.GetCurrentJsonWriter();
                 jsonWriter.WriteString("config", config);
+                WriteManagedAppPaths(jsonWriter, application.Name);
+            }
+
+            private void WriteManagedAppPaths(Utf8JsonWriter writer, string name)
+            {
+                string path = ConfigurationApplications.AppPath(name);
+                writer.WriteStartArray("managedSettings");
+                foreach (string owned in _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths)
+                {
+                    if (owned == path || owned.StartsWith(path + "/", StringComparison.Ordinal))
+                        writer.WriteStringValue(owned);
+                }
+                writer.WriteEndArray();
             }
 
             public async Task SetAppConfigAsync(HttpContext context)
@@ -496,7 +512,8 @@ namespace DnsServerCore
                 if (config.Length == 0)
                     config = null;
 
-                await application.SetConfigAsync(config);
+                if (_dnsWebService._dnsServer.DnsApplicationManager.CheckConfigurationWrite(application, config))
+                    await application.SetConfigAsync(config);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DNS application '" + name + "' app config was saved successfully.");
 

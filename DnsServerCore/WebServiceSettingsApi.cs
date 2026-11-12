@@ -804,6 +804,10 @@ namespace DnsServerCore
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
+                if (_dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths.Count > 0 &&
+                    !_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+
                 if (_dnsWebService._authManager.HasManagedAuthOwnership &&
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
@@ -1044,6 +1048,8 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WritePropertyName("manifestApplicationOwnership");
+                    JsonSerializer.Serialize(writer, _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths);
                     var apps = preparedApps ?? PrepareAppsForSession(manifest, sessionUser);
                     if (apps is not null)
                         ConfigurationApplications.WriteSnapshot(writer, apps, _configurationRevisionKey);
@@ -2414,8 +2420,9 @@ namespace DnsServerCore
                                 blockedZones && _dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList;
                             bool checkScopes = scopes && _dnsWebService._dhcpServer.ManagedPaths.Count > 0;
                             bool checkZones = zones && _dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.Count > 0;
+                            bool checkApps = apps && _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths.Count > 0;
                             bool checkAuth = authConfig && _dnsWebService._authManager.HasManagedAuthSettings;
-                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes || checkZones || checkAuth)
+                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes || checkZones || checkAuth || checkApps)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
@@ -2427,6 +2434,8 @@ namespace DnsServerCore
                                         using Stream authConfiguration = authEntry.Open();
                                         auth.CheckManifestRestoreOwnership(authConfiguration);
                                     }
+                                    if (checkApps)
+                                        _dnsWebService._dnsServer.DnsApplicationManager.CheckManifestRestore(archive, deleteExistingFiles);
                                     if (checkZones)
                                         _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRestore(archive, deleteExistingFiles);
                                     if (checkScopes)

@@ -326,6 +326,8 @@ namespace DnsServerCore.Configuration
                     users.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestPermissionOwnership", out JsonElement permissionOwnership))
                     permissionOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestApplicationOwnership", out JsonElement applicationOwnership))
+                    applicationOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestApplications", out JsonElement applications))
                     applications.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestStaticSessions", out JsonElement staticSessions))

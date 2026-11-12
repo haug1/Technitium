@@ -18,11 +18,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.ApplicationCommon;
+using DnsServerCore.Configuration;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
+using System.Security.Cryptography;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -61,6 +64,9 @@ namespace DnsServerCore.Dns.Applications
         const int APP_UPDATE_TIMER_INITIAL_INTERVAL = 10000;
         const int APP_UPDATE_TIMER_PERIODIC_INTERVAL = 86400000;
 
+        private string[] _manifestOwnedPaths = [];
+        internal IReadOnlyList<string> ManagedPaths => _manifestOwnedPaths;
+
         SemaphoreSlim _opsLock = new SemaphoreSlim(1, 1);
 
         #endregion
@@ -72,6 +78,10 @@ namespace DnsServerCore.Dns.Applications
             _dnsServer = dnsServer;
 
             _appsPath = Path.Combine(_dnsServer.ConfigFolder, "apps");
+            string ownershipFile = Path.Combine(dnsServer.ConfigFolder, ConfigurationApplications.OwnershipFile);
+            if (File.Exists(ownershipFile))
+                _manifestOwnedPaths = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(ownershipFile))
+                    ?? throw new InvalidDataException("Invalid app manifest ownership file.");
 
             if (!Directory.Exists(_appsPath))
                 Directory.CreateDirectory(_appsPath);
@@ -247,6 +257,8 @@ namespace DnsServerCore.Dns.Applications
 
                         foreach (DnsApplication application in _applications.Values)
                         {
+                            if (IsPackageUpdateManaged(application.Name))
+                                continue;
                             foreach (JsonElement jsonStoreApp in jsonStoreAppsArray.EnumerateArray())
                             {
                                 string name = jsonStoreApp.GetProperty("name").GetString();
@@ -394,6 +406,92 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
+        internal bool IsPackageUpdateManaged(string name)
+        {
+            string path = ConfigurationApplications.AppPath(name);
+            var paths = _manifestOwnedPaths;
+            return paths.Contains(path + "/version") || paths.Contains(path + "/configuration");
+        }
+
+        internal void CheckPackageUpdate(string name)
+        {
+            if (IsPackageUpdateManaged(name))
+                throw new InvalidDataException($"{ConfigurationApplications.AppPath(name)}: The package version or configuration is managed by the manifest.");
+        }
+
+        internal bool CheckConfigurationWrite(DnsApplication app, string config)
+        {
+            string path = ConfigurationApplications.AppPath(app.Name) + "/configuration";
+            if (!_manifestOwnedPaths.Contains(path))
+                return true;
+            if (app.ReadManifestConfig() != config)
+                throw new InvalidDataException($"{path}: App configuration is managed by the manifest.");
+            return false;
+        }
+
+        internal void CheckManifestRestore(ZipArchive archive, bool deleteExistingFiles, bool isConfigTransfer = false)
+        {
+            var paths = _manifestOwnedPaths;
+            if (paths.Length == 0)
+                return;
+
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            foreach (DnsApplication app in _applications.Values.OrderBy(app => app.Name, StringComparer.Ordinal))
+            {
+                string path = ConfigurationApplications.AppPath(app.Name);
+                if (!paths.Contains(path))
+                    continue;
+                string archiveFolder = "apps/" + app.Name + "/";
+                if (deleteExistingFiles || isConfigTransfer &&
+                    !archive.Entries.Any(entry => entry.FullName.StartsWith(archiveFolder, comparison)))
+                    throw new InvalidDataException($"{path}: Restore would replace manifest-managed app membership.");
+
+                if (!IsPackageUpdateManaged(app.Name))
+                    continue;
+                string folder = Path.GetFullPath(app.DnsServer.ApplicationFolder) + Path.DirectorySeparatorChar;
+                foreach (ZipArchiveEntry entry in archive.Entries)
+                {
+                    if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal) || entry.Name.Length == 0)
+                        continue;
+                    string target = Path.GetFullPath(Path.Combine(_dnsServer.ConfigFolder, entry.FullName));
+                    if (!target.StartsWith(folder, comparison))
+                        continue;
+                    bool config = Path.GetFileName(target).Equals(DnsApplication.ConfigurationFileName, comparison);
+                    if (config && !paths.Contains(path + "/configuration"))
+                        continue;
+                    if (isConfigTransfer && !config)
+                        throw new InvalidDataException($"{path}: Cluster transfer would update a managed package.");
+                    if (File.Exists(target))
+                    {
+                        using Stream current = File.OpenRead(target);
+                        using Stream candidate = entry.Open();
+                        if (SHA256.HashData(current).AsSpan().SequenceEqual(SHA256.HashData(candidate)))
+                            continue;
+                    }
+                    throw new InvalidDataException($"{path}/{(config ? "configuration" : "version")}: Restore would change a managed app.");
+                }
+            }
+        }
+
+        internal void WriteManifestOwnership(string[] paths)
+        {
+            string file = Path.Combine(_dnsServer.ConfigFolder, ConfigurationApplications.OwnershipFile);
+            if (paths.Length == 0)
+            {
+                File.Delete(file);
+                return;
+            }
+            string temporary = file + ".tmp";
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(stream, paths);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, file, true);
+        }
+
+        internal void PublishManifestOwnership(string[] paths) => _manifestOwnedPaths = paths;
+
         internal string ConfigurationFolder => _dnsServer.ConfigFolder;
 
         internal Task EnterManifestGateAsync() => _opsLock.WaitAsync();
@@ -461,6 +559,7 @@ namespace DnsServerCore.Dns.Applications
             await _opsLock.WaitAsync();
             try
             {
+                CheckPackageUpdate(applicationName);
                 if (!_applications.ContainsKey(applicationName))
                     throw new DnsServerException("DNS application does not exists: " + applicationName);
 
@@ -515,6 +614,9 @@ namespace DnsServerCore.Dns.Applications
             await _opsLock.WaitAsync();
             try
             {
+                string path = ConfigurationApplications.AppPath(applicationName);
+                if (_manifestOwnedPaths.Contains(path))
+                    throw new InvalidDataException($"{path}: App membership is managed by the manifest.");
                 if (_applications.TryRemove(applicationName, out DnsApplication removedApp))
                 {
                     RefreshAppObjectLists();

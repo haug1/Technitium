@@ -470,10 +470,14 @@ function showAppConfigModal(objBtn, appName) {
 
             $("#divAppConfigAlert").html("");
 
+            var managedSettings = responseJSON.response.managedSettings || [];
+            var configurationPath = "/apps/packages/" + appName.replace(/~/g, "~0").replace(/\//g, "~1") + "/configuration";
+            var managed = managedSettings.includes(configurationPath);
             $("#lblAppConfigName").text(appName);
-            $("#txtAppConfig").val(responseJSON.response.config);
+            $("#txtAppConfig").val(responseJSON.response.config).prop("readOnly", managed);
+            $("#lblAppConfigManaged").text(managed ? "Manifest-managed configuration: " + configurationPath : "").toggle(managed);
 
-            $("#btnAppConfig").button("reset");
+            $("#btnAppConfig").button("reset").toggle(!managed);
 
             $("#modalAppConfig").modal("show");
 
@@ -491,6 +495,9 @@ function showAppConfigModal(objBtn, appName) {
 }
 
 function saveAppConfig() {
+    if ($("#txtAppConfig").prop("readOnly"))
+        return;
+
     var divAppConfigAlert = $("#divAppConfigAlert");
 
     var appName = $("#lblAppConfigName").text();

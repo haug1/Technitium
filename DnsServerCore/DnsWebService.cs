@@ -984,7 +984,11 @@ namespace DnsServerCore
                 }
 
                 if (isConfigTransfer)
+                {
+                    if (apps)
+                        _dnsServer.DnsApplicationManager.CheckManifestRestore(backupZip, deleteExistingFiles, isConfigTransfer: true);
                     CheckManagedDomainLists(backupZip, allowedZones, blockedZones);
+                }
 
                 if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsCertificate || _dnsServer.HasManagedTsigKeys) &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
@@ -3263,7 +3267,7 @@ namespace DnsServerCore
                     sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
                 DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
                 apps ??= ConfigurationApplications.Prepare(manifest, manager);
-                await ConfigurationApplications.ApplyAsync(manager, apps, (writeApps, appFiles) =>
+                await ConfigurationApplications.ApplyAsync(manager, apps, ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),

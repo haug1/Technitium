@@ -14,6 +14,27 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationApplications
     {
         internal const string Path = "/apps/packages";
+        internal const string OwnershipFile = "app-ownership.config";
+
+        internal static string AppPath(string name) => ConfigurationPlan.AppendPath(Path, name);
+
+        internal static string[] GetOwnedPaths(ConfigurationManifest manifest)
+        {
+            if (!IsDeclared(manifest))
+                return [];
+            JsonElement packages = manifest.Settings.GetProperty("apps").GetProperty("packages");
+            var paths = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (JsonProperty item in packages.EnumerateObject())
+            {
+                string path = AppPath(item.Name);
+                paths.Add(path);
+                if (item.Value.TryGetProperty("configuration", out _))
+                    paths.Add(path + "/configuration");
+                if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null)
+                    paths.Add(path + "/version");
+            }
+            return paths.ToArray();
+        }
 
         internal sealed record Entry(DnsApplication Application, string Before, string After)
         {
@@ -111,9 +132,9 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        internal static async Task ApplyAsync(DnsApplicationManager manager, Entry[] entries, Func<Action, string[], Task> commit)
+        internal static async Task ApplyAsync(DnsApplicationManager manager, Entry[] entries, string[] ownership, Func<Action, string[], Task> commit)
         {
-            if (entries is null || entries.Length == 0)
+            if ((entries is null || entries.Length == 0) && manager.ManagedPaths.SequenceEqual(ownership))
             {
                 await commit(null, []);
                 return;
@@ -123,6 +144,8 @@ namespace DnsServerCore.Configuration
             var activated = new List<Entry>();
             try
             {
+                bool ownershipChanged = !manager.ManagedPaths.SequenceEqual(ownership);
+                entries ??= [];
                 foreach (Entry entry in entries)
                 {
                     if (!manager.Applications.TryGetValue(entry.Application.Name, out DnsApplication current) ||
@@ -148,7 +171,18 @@ namespace DnsServerCore.Configuration
                     }
                 });
 
-                await commit(changed.Length > 0 ? Write : null, files);
+                await commit(changed.Length > 0 || ownershipChanged ? Write : null,
+                    ownershipChanged ? [.. files, OwnershipFile] : files);
+                if (ownershipChanged)
+                    manager.PublishManifestOwnership(ownership);
+
+                void Write()
+                {
+                    foreach (Entry entry in changed)
+                        entry.Application.WriteManifestConfig(entry.After);
+                    if (ownershipChanged)
+                        manager.WriteManifestOwnership(ownership);
+                }
             }
             catch
             {
@@ -179,11 +213,6 @@ namespace DnsServerCore.Configuration
                 manager.ExitManifestGate();
             }
 
-            void Write()
-            {
-                foreach (Entry entry in activated)
-                    entry.Application.WriteManifestConfig(entry.After);
-            }
         }
     }
 }
