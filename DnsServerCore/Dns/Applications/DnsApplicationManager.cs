@@ -512,6 +512,57 @@ namespace DnsServerCore.Dns.Applications
 
         internal void PublishManifestOwnership(string[] paths) => _manifestOwnedPaths = paths;
 
+        internal async Task<DnsApplication> InstallManifestAppAsync(string name, byte[] package, string version, string config, bool hasConfig)
+        {
+            string path = ConfigurationApplications.AppPath(name);
+            string folder = Path.Combine(_appsPath, name);
+            if (Directory.Exists(folder))
+                throw new InvalidDataException($"{path}: The application folder already exists.");
+
+            ConfigurationJournal.BeginAppInstall(ConfigurationFolder, name);
+            DnsApplication app = null;
+            bool attached = false;
+            try
+            {
+                Directory.CreateDirectory(folder);
+                using var stream = new MemoryStream(package, writable: false);
+                using (var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
+                    await archive.ExtractToDirectoryAsync(folder, overwriteFiles: false);
+                await File.WriteAllBytesAsync(Path.Combine(folder, name + ".zip"), package);
+
+                app = new DnsApplication(new InternalDnsServer(_dnsServer, name, folder), name);
+                if (version is not null && version != DnsWebService.GetCleanVersion(app.Version) && new Version(version) != app.Version)
+                    throw new InvalidDataException($"{path}/version: The package version does not match.");
+                string effectiveConfig = hasConfig ? config : app.ReadManifestConfig();
+                try
+                {
+                    await app.ActivateConfigAsync(effectiveConfig);
+                }
+                catch (Exception)
+                {
+                    throw new InvalidDataException($"{path}/configuration: The app rejected its configuration.");
+                }
+                if (hasConfig)
+                    app.WriteManifestConfig(effectiveConfig);
+
+                attached = _applications.TryAdd(name, app);
+                if (!attached)
+                    throw new InvalidDataException($"{path}: The app is already installed.");
+                app.ConfigUpdated += Application_ConfigUpdated;
+                RefreshAppObjectLists();
+                return app;
+            }
+            catch
+            {
+                if (attached)
+                    DetachManifestApp(app);
+                if (app is not null)
+                    DisposeManifestApp(app);
+                ConfigurationJournal.CancelAppInstall(ConfigurationFolder, name);
+                throw;
+            }
+        }
+
         internal void DetachManifestApp(DnsApplication app)
         {
             if (!_applications.TryRemove(app.Name, out _))

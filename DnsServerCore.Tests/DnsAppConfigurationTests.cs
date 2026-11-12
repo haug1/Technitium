@@ -166,6 +166,25 @@ namespace DnsServerCore.Tests
             Assert.Equal("error", blockedInstall.GetProperty("status").GetString());
             Assert.Contains("/apps/packages/FilterAaaa", blockedInstall.GetProperty("errorMessage").GetString());
 
+            string startupPath = Path.Combine(server.ConfigurationDirectory, "technitium.json");
+            await File.WriteAllBytesAsync(Path.Combine(server.ConfigurationDirectory, "filter-package.zip"), package.ToArray());
+            JsonNode install = JsonNode.Parse(BuildManifest(version,
+                """{"enableFilterAaaa":true,"defaultTtl":30,"filterDomains":[]}"""))!;
+            install["apps"]!["packages"]!["FilterAaaa"]!["source"] = new JsonObject { ["file"] = "filter-package.zip" };
+            JsonNode wrongVersion = install.DeepClone();
+            wrongVersion["apps"]!["packages"]!["FilterAaaa"]!["version"] = "999.0";
+            await File.WriteAllTextAsync(startupPath, wrongVersion.ToJsonString());
+            InvalidDataException mismatch = await Assert.ThrowsAsync<InvalidDataException>(() => server.RestartAsync());
+            Assert.Contains("/apps/packages/FilterAaaa/version", mismatch.Message);
+            Assert.False(Directory.Exists(appFolder));
+
+            await File.WriteAllTextAsync(startupPath, install.ToJsonString());
+            await server.RestartAsync();
+            Assert.True(File.Exists(Path.Combine(appFolder, "FilterAaaa.zip")));
+            Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+            await server.RestartAsync();
+            Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+
             async Task<string> PreviewAsync(string input, bool expectChanges = true, string changePath = "/apps/packages/FilterAaaa/configuration")
             {
                 using var body = new StringContent(input, Encoding.UTF8, "application/json");

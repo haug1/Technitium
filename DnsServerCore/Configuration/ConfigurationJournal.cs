@@ -10,6 +10,8 @@ namespace DnsServerCore.Configuration
     {
         private const string PendingName = ".manifest-pending";
         private const string StagingName = ".manifest-staging";
+        private const string AppInstallsName = "app-installs";
+        private const string PendingAppInstallsName = ".manifest-app-installs";
         private const string AppRemovalsName = "app-removals";
         private const string AppActivationPendingName = ".manifest-app-activation-pending";
         private const string AppActivationStagingName = ".manifest-app-activation-staging";
@@ -23,6 +25,7 @@ namespace DnsServerCore.Configuration
         {
             Recover(configFolder, PendingName, StagingName);
             Recover(configFolder, AppActivationPendingName, AppActivationStagingName);
+            RecoverAppInstalls(configFolder, Path.Combine(configFolder, PendingAppInstallsName));
         }
 
         private static void Recover(string configFolder, string pendingName, string stagingName)
@@ -46,6 +49,8 @@ namespace DnsServerCore.Configuration
                 foreach (string directory in Directory.EnumerateDirectories(apps))
                     RestoreResourceFiles(Path.Combine("apps", Path.GetFileName(directory)));
             }
+
+            RecoverAppInstalls(configFolder, Path.Combine(pending, AppInstallsName));
 
             string removals = Path.Combine(pending, AppRemovalsName);
             if (Directory.Exists(removals))
@@ -140,6 +145,38 @@ namespace DnsServerCore.Configuration
             Directory.Move(staging, pending);
         }
 
+        internal static string AppInstallPath(string name) => Path.Combine(AppInstallsName, name);
+
+        internal static void BeginAppInstall(string configFolder, string name) =>
+            Directory.CreateDirectory(Path.Combine(configFolder, PendingAppInstallsName, name));
+
+        internal static void FinishAppInstall(string configFolder, string name)
+        {
+            string marker = Path.Combine(configFolder, PendingAppInstallsName, name);
+            if (Directory.Exists(marker))
+                Directory.Delete(marker);
+        }
+
+        internal static void CancelAppInstall(string configFolder, string name)
+        {
+            string folder = Path.Combine(configFolder, "apps", name);
+            if (Directory.Exists(folder))
+                Directory.Delete(folder, recursive: true);
+            FinishAppInstall(configFolder, name);
+        }
+
+        private static void RecoverAppInstalls(string configFolder, string journal)
+        {
+            if (!Directory.Exists(journal))
+                return;
+            foreach (string marker in Directory.EnumerateDirectories(journal))
+            {
+                string name = Path.GetFileName(marker);
+                if (ConfigurationApplications.IsSafeName(name))
+                    CancelAppInstall(configFolder, name);
+            }
+        }
+
         internal static string AppRemovalPath(string name) => Path.Combine(AppRemovalsName, name);
 
         internal static void StageAppRemoval(string configFolder, string name)
@@ -181,7 +218,7 @@ namespace DnsServerCore.Configuration
 
             return directory switch
             {
-                AppRemovalsName => ConfigurationApplications.IsSafeName(name),
+                AppRemovalsName or AppInstallsName => ConfigurationApplications.IsSafeName(name),
                 "zones" => name.EndsWith(".zone", StringComparison.Ordinal) &&
                     !name.Contains('*') && !name.Contains('\\') && !name.Contains('/'),
                 "scopes" => name == Dhcp.DhcpServer.ManifestOwnershipFile ||

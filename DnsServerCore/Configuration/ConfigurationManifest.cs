@@ -459,7 +459,9 @@ namespace DnsServerCore.Configuration
             {
                 if (IsReferencePath(path) && (element.TryGetProperty("environment", out _) || element.TryGetProperty("file", out _)))
                 {
-                    if (path.StartsWith(ConfigurationTsig.Path + "/", StringComparison.Ordinal))
+                    if (path.Split('/') is ["", "apps", "packages", _, "source"])
+                        ConfigurationApplications.ValidateLocalSource(this, element, path);
+                    else if (path.StartsWith(ConfigurationTsig.Path + "/", StringComparison.Ordinal))
                         ConfigurationTsig.ReadSecret(this, element, path);
                     else
                         ResolveReference(element, path);

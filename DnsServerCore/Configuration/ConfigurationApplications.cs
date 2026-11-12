@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -40,9 +41,10 @@ namespace DnsServerCore.Configuration
             return paths.ToArray();
         }
 
-        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false)
+        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false, string InstallName = null, byte[] Package = null, string Version = null, bool HasConfig = false)
         {
-            internal string SettingPath => AppPath(Application.Name) + (Remove ? "" : "/configuration");
+            internal string Name => InstallName ?? Application.Name;
+            internal string SettingPath => AppPath(Name) + (Remove || InstallName is not null ? "" : "/configuration");
             internal string FileName => Remove ? ConfigurationJournal.AppRemovalPath(Application.Name) :
                 System.IO.Path.Combine("apps", Application.Name, DnsApplication.ConfigurationFileName);
         }
@@ -73,31 +75,83 @@ namespace DnsServerCore.Configuration
                         entries.Add(Removal(installed));
                     continue;
                 }
-                if (item.Value.TryGetProperty("source", out JsonElement source) && source.ValueKind != JsonValueKind.Null)
-                    throw new InvalidDataException($"{path}/source: Installing packages from a manifest is not implemented.");
+                if (item.Value.TryGetProperty("source", out JsonElement source) && source.ValueKind != JsonValueKind.Null &&
+                    (!source.TryGetProperty("file", out _) || manifest.FilePath is null))
+                    throw new InvalidDataException($"{path}/source: A local package requires a file reference in the startup manifest.");
                 if (!manager.Applications.TryGetValue(item.Name, out DnsApplication app))
-                    throw new InvalidDataException($"{path}: The DNS app is not installed.");
+                {
+                    if (source.ValueKind != JsonValueKind.Object)
+                        throw new InvalidDataException($"{path}: The DNS app is not installed and needs a package source.");
+                    byte[] package;
+                    try
+                    {
+                        using FileStream input = OpenLocalSource(manifest, source, path + "/source");
+                        using var copy = new MemoryStream();
+                        input.CopyTo(copy);
+                        package = copy.ToArray();
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
+                    {
+                        throw new InvalidDataException($"{path}/source: Could not read the app package.");
+                    }
+
+                    string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
+                    if (pin is not null && !System.Version.TryParse(pin, out _))
+                        throw new InvalidDataException($"{path}/version: Invalid app version.");
+                    entries.Add(new Entry(null, null, ReadConfig(item.Value, null, path), InstallName: item.Name,
+                        Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _)));
+                    continue;
+                }
                 if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null &&
                     version.GetString() != DnsWebService.GetCleanVersion(app.Version) &&
                     (!Version.TryParse(version.GetString(), out Version desired) || app.Version != desired))
                     throw new InvalidDataException($"{path}/version: The installed version does not match.");
 
                 string before = app.ReadManifestConfig();
-                string after = before;
-                if (item.Value.TryGetProperty("configuration", out JsonElement config))
-                {
-                    after = config.ValueKind == JsonValueKind.Null ? null :
-                        config.TryGetProperty("text", out JsonElement text) ? text.GetString() :
-                        config.TryGetProperty("secret", out JsonElement secret) ? manifest.ResolveReference(secret, path + "/configuration") :
-                        manifest.ResolveReference(config, path + "/configuration");
-                    if (after?.Length == 0)
-                        after = null;
-                }
+                string after = ReadConfig(item.Value, before, path);
                 entries.Add(new Entry(app, before, after));
             }
             return entries.ToArray();
 
+            string ReadConfig(JsonElement value, string before, string path)
+            {
+                    string after = before;
+                    if (value.TryGetProperty("configuration", out JsonElement config))
+                    {
+                        after = config.ValueKind == JsonValueKind.Null ? null :
+                            config.TryGetProperty("text", out JsonElement text) ? text.GetString() :
+                            config.TryGetProperty("secret", out JsonElement secret) ? manifest.ResolveReference(secret, path + "/configuration") :
+                            manifest.ResolveReference(config, path + "/configuration");
+                        if (after?.Length == 0)
+                            after = null;
+                    }
+                return after;
+            }
+
             static Entry Removal(DnsApplication app) => new(app, app.ReadManifestConfig(), null, Remove: true);
+        }
+
+        internal static void ValidateLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
+        {
+            try
+            {
+                using FileStream input = OpenLocalSource(manifest, source, path);
+                using var archive = new ZipArchive(input, ZipArchiveMode.Read);
+                if (archive.Entries.Count == 0)
+                    throw new InvalidDataException();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
+            {
+                throw new InvalidDataException($"{path}: Expected a readable, nonempty ZIP package.");
+            }
+        }
+
+        private static FileStream OpenLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
+        {
+            if (manifest.FilePath is null)
+                throw new InvalidDataException($"{path}: A local package requires a file reference in the startup manifest.");
+            return File.OpenRead(System.IO.Path.GetFullPath(source.GetProperty("file").GetString(),
+                System.IO.Path.GetDirectoryName(manifest.FilePath)));
         }
 
         internal static bool DeclaresRemovals(ConfigurationManifest manifest)
@@ -115,7 +169,10 @@ namespace DnsServerCore.Configuration
             foreach (Entry entry in entries)
             {
                 writer.WriteStartObject(entry.SettingPath);
-                writer.WriteString("version", entry.Application.Version.ToString());
+                writer.WriteString("version", entry.Application?.Version.ToString() ?? entry.Version);
+                writer.WriteBoolean("install", entry.InstallName is not null);
+                if (entry.Package is not null)
+                    writer.WriteString("package", Convert.ToHexString(HMACSHA256.HashData(key, entry.Package)));
                 writer.WriteBoolean("remove", entry.Remove);
                 writer.WriteString("before", Fingerprint(entry.Before));
                 writer.WriteString("after", Fingerprint(entry.After));
@@ -131,6 +188,11 @@ namespace DnsServerCore.Configuration
         {
             foreach (JsonProperty entry in snapshot.EnumerateObject())
             {
+                if (entry.Value.GetProperty("install").GetBoolean())
+                {
+                    changes.Add(new ConfigurationChange(entry.Name, ConfigurationChangeKind.Add, false));
+                    continue;
+                }
                 if (entry.Value.GetProperty("remove").GetBoolean())
                 {
                     changes.Add(new ConfigurationChange(entry.Name, ConfigurationChangeKind.Remove, false));
@@ -169,17 +231,18 @@ namespace DnsServerCore.Configuration
             await manager.EnterManifestGateAsync();
             var activated = new List<Entry>();
             var removed = new List<DnsApplication>();
+            var installed = new List<DnsApplication>();
             try
             {
                 bool ownershipChanged = !manager.ManagedPaths.SequenceEqual(ownership);
                 entries ??= [];
                 foreach (Entry entry in entries)
                 {
-                    if (!manager.Applications.TryGetValue(entry.Application.Name, out DnsApplication current) ||
-                        !ReferenceEquals(current, entry.Application) || current.ReadManifestConfig() != entry.Before)
+                    manager.Applications.TryGetValue(entry.Name, out DnsApplication current);
+                    if (!ReferenceEquals(current, entry.Application) || (current is not null && current.ReadManifestConfig() != entry.Before))
                         throw new InvalidDataException($"{entry.SettingPath}: The app changed during apply. Create a new preview.");
                 }
-                Entry[] changed = entries.Where(entry => !entry.Remove && entry.Before != entry.After).ToArray();
+                Entry[] changed = entries.Where(entry => entry.InstallName is null && !entry.Remove && entry.Before != entry.After).ToArray();
                 Entry[] removals = entries.Where(entry => entry.Remove).ToArray();
                 string[] files = changed.Select(entry => entry.FileName).ToArray();
                 await ConfigurationJournal.ActivateAppsAsync(manager.ConfigurationFolder, files, async () =>
@@ -199,12 +262,20 @@ namespace DnsServerCore.Configuration
                     }
                 });
 
+                foreach (Entry entry in entries.Where(entry => entry.InstallName is not null))
+                {
+                    DnsApplication app = await manager.InstallManifestAppAsync(entry.Name, entry.Package, entry.Version,
+                        entry.After, entry.HasConfig);
+                    installed.Add(app);
+                }
+
                 foreach (Entry entry in removals)
                 {
                     manager.DetachManifestApp(entry.Application);
                     removed.Add(entry.Application);
                 }
-                string[] resources = [.. files, .. removals.Select(entry => entry.FileName)];
+                string[] resources = [.. files, .. removals.Select(entry => entry.FileName),
+                    .. installed.Select(app => ConfigurationJournal.AppInstallPath(app.Name))];
                 await commit(resources.Length > 0 || ownershipChanged ? Write : null,
                     ownershipChanged ? [.. resources, OwnershipFile] : resources);
                 if (ownershipChanged)
@@ -220,10 +291,18 @@ namespace DnsServerCore.Configuration
                         ConfigurationJournal.StageAppRemoval(manager.ConfigurationFolder, entry.Application.Name);
                     if (ownershipChanged)
                         manager.WriteManifestOwnership(ownership);
+                    foreach (DnsApplication app in installed)
+                        ConfigurationJournal.FinishAppInstall(manager.ConfigurationFolder, app.Name);
                 }
             }
             catch
             {
+                foreach (DnsApplication app in installed)
+                {
+                    manager.DetachManifestApp(app);
+                    manager.DisposeManifestApp(app);
+                    ConfigurationJournal.CancelAppInstall(manager.ConfigurationFolder, app.Name);
+                }
                 foreach (DnsApplication app in removed)
                     manager.ReattachManifestApp(app);
                 string failedRollbackPath = null;
