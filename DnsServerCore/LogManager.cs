@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Configuration;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Globalization;
@@ -105,6 +106,7 @@ namespace DnsServerCore
         {
             _isPortableApp = isPortableApp;
             _configFolder = configFolder;
+            ConfigurationJournal.Recover(_configFolder, "log.config");
 
             AppDomain.CurrentDomain.UnhandledException += delegate (object sender, UnhandledExceptionEventArgs e)
             {
@@ -369,7 +371,7 @@ namespace DnsServerCore
                     if (activate)
                         ApplyLoggingType();
                     _managedSettings = managedSettings;
-                    SaveConfigFileInternal();
+                    ConfigurationJournal.Persist(_configFolder, SaveConfigFileInternal, "log.config");
                     _pendingSave = false;
                 }
                 catch
@@ -435,6 +437,7 @@ namespace DnsServerCore
             using (FileStream fS = new FileStream(tmpLogConfigFile, FileMode.Create, FileAccess.Write))
             {
                 WriteConfigTo(fS);
+                fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpLogConfigFile, logConfigFile, true);

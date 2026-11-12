@@ -71,3 +71,5 @@ This implementation applies `logging.destination`, `logging.folder`, `logging.no
 Place `technitium.json` in the server's configuration directory to reconcile the supported logging settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. After listeners start successfully, the server commits logging values and ownership together.
 
 The startup file takes effect again at the next restart. Update that file when changing the desired startup settings. With no startup file, the server continues with persisted values and ownership. To release all logging settings, apply or start with a manifest containing only `schemaVersion`.
+
+If the process stops during manifest persistence, the next startup restores the previous logging configuration and ownership before loading settings. Startup then reconciles the startup manifest if one is present.

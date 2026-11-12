@@ -150,6 +150,31 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupRecoversLoggingValuesAndOwnershipFromInterruptedApply()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string previous = """{"schemaVersion":1,"logging":{"retentionDays":180}}""";
+            string revision = (await PreviewAsync(server, previous)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, previous, revision));
+
+            const string candidate = """{"schemaVersion":1,"logging":{"retentionDays":90,"noStackTrace":true}}""";
+            revision = (await PreviewAsync(server, candidate)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, candidate, revision));
+            Assert.True((await server.GetSettingsAsync()).GetProperty("noStackTrace").GetBoolean());
+
+            // Simulate interruption after replacing the config and before retiring the journal.
+            string journal = Path.Combine(server.ConfigurationDirectory, ".manifest-pending");
+            Directory.Move(Path.Combine(server.ConfigurationDirectory, ".manifest-staging"), journal);
+
+            await server.RestartAsync();
+            JsonElement restored = await server.GetSettingsAsync();
+            Assert.Equal(180, restored.GetProperty("maxLogFileDays").GetInt32());
+            Assert.False(restored.GetProperty("noStackTrace").GetBoolean());
+            Assert.Equal("/logging/retentionDays", Assert.Single(restored.GetProperty("managedSettings").EnumerateArray()).GetString());
+            Assert.False(Directory.Exists(journal));
+        }
+
+        [Fact]
         public async Task UnsupportedStartupManifestLeavesThePreviousLoggingConfigurationIntact()
         {
             await using var server = await LoopbackWebService.StartAsync();
