@@ -207,6 +207,9 @@ namespace DnsServerCore
 
         private void CheckRestoreManifestDnsSettings(Stream stream, bool isConfigTransfer = false)
         {
+            if (!isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention))
+                throw new InvalidDataException("/statistics: Release statistics ownership before restoring DNS settings from a backup.");
+
             var reader = new BinaryReader(stream);
             string format = Encoding.ASCII.GetString(stream.ReadExactly(2));
             if (format == "DC")

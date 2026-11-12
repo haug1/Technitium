@@ -423,6 +423,57 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StatisticsApplyPersistsAndPreflightsLegacyEdits()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?enableInMemoryStats=false&maxStatFileDays=120", server.AdminToken));
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"statistics":{"inMemory":true,"retentionDays":0}}""";
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+
+            await server.RestartAsync();
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.True(settings.GetProperty("enableInMemoryStats").GetBoolean());
+            Assert.Equal(0, settings.GetProperty("maxStatFileDays").GetInt32());
+            Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), path => path.ValueEquals("/statistics/inMemory"));
+            Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), path => path.ValueEquals("/statistics/retentionDays"));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            int ttl = settings.GetProperty("defaultRecordTtl").GetInt32();
+            JsonElement rejected = await server.CallAsync("settings/set?defaultRecordTtl=123&maxStatFileDays=90", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/statistics/retentionDays", rejected.GetProperty("errorMessage").GetString());
+            Assert.Equal(ttl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?enableInMemoryStats=true&maxStatFileDays=0", server.AdminToken));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/statistics", restore.GetProperty("errorMessage").GetString());
+            Assert.Equal(0, (await server.GetSettingsAsync()).GetProperty("maxStatFileDays").GetInt32());
+
+            const string reset = """{"schemaVersion":1,"statistics":{"inMemory":null,"retentionDays":null}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            settings = await server.GetSettingsAsync();
+            Assert.False(settings.GetProperty("enableInMemoryStats").GetBoolean());
+            Assert.Equal(365, settings.GetProperty("maxStatFileDays").GetInt32());
+
+            const string release = """{"schemaVersion":1}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?maxStatFileDays=90", server.AdminToken));
+        }
+
+        [Fact]
         public async Task ResolverProtocolSettingsApplyAndRejectConflictingRestore()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -1384,7 +1435,7 @@ namespace DnsServerCore.Tests
             await using (var source = await LoopbackWebService.StartAsync())
             {
                 LoopbackWebService.AssertOk(await source.CallAsync(
-                    "settings/set?maxLogFileDays=180&noStackTrace=true&useLocalTime=true&logFolder=archive", source.AdminToken));
+                    "settings/set?maxLogFileDays=180&noStackTrace=true&useLocalTime=true&logFolder=archive&enableInMemoryStats=true&maxStatFileDays=120", source.AdminToken));
                 JsonElement settings = await source.GetSettingsAsync();
                 httpPort = settings.GetProperty("webServiceHttpPort").GetInt32();
                 endpoint = IPEndPoint.Parse(settings.GetProperty("dnsServerLocalEndPoints")[0].GetString()!);

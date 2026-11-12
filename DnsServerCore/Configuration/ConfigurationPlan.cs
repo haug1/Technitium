@@ -77,8 +77,8 @@ namespace DnsServerCore.Configuration
             ["/logging/retentionDays"] = Field("maxLogFileDays", 365, canApply: true),
             ["/logging/ignoreResolverLogs"] = Field("ignoreResolverLogs", false),
             ["/logging/logQueries"] = Field("logQueries", false),
-            ["/statistics/inMemory"] = Field("enableInMemoryStats", false),
-            ["/statistics/retentionDays"] = Field("maxStatFileDays", 365),
+            ["/statistics/inMemory"] = Field("enableInMemoryStats", false, canApply: true),
+            ["/statistics/retentionDays"] = Field("maxStatFileDays", 365, canApply: true),
             ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24, canApply: true),
             [BlockListSourcesPath] = new("blockListUrls", JsonSerializer.SerializeToElement<string>(null),
                 false, OmitFromExport: true, CanApply: true),
@@ -149,7 +149,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -249,6 +249,18 @@ namespace DnsServerCore.Configuration
                     return null;
                 return value.ValueKind == JsonValueKind.Null ? _settings["/dns/" + name].Default : value;
             }
+        }
+
+        private static DnsServer.StatisticsSettings GetStatisticsSettings(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("statistics", out JsonElement statistics))
+                return default;
+
+            bool? inMemory = statistics.TryGetProperty("inMemory", out JsonElement mode)
+                ? mode.ValueKind != JsonValueKind.Null && mode.GetBoolean() : null;
+            int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
+                ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
+            return new DnsServer.StatisticsSettings(inMemory, retention);
         }
 
         internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)

@@ -909,6 +909,11 @@ namespace DnsServerCore
                     hasUpdateChecks ? dnsServerEnableCheckForUpdate : null, hasUdpPayload ? udpPayloadSize : null,
                     hasDnssecValidation ? dnssecValidation : null));
 
+                bool hasInMemoryStats = request.TryGetQueryOrForm("enableInMemoryStats", bool.Parse, out bool enableInMemoryStats);
+                bool hasStatRetention = request.TryGetQueryOrForm("maxStatFileDays", int.Parse, out int maxStatFileDays);
+                _dnsWebService._dnsServer.CheckManifestStatistics(new DnsServer.StatisticsSettings(
+                    hasInMemoryStats ? enableInMemoryStats : null, hasStatRetention ? maxStatFileDays : null));
+
                 try
                 {
                     try
@@ -1999,10 +2004,10 @@ namespace DnsServerCore
                         if (retentionDays.HasValue)
                             _dnsWebService._log.MaxLogFileDays = retentionDays.Value;
 
-                        if (request.TryGetQueryOrForm("enableInMemoryStats", bool.Parse, out bool enableInMemoryStats))
+                        if (hasInMemoryStats && !_dnsWebService._dnsServer.ManifestOwnsInMemoryStatistics)
                             _dnsWebService._dnsServer.StatsManager.EnableInMemoryStats = enableInMemoryStats;
 
-                        if (request.TryGetQueryOrForm("maxStatFileDays", int.Parse, out int maxStatFileDays))
+                        if (hasStatRetention && !_dnsWebService._dnsServer.ManifestOwnsStatisticsRetention)
                             _dnsWebService._dnsServer.StatsManager.MaxStatFileDays = maxStatFileDays;
 
                         #endregion
