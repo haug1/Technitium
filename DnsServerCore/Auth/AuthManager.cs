@@ -470,19 +470,50 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void SaveConfigFileInternal()
+        private void SaveConfigFileInternal(Permission zonePermissions = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS);
+                WriteConfigTo(fS, zonePermissions);
+                if (zonePermissions is not null)
+                    fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpConfigFile, configFile, true);
 
             _log.Write("DNS Server auth config file was saved: " + configFile);
+        }
+
+        internal void ApplyManifestZonePermissions(IReadOnlyDictionary<string, bool> membership, User creator, Action<Action> persist)
+        {
+            if (membership.Count == 0)
+            {
+                persist(null);
+                return;
+            }
+
+            lock (_saveLock)
+            {
+                Permission permissions = GetPermission(PermissionSection.Zones).CopySection();
+                Group admins = GetGroup(Group.ADMINISTRATORS);
+                Group dnsAdmins = GetGroup(Group.DNS_ADMINISTRATORS);
+                foreach (var (name, create) in membership)
+                {
+                    permissions.RemoveAllSubItemPermissions(name);
+                    if (!create)
+                        continue;
+                    if (creator is not null)
+                        permissions.SetSubItemPermission(name, creator, PermissionFlag.ViewModifyDelete);
+                    permissions.SetSubItemPermission(name, admins, PermissionFlag.ViewModifyDelete);
+                    permissions.SetSubItemPermission(name, dnsAdmins, PermissionFlag.ViewModifyDelete);
+                }
+
+                persist(() => SaveConfigFileInternal(permissions));
+                _permissions[PermissionSection.Zones] = permissions;
+            }
         }
 
         public void SaveConfigFile(bool immediately = false)
@@ -802,7 +833,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void WriteConfigTo(Stream s)
+        private void WriteConfigTo(Stream s, Permission zonePermissions = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -822,7 +853,7 @@ namespace DnsServerCore.Auth
             bW.Write(_permissions.Count);
 
             foreach (KeyValuePair<PermissionSection, Permission> permission in _permissions)
-                permission.Value.WriteTo(bW);
+                (permission.Key == PermissionSection.Zones && zonePermissions is not null ? zonePermissions : permission.Value).WriteTo(bW);
 
             List<UserSession> activeSessions = new List<UserSession>(_sessions.Count);
 

@@ -868,8 +868,8 @@ namespace DnsServerCore.Configuration
                 foreach (JsonProperty zone in value.EnumerateObject())
                 {
                     string zonePath = AppendPath(path, zone.Name);
-                    if (zone.Value.ValueKind != JsonValueKind.Object)
-                        throw new InvalidDataException($"{zonePath}: Applying zone deletion is not implemented.");
+                    if (zone.Value.ValueKind == JsonValueKind.Null)
+                        continue;
                     foreach (JsonProperty field in zone.Value.EnumerateObject())
                     {
                         if (field.Name == "enabled" || (field.Name == "type" && field.Value.ValueEquals("Primary")))

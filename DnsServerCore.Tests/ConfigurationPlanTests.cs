@@ -3004,6 +3004,37 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneManifestCreatesAndDeletesPrimaryZonesWithPermissions()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=remove.test&type=Primary", server.AdminToken));
+            await server.RestartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"NEW.TEST.":{"type":"Primary"},"remove.test":null}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            string staging = Directory.CreateDirectory(Path.Combine(server.ConfigurationDirectory, "auth.tmp")).FullName;
+            try
+            {
+                JsonElement failure = await ApplyAsync(server, manifest, revision);
+                Assert.Equal("error", failure.GetProperty("status").GetString());
+                Assert.Equal(revision, (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+            }
+            finally
+            {
+                Directory.Delete(staging);
+            }
+
+            Assert.False(File.Exists(Path.Combine(server.ConfigurationDirectory, "zones", "new.test.zone")));
+            Assert.True(File.Exists(Path.Combine(server.ConfigurationDirectory, "zones", "remove.test.zone")));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            Assert.Single((await server.QueryAsync("new.test", DnsResourceRecordType.SOA)).Answer);
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            Assert.False(File.Exists(Path.Combine(server.ConfigurationDirectory, "zones", "remove.test.zone")));
+        }
+
+        [Fact]
         public async Task ZoneApplyPersistsEnabledStateAndRollsBackFailedWrites()
         {
             await using var server = await LoopbackWebService.StartAsync();

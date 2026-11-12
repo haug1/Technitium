@@ -282,6 +282,16 @@ namespace DnsServerCore.Auth
             return _subItemPermissions.TryGetValue(subItemName.ToLowerInvariant(), out Permission subItemPermission) && subItemPermission.IsPermitted(user, flag);
         }
 
+        internal Permission CopySection()
+        {
+            var copy = new Permission(_section, _subItemName);
+            copy.SyncPermissions(_userPermissions);
+            copy.SyncPermissions(_groupPermissions);
+            foreach (var (name, permission) in _subItemPermissions)
+                copy._subItemPermissions[name] = permission;
+            return copy;
+        }
+
         public void WriteTo(BinaryWriter bW)
         {
             bW.Write((byte)2);

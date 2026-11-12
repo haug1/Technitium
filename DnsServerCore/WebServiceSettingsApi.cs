@@ -708,7 +708,7 @@ namespace DnsServerCore
                     }
                     else
                     {
-                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate);
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate, zoneCreator: sessionUser);
                     }
                 }
                 catch (InvalidDataException ex)
@@ -764,8 +764,14 @@ namespace DnsServerCore
                     foreach (JsonProperty declaration in zones.EnumerateObject())
                     {
                         string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
-                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify) ||
-                            !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.Modify))
+                        bool exists = current.RootElement.GetProperty("manifestZones").GetProperty(name).TryGetProperty("type", out _);
+                        bool deletion = declaration.Value.ValueKind == JsonValueKind.Null;
+                        if (deletion && !exists)
+                            continue;
+
+                        PermissionFlag flag = deletion ? PermissionFlag.Delete : PermissionFlag.Modify;
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, flag) ||
+                            (exists && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, flag)))
                             throw new DnsWebServiceException("Access was denied.");
                     }
                 }
@@ -791,7 +797,7 @@ namespace DnsServerCore
                         {
                             var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
                             _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
-                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig);
+                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig, sessionUser);
                         }
                         finally
                         {
