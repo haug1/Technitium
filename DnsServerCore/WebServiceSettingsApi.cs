@@ -568,8 +568,8 @@ namespace DnsServerCore
 
                 bool includePreviewOnly = context.Request.TryGetQueryOrForm("includePreviewOnly", bool.Parse, out bool include) && include;
                 using JsonDocument snapshot = CaptureConfigurationSnapshot(sessionUser: sessionUser, exportDomainLists: true);
-                var manifest = ConfigurationPlan.Export(snapshot.RootElement, includePreviewOnly);
                 var missingInputs = new SortedSet<string>(StringComparer.Ordinal);
+                var manifest = ConfigurationPlan.Export(snapshot.RootElement, includePreviewOnly, missingInputs);
                 DnsServer dns = _dnsWebService._dnsServer;
 
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.View))
@@ -655,8 +655,6 @@ namespace DnsServerCore
 
                 if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
-                if (dns.Forwarders?.Count > 0 && manifest["dns"]?["forwarding"]?["servers"] is null)
-                    missingInputs.Add("/dns/forwarding/servers");
                 if (!string.IsNullOrEmpty(dns.Proxy?.Credential?.Password))
                     missingInputs.Add("/dns/proxy/password");
                 if (!string.IsNullOrEmpty(dns.DnsTlsCertificatePassword))

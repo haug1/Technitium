@@ -1331,17 +1331,54 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task ForwardingExportOmitsDohQueryCredentials()
+        public async Task ForwardingExportMigratesOrderedServersWithReferencedDohAddresses()
         {
             await using var server = await LoopbackWebService.StartAsync();
-            LoopbackWebService.AssertOk(await server.CallAsync(
-                "settings/set?forwarderProtocol=Https&forwarders=" + Uri.EscapeDataString("https://fixture.net/dns-query?token=fixture-secret"),
-                server.AdminToken));
+            const string secretAddress = "https://fixture.net/dns-query?token=fixture-secret";
+            const string plainAddress = "192.0.2.10";
+            string original = $$$$"""
+                {"schemaVersion":1,"dns":{"forwarding":{"servers":[
+                    {"address":"{{{{secretAddress}}}}","transport":"Https"},
+                    {"address":"{{{{plainAddress}}}}","transport":"Udp"}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, original)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, original, revision));
+            JsonElement exported = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(exported);
+            Assert.DoesNotContain("fixture-secret", exported.GetRawText());
+            JsonElement response = exported.GetProperty("response");
+            Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
+                path => path.ValueEquals("/dns/forwarding/servers/0/address"));
+            JsonNode forwarding = JsonNode.Parse(response.GetProperty("manifest").GetProperty("dns").GetProperty("forwarding").GetRawText())!;
+            JsonArray servers = forwarding["servers"]!.AsArray();
+            Assert.False(servers[0]!.AsObject().ContainsKey("address"));
+            Assert.Equal(plainAddress, servers[1]!["address"]!.GetValue<string>());
 
-            JsonObject exported = ConfigurationPlan.Export(await server.GetSettingsAsync(), includePreviewOnly: false);
-
-            Assert.Null(exported["dns"]!["forwarding"]!["servers"]);
-            Assert.DoesNotContain("fixture-secret", exported.ToJsonString());
+            string variable = "TECHNITIUM_TEST_FORWARDER_" + Guid.NewGuid().ToString("N");
+            servers[0]!["address"] = new JsonObject { ["environment"] = variable };
+            string migrated = new JsonObject { ["schemaVersion"] = 1, ["dns"] = new JsonObject { ["forwarding"] = forwarding } }.ToJsonString();
+            await using var destination = await LoopbackWebService.StartAsync();
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, secretAddress);
+                revision = (await PreviewAsync(destination, migrated)).GetProperty("revision").GetString()!;
+                Environment.SetEnvironmentVariable(variable, secretAddress + "-changed");
+                JsonElement stale = await ApplyAsync(destination, migrated, revision);
+                Assert.Equal("stale-preview", stale.GetProperty("errorCode").GetString());
+                Environment.SetEnvironmentVariable(variable, secretAddress);
+                revision = (await PreviewAsync(destination, migrated)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(destination, migrated, revision));
+                await destination.RestartAsync();
+                var configured = (await destination.GetSettingsAsync()).GetProperty("configuredForwarders").EnumerateArray();
+                Assert.Collection(configured, entry => Assert.Equal(secretAddress, entry.GetProperty("address").GetString()),
+                    entry => Assert.Equal(plainAddress, entry.GetProperty("address").GetString()));
+                Assert.Empty((await PreviewAsync(destination, migrated)).GetProperty("changes").EnumerateArray());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, null);
+            }
         }
 
         [Fact]

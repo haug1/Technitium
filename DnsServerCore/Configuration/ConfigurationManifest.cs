@@ -26,6 +26,7 @@ namespace DnsServerCore.Configuration
         private static readonly UTF8Encoding _secretFileEncoding = new(encoderShouldEmitUTF8Identifier: true, throwOnInvalidBytes: true);
         private static readonly Lazy<JsonSchema> _schema = new(LoadSchema);
         private readonly Lazy<IReadOnlyList<string>> _blockListSources;
+        private readonly Lazy<NameServerAddress[]> _forwardingServers;
 
         private ConfigurationManifest(string filePath, JsonElement settings)
         {
@@ -34,6 +35,9 @@ namespace DnsServerCore.Configuration
             if (settings.ValueKind == JsonValueKind.Object && settings.TryGetProperty("blocklists", out JsonElement blocklists) &&
                 blocklists.TryGetProperty("sources", out JsonElement sources))
                 _blockListSources = new(() => ReadBlockListSources(sources, this));
+            if (settings.ValueKind == JsonValueKind.Object && settings.TryGetProperty("dns", out JsonElement dns) &&
+                dns.TryGetProperty("forwarding", out JsonElement forwarding) && forwarding.TryGetProperty("servers", out JsonElement servers))
+                _forwardingServers = new(() => ReadForwardingServers(servers, this));
         }
 
         public string FilePath { get; }
@@ -43,6 +47,7 @@ namespace DnsServerCore.Configuration
 
         // Use the same resolved values to calculate the revision and apply this manifest.
         internal IReadOnlyList<string> BlockListSources => _blockListSources?.Value;
+        internal NameServerAddress[] ForwardingServers => _forwardingServers?.Value;
 
         internal static ConfigurationManifest ReferenceContext(string configFolder) =>
             new(Path.Combine(configFolder, DefaultFileName), default);
@@ -155,7 +160,7 @@ namespace DnsServerCore.Configuration
                 if (dns.TryGetProperty("blocking", out JsonElement blocking) && blocking.TryGetProperty("bypassNetworks", out JsonElement bypass))
                     ReadNetworks(bypass, "/dns/blocking/bypassNetworks");
                 if (dns.TryGetProperty("forwarding", out JsonElement forwarding) && forwarding.TryGetProperty("servers", out JsonElement forwarders))
-                    ReadForwardingServers(forwarders);
+                    ReadForwardingServers(forwarders, validateLiteralsOnly: true);
                 if (dns.TryGetProperty("rateLimits", out JsonElement rateLimits))
                 {
                     if (rateLimits.TryGetProperty("ipv4", out JsonElement limitsIpv4))
@@ -384,7 +389,7 @@ namespace DnsServerCore.Configuration
             return limits;
         }
 
-        internal static NameServerAddress[] ReadForwardingServers(JsonElement value)
+        internal static NameServerAddress[] ReadForwardingServers(JsonElement value, ConfigurationManifest manifest = null, bool validateLiteralsOnly = false)
         {
             if (value.ValueKind == JsonValueKind.Null)
                 return [];
@@ -393,7 +398,11 @@ namespace DnsServerCore.Configuration
             for (int i = 0; i < servers.Length; i++)
             {
                 JsonElement entry = value[i];
-                string address = entry.GetProperty("address").GetString();
+                JsonElement addressValue = entry.GetProperty("address");
+                if (addressValue.ValueKind != JsonValueKind.String && validateLiteralsOnly)
+                    continue;
+                string address = addressValue.ValueKind == JsonValueKind.String ? addressValue.GetString() :
+                    manifest.ResolveReference(addressValue, $"/dns/forwarding/servers/{i}/address");
                 if (Encoding.UTF8.GetByteCount(address.Trim()) > byte.MaxValue)
                     throw new InvalidDataException($"/dns/forwarding/servers/{i}/address: Maximum address length is 255 UTF-8 bytes.");
                 try
@@ -500,6 +509,11 @@ namespace DnsServerCore.Configuration
 
         private void ValidateReferences(JsonElement element, string path, bool deferClusterJoinSecrets = false)
         {
+            if (path == "/dns/forwarding/servers")
+            {
+                ReadForwardingServers(element, this);
+                return;
+            }
             if (path == "/blocklists/sources")
             {
                 ReadBlockListSources(element, this);

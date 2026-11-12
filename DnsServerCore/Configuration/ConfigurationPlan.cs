@@ -273,6 +273,8 @@ namespace DnsServerCore.Configuration
                 manifest.Settings.WriteTo(writer);
                 if (manifest.BlockListSources is { } sources)
                     JsonSerializer.Serialize(writer, sources);
+                if (manifest.ForwardingServers is { } forwarders)
+                    SerializeForwardingServers(forwarders).WriteTo(writer);
                 writer.WriteStartObject();
                 foreach (var (path, setting) in _settings.OrderBy(entry => entry.Key, StringComparer.Ordinal))
                 {
@@ -694,8 +696,7 @@ namespace DnsServerCore.Configuration
             if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("forwarding", out JsonElement forwarding))
                 return default;
 
-            return new DnsServer.ForwardingPolicy(forwarding.TryGetProperty("servers", out JsonElement servers)
-                ? ConfigurationManifest.ReadForwardingServers(servers) : null,
+            return new DnsServer.ForwardingPolicy(manifest.ForwardingServers,
                 Read("concurrent")?.GetBoolean(), ReadInt("retries"), ReadInt("timeoutMs"), ReadInt("concurrency"));
 
             JsonElement? Read(string field)
@@ -1322,7 +1323,10 @@ namespace DnsServerCore.Configuration
             return Export(currentSettings, includePreviewOnly: true);
         }
 
-        public static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly)
+        public static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly) =>
+            Export(currentSettings, includePreviewOnly, null);
+
+        internal static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly, ISet<string> missingInputs)
         {
             RequireSettingsObject(currentSettings);
             var manifest = new JsonObject { ["schemaVersion"] = ConfigurationManifest.CurrentSchemaVersion };
@@ -1333,9 +1337,6 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 JsonElement value = GetCurrentSetting(currentSettings, path, setting);
-                if (path == ForwardingServersPath && ConfigurationManifest.ReadForwardingServers(value).Any(server =>
-                    server.DoHEndPoint is Uri uri && (uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0)))
-                    continue;
                 if (path == WebAddressesPath)
                     value = JsonSerializer.SerializeToElement(ReadWebAddresses(value).Select(address => address.ToString()).ToArray());
 
@@ -1352,7 +1353,21 @@ namespace DnsServerCore.Configuration
                     section = child;
                 }
 
-                section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
+                JsonNode exported = JsonNode.Parse(value.GetRawText());
+                if (path == ForwardingServersPath && exported is JsonArray forwarders)
+                {
+                    NameServerAddress[] servers = ConfigurationManifest.ReadForwardingServers(value);
+                    for (int i = 0; i < servers.Length; i++)
+                    {
+                        if (servers[i].DoHEndPoint is Uri uri &&
+                            (uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0))
+                        {
+                            forwarders[i].AsObject().Remove("address");
+                            missingInputs?.Add($"{path}/{i}/address");
+                        }
+                    }
+                }
+                section.Add(components[^1], exported);
             }
 
             foreach (string field in new[] { "allowZones", "blockZones" })
@@ -1931,8 +1946,7 @@ namespace DnsServerCore.Configuration
                     }
                     else if (path == ForwardingServersPath)
                     {
-                        NameServerAddress[] servers = ConfigurationManifest.ReadForwardingServers(desired);
-                        candidate = SerializeForwardingServers(servers);
+                        candidate = SerializeForwardingServers(manifest.ForwardingServers);
                         current = SerializeForwardingServers(ConfigurationManifest.ReadForwardingServers(current));
                     }
                     else if (path is "/dns/rateLimits/ipv4" or "/dns/rateLimits/ipv6")
