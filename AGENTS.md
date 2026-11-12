@@ -27,7 +27,7 @@ Use CI line and branch coverage to find gaps in changed code. There is no reposi
 
 ## Implementation Plans
 
-Keep plans focused on scope, decisions, and acceptance criteria. Keep historical test results and coverage snapshots in CI artifacts and change history in Git.
+When a milestone is verified, remove it from the active plan and renumber the remaining steps. Move ongoing verification to the relevant step. Keep test results and coverage in CI artifacts and change history in Git.
 
 ## Commits and Pull Requests
 
