@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -486,16 +487,18 @@ namespace DnsServerCore.Configuration
             foreach (var (name, scope) in scopes.OrderBy(entry => entry.Key, StringComparer.Ordinal))
             {
                 var reservations = new JsonObject();
-                var reservedAddresses = new HashSet<IPAddress>();
-                bool representable = true;
-                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => ReservationKey(lease.ClientIdentifier), StringComparer.Ordinal))
+                var storedReservations = scope.ReservedLeases;
+                var duplicateAddresses = storedReservations.GroupBy(lease => lease.Address)
+                    .Where(group => group.Skip(1).Any()).Select(group => group.Key).ToHashSet();
+                string reservationsPath = ConfigurationPlan.AppendPath(ScopesPath, name) + "/reservations";
+                foreach (Lease reservation in storedReservations.OrderBy(lease => ReservationKey(lease.ClientIdentifier), StringComparer.Ordinal))
                 {
                     string key = ReservationKey(reservation.ClientIdentifier);
-                    if (reservation.HardwareAddress.Length is < 1 or > 16 ||
-                        !reservedAddresses.Add(reservation.Address) || !Scope.IsAddressInRange(reservation.Address, scope.StartingAddress, scope.EndingAddress))
+                    if (reservation.HardwareAddress.Length is < 1 or > 16 || reservation.Address.AddressFamily != AddressFamily.InterNetwork ||
+                        duplicateAddresses.Contains(reservation.Address) || !Scope.IsAddressInRange(reservation.Address, scope.StartingAddress, scope.EndingAddress))
                     {
-                        representable = false;
-                        break;
+                        missingInputs.Add(ConfigurationPlan.AppendPath(reservationsPath, key));
+                        continue;
                     }
                     var value = new JsonObject
                     {
@@ -507,12 +510,6 @@ namespace DnsServerCore.Configuration
                         value["hardwareAddress"] = BitConverter.ToString(reservation.HardwareAddress);
                     reservations.Add(key, value);
                 }
-                if (!representable)
-                {
-                    missingInputs.Add(ConfigurationPlan.AppendPath(ScopesPath, name));
-                    continue;
-                }
-
                 JsonObject settings = WriteScopeOptions(scope);
                 settings["enabled"] = scope.Enabled;
                 settings["startingAddress"] = scope.StartingAddress.ToString();

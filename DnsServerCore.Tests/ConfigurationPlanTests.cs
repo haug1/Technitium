@@ -2949,9 +2949,18 @@ namespace DnsServerCore.Tests
                 using var output = File.Create(path);
                 legacy.WriteTo(output);
             });
+            foreach (string hardwareAddress in new[] { "02-00-00-00-00-0B", "02-00-00-00-00-0C" })
+                LoopbackWebService.AssertOk(await server.CallAsync(
+                    $"dhcp/scopes/addReservedLease?name=Lab&hardwareAddress={hardwareAddress}&ipAddress=192.0.2.32", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-0D&ipAddress=192.0.2.70", server.AdminToken));
 
             JsonElement response = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(response);
+            var missing = response.GetProperty("response").GetProperty("missingInputs").EnumerateArray()
+                .Select(value => value.GetString()).Where(path => path!.StartsWith("/dhcp/", StringComparison.Ordinal));
+            Assert.Equal(new[] { "/dhcp/scopes/Lab/reservations/02-00-00-00-00-0B",
+                "/dhcp/scopes/Lab/reservations/02-00-00-00-00-0C", "/dhcp/scopes/Lab/reservations/02-00-00-00-00-0D" }, missing);
             JsonElement export = response.GetProperty("response").GetProperty("manifest");
             _ = Load(export.GetRawText());
             JsonElement scope = export.GetProperty("dhcp").GetProperty("scopes").GetProperty("Lab");
@@ -2961,6 +2970,7 @@ namespace DnsServerCore.Tests
             JsonElement custom = scope.GetProperty("reservations").GetProperty("id:0-AABB");
             Assert.Equal("02-00-00-00-00-0A", custom.GetProperty("hardwareAddress").GetString());
             Assert.Equal("192.0.2.31", custom.GetProperty("address").GetString());
+            Assert.Equal(2, scope.GetProperty("reservations").EnumerateObject().Count());
             Assert.False(scope.TryGetProperty("activeLeases", out _));
             Assert.Equal("192.0.2.45", Assert.Single(scope.GetProperty("exclusions").EnumerateArray()).GetProperty("startingAddress").GetString());
 
@@ -2994,6 +3004,9 @@ namespace DnsServerCore.Tests
             Assert.Equal("error", legacyEdit.GetProperty("status").GetString());
             Assert.Contains("/dhcp/scopes/Lab/reservations/id:0-AABB", legacyEdit.GetProperty("errorMessage").GetString());
 
+            foreach (string hardwareAddress in new[] { "02-00-00-00-00-0B", "02-00-00-00-00-0C", "02-00-00-00-00-0D" })
+                LoopbackWebService.AssertOk(await server.CallAsync(
+                    $"dhcp/scopes/removeReservedLease?name=Lab&hardwareAddress={hardwareAddress}", server.AdminToken));
             const string resize = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}""";
             using var invalid = new StringContent(resize, Encoding.UTF8, "application/json");
             JsonElement blocked = await server.CallAsync("settings/config/plan", server.AdminToken, invalid);
