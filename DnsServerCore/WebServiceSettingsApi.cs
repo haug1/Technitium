@@ -616,10 +616,11 @@ namespace DnsServerCore
                             ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs),
                             ["permissions"] = ConfigurationPermissions.Export(_dnsWebService._authManager)
                         };
-                    if (_dnsWebService._authManager.ManifestStaticSessionDefinitions.Count > 0)
+                    var staticSessions = ConfigurationStaticSessions.Export(_dnsWebService._authManager, missingInputs);
+                    if (staticSessions.Count > 0)
                     {
                         manifest["auth"] ??= new System.Text.Json.Nodes.JsonObject();
-                        manifest["auth"]["staticSessions"] = ConfigurationStaticSessions.Export(_dnsWebService._authManager, missingInputs);
+                        manifest["auth"]["staticSessions"] = staticSessions;
                     }
                     ConfigurationSso.Settings sso = _dnsWebService._authManager.GetManifestSsoSettings();
                     if (!ConfigurationSso.Same(sso, ConfigurationSso.Default))

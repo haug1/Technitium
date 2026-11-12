@@ -136,11 +136,26 @@ namespace DnsServerCore.Configuration
         {
             var sessions = new JsonObject();
             foreach (var (name, definition) in auth.ManifestStaticSessionDefinitions.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+                AddSession(name, definition.User);
+
+            int index = 0;
+            foreach (string user in auth.LegacyStaticSessionUsers.Order(StringComparer.Ordinal))
             {
-                sessions[name] = new JsonObject { ["user"] = definition.User };
-                missingInputs.Add(ConfigurationPlan.AppendPath(Path, name) + "/token");
+                string name;
+                do
+                {
+                    name = "legacy-" + (++index).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+                while (sessions.ContainsKey(name));
+                AddSession(name, user);
             }
             return sessions;
+
+            void AddSession(string name, string user)
+            {
+                sessions.Add(name, new JsonObject { ["user"] = user });
+                missingInputs.Add(ConfigurationPlan.AppendPath(Path, name) + "/token");
+            }
         }
     }
 }

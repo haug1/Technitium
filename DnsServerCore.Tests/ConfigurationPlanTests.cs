@@ -786,7 +786,7 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain(forwarderToken, first.GetRawText());
             Assert.Collection(response.GetProperty("missingInputs").EnumerateArray(),
                 entry => Assert.Equal("/auth/users/admin/password", entry.GetString()),
-                entry => Assert.Equal("/dns/forwarding/servers", entry.GetString()),
+                entry => Assert.Equal("/dns/forwarding/servers/0/address", entry.GetString()),
                 entry => Assert.Equal("/dns/proxy/password", entry.GetString()),
                 entry => Assert.Equal("/dns/tsigKeys/migration-key.test/secret", entry.GetString()));
             JsonElement manifest = response.GetProperty("manifest");
@@ -4220,6 +4220,52 @@ namespace DnsServerCore.Tests
             finally
             {
                 Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
+        public async Task LegacyStaticSessionsExportWithMissingTokensAndMigrate()
+        {
+            const string legacyVariable = "DNS_SERVER_AUTH_STATIC_SESSIONS";
+            string? previous = Environment.GetEnvironmentVariable(legacyVariable);
+            string token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string variable = "TECHNITIUM_TEST_MIGRATED_STATIC_SESSION_" + Guid.NewGuid().ToString("N");
+            try
+            {
+                await using var source = await LoopbackWebService.StartAsync();
+                Environment.SetEnvironmentVariable(legacyVariable, $"admin:{token}");
+                await source.RestartAsync();
+                LoopbackWebService.AssertOk(await source.CallAsync("settings/get", token));
+                JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain(token, export.GetRawText());
+                JsonElement response = export.GetProperty("response");
+                JsonElement sessions = response.GetProperty("manifest").GetProperty("auth").GetProperty("staticSessions");
+                JsonProperty session = Assert.Single(sessions.EnumerateObject());
+                Assert.Equal("admin", session.Value.GetProperty("user").GetString());
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
+                    path => path.ValueEquals($"/auth/staticSessions/{session.Name}/token"));
+
+                Environment.SetEnvironmentVariable(legacyVariable, null);
+                Environment.SetEnvironmentVariable(variable, token);
+                JsonNode migration = JsonNode.Parse(sessions.GetRawText())!;
+                migration[session.Name]!["token"] = new JsonObject { ["environment"] = variable };
+                string manifest = new JsonObject
+                {
+                    ["schemaVersion"] = 1,
+                    ["auth"] = new JsonObject { ["staticSessions"] = migration }
+                }.ToJsonString();
+                await using var destination = await LoopbackWebService.StartAsync();
+                string revision = (await PreviewAsync(destination, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(destination, manifest, revision));
+                await destination.RestartAsync();
+                LoopbackWebService.AssertOk(await destination.CallAsync("settings/get", token));
+                Assert.Empty((await PreviewAsync(destination, manifest)).GetProperty("changes").EnumerateArray());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(legacyVariable, previous);
+                Environment.SetEnvironmentVariable(variable, null);
             }
         }
 

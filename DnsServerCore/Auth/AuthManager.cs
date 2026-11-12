@@ -51,6 +51,7 @@ namespace DnsServerCore.Auth
         private IReadOnlyDictionary<string, UserSession> _manifestStaticSessions = new Dictionary<string, UserSession>(StringComparer.Ordinal);
         internal SortedDictionary<string, ConfigurationStaticSessions.Definition> ManifestStaticSessionDefinitions => _manifestStaticSessionDefinitions;
         internal IReadOnlyDictionary<string, ConfigurationStaticSessions.Entry> ManifestStaticSessionEntries => _manifestStaticSessionEntries;
+        internal IEnumerable<string> LegacyStaticSessionUsers => _staticSessions?.Values.Select(session => session.User.Username) ?? [];
         internal ConfigurationManifest StaticSessionReferenceContext => ConfigurationManifest.ReferenceContext(_configFolder);
 
         Dictionary<string, UserSession> _staticSessions; //predefined static session via environment variables
