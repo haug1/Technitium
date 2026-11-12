@@ -3342,6 +3342,58 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LocalUserRemovalRevokesSessionsAndPermissionGrants()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string createUser = "admin/users/create?user=retired&pass=fixture-account-password";
+            LoopbackWebService.AssertOk(await server.CallAsync(createUser, server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/groups/create?group=RetiredUsers", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/groups/set?group=RetiredUsers&members=retired", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=retired.test&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "admin/permissions/set?section=Settings&userPermissions=retired%7Ctrue%7Cfalse%7Cfalse", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/permissions/set?zone=retired.test&userPermissions=retired%7Ctrue%7Cfalse%7Cfalse", server.AdminToken));
+
+            string session = await server.LoginAsync("retired", "fixture-account-password");
+            JsonElement issued = await server.CallAsync("admin/sessions/createToken?user=retired&tokenName=fixture", server.AdminToken);
+            LoopbackWebService.AssertOk(issued);
+            string apiToken = issued.GetProperty("response").GetProperty("token").GetString()!;
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/get", apiToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("user/profile/get", session));
+
+            const string remove = """{"schemaVersion":1,"auth":{"users":{"Retired":null},"groups":{"RetiredUsers":null}}}""";
+            JsonElement preview = await PreviewAsync(server, remove);
+            Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                change.GetProperty("path").ValueEquals("/auth/users/retired") && change.GetProperty("kind").ValueEquals("Remove"));
+            Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                change.GetProperty("path").ValueEquals("/auth/groups/RetiredUsers") && change.GetProperty("kind").ValueEquals("Remove"));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, remove, preview.GetProperty("revision").GetString()!));
+            Assert.Equal("invalid-token", (await server.CallAsync("settings/get", apiToken)).GetProperty("status").GetString());
+            Assert.Equal("invalid-token", (await server.CallAsync("user/profile/get", session)).GetProperty("status").GetString());
+
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, remove)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("error", (await server.CallAsync("admin/users/get?user=retired", server.AdminToken)).GetProperty("status").GetString());
+            Assert.Equal("error", (await server.CallAsync("admin/groups/get?group=RetiredUsers", server.AdminToken)).GetProperty("status").GetString());
+            foreach (string endpoint in new[] { "admin/permissions/get?section=Settings", "zones/permissions/get?zone=retired.test" })
+            {
+                JsonElement permissions = await server.CallAsync(endpoint, server.AdminToken);
+                LoopbackWebService.AssertOk(permissions);
+                Assert.DoesNotContain(permissions.GetProperty("response").GetProperty("userPermissions").EnumerateArray(),
+                    grant => grant.GetProperty("username").ValueEquals("retired"));
+            }
+
+            LoopbackWebService.AssertOk(await server.CallAsync(createUser, server.AdminToken));
+            const string reset = """{"schemaVersion":1,"auth":{"users":null}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            await server.RestartAsync();
+            Assert.Equal("error", (await server.CallAsync("admin/users/get?user=retired", server.AdminToken)).GetProperty("status").GetString());
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/get?user=admin", server.AdminToken));
+        }
+
+        [Fact]
         public async Task LocalUserManifestRequiresSecretsAndPreservesAdministrativeAccess()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -799,8 +799,9 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (auth.ManagedLdapFields.SequenceEqual(ldapOwnership))
                 ldapOwnership = null;
 
-            var groupChanges = ConfigurationGroups.Prepare(manifest, auth, ldap);
+            var groupChanges = ConfigurationGroups.Prepare(manifest, auth);
             var userChanges = preparedUsers ?? ConfigurationUsers.Prepare(manifest, auth, groupChanges, actor: creator);
+            ConfigurationGroups.ValidateRemovals(auth, groupChanges, ldap, userChanges);
             string[] groupOwnership = ConfigurationGroups.GetOwnedPaths(manifest);
             if (auth.ManagedGroupPaths.SequenceEqual(groupOwnership))
                 groupOwnership = null;

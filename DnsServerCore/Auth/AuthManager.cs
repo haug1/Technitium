@@ -485,15 +485,15 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void SaveConfigFileInternal(Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
+        private void SaveConfigFileInternal(IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, zonePermissions, ldap, groupChanges, stagedUsers);
-                if (zonePermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null)
+                WriteConfigTo(fS, stagedPermissions, ldap, groupChanges, stagedUsers);
+                if (stagedPermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -512,22 +512,25 @@ namespace DnsServerCore.Auth
 
             lock (_saveLock)
             {
-                foreach (var (name, candidate) in groupChanges)
-                {
-                    if (candidate is null && _groups.TryGetValue(name, out Group group))
-                        ConfigurationGroups.ValidateRemoval(this, group, ldap, ConfigurationPlan.AppendPath(ConfigurationGroups.Path, group.Name));
-                }
+                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges);
 
                 Dictionary<string, User> stagedUsers = null;
                 if (userChanges.Count > 0)
                 {
                     stagedUsers = new Dictionary<string, User>();
-                    if (_users.Count + userChanges.Values.Count(change => change.Current is null) > byte.MaxValue)
+                    if (_users.Count + userChanges.Values.Count(change => change.Current is null) -
+                        userChanges.Values.Count(change => change.Remove) > byte.MaxValue)
                         throw new InvalidDataException($"{ConfigurationUsers.Path}: At most 255 users can be stored.");
                     foreach (var (name, change) in userChanges)
                     {
                         if (!ReferenceEquals(GetUser(name), change.Current))
                             throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationUsers.Path, name)}: The user changed during apply.");
+                        if (change.Remove)
+                        {
+                            ConfigurationUsers.CheckRemoval(this, change.Current, creator);
+                            stagedUsers.Add(name, null);
+                            continue;
+                        }
                         if (ReferenceEquals(change.Current, creator) && creator is not null &&
                             (change.Disabled || creator.IsMemberOfGroup(GetGroup(Group.ADMINISTRATORS)) &&
                                 !change.Groups.Contains(Group.ADMINISTRATORS.ToLowerInvariant())))
@@ -536,24 +539,49 @@ namespace DnsServerCore.Auth
                     }
                 }
 
-                Permission permissions = membership.Count == 0 ? null : GetPermission(PermissionSection.Zones).CopySection();
+                var permissions = new Dictionary<PermissionSection, Permission>();
+                User[] removedUsers = userChanges.Values.Where(change => change.Remove).Select(change => change.Current).ToArray();
+                if (removedUsers.Length > 0)
+                {
+                    foreach (var (section, current) in _permissions)
+                    {
+                        if (!removedUsers.Any(user => current.UserPermissions.ContainsKey(user) ||
+                            current.SubItemPermissions.Values.Any(item => item.UserPermissions.ContainsKey(user))))
+                            continue;
+
+                        Permission copy = current.CopySection(copySubItems: true);
+                        foreach (User user in removedUsers)
+                        {
+                            copy.RemovePermission(user);
+                            copy.RemoveAllSubItemPermissions(user);
+                        }
+                        permissions.Add(section, copy);
+                    }
+                }
+
+                Permission zonePermissions = null;
+                if (membership.Count > 0 && !permissions.TryGetValue(PermissionSection.Zones, out zonePermissions))
+                {
+                    zonePermissions = GetPermission(PermissionSection.Zones).CopySection();
+                    permissions.Add(PermissionSection.Zones, zonePermissions);
+                }
                 Group admins = GetGroup(Group.ADMINISTRATORS);
                 Group dnsAdmins = GetGroup(Group.DNS_ADMINISTRATORS);
                 foreach (var (name, create) in membership)
                 {
-                    permissions.RemoveAllSubItemPermissions(name);
+                    zonePermissions.RemoveAllSubItemPermissions(name);
                     if (!create)
                         continue;
                     if (creator is not null)
-                        permissions.SetSubItemPermission(name, creator, PermissionFlag.ViewModifyDelete);
-                    permissions.SetSubItemPermission(name, admins, PermissionFlag.ViewModifyDelete);
-                    permissions.SetSubItemPermission(name, dnsAdmins, PermissionFlag.ViewModifyDelete);
+                        zonePermissions.SetSubItemPermission(name, creator, PermissionFlag.ViewModifyDelete);
+                    zonePermissions.SetSubItemPermission(name, admins, PermissionFlag.ViewModifyDelete);
+                    zonePermissions.SetSubItemPermission(name, dnsAdmins, PermissionFlag.ViewModifyDelete);
                 }
 
                 persist(() =>
                 {
-                    if (permissions is not null || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null)
-                        SaveConfigFileInternal(permissions, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers);
+                    if (permissions.Count > 0 || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null)
+                        SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers);
                     if (ldapOwnership is not null)
                         WriteOwnership(LdapOwnershipFile, ldapOwnership);
                     if (groupOwnership is not null)
@@ -574,15 +602,16 @@ namespace DnsServerCore.Auth
                     foreach (var (name, user) in stagedUsers)
                     {
                         ConfigurationUsers.Change change = userChanges[name];
-                        if (change.Current is null)
+                        if (change.Remove)
+                            _users.TryRemove(name, out _);
+                        else if (change.Current is null)
                             _users.TryAdd(name, user);
                         else
                             change.Current.PublishManifest(user, change.Fields.Contains("password"));
                     }
                     foreach (var (token, session) in _sessions)
                     {
-                        if (stagedUsers.TryGetValue(session.User.Username, out User user) && user.Disabled &&
-                            session.Type is UserSessionType.Standard or UserSessionType.SingleUse)
+                        if (SessionRemovedByManifest(session, stagedUsers))
                             _sessions.TryRemove(token, out _);
                     }
                 }
@@ -591,8 +620,8 @@ namespace DnsServerCore.Auth
                     _managedLdapFields = ldapOwnership;
                 if (groupOwnership is not null)
                     _managedGroupPaths = groupOwnership;
-                if (permissions is not null)
-                    _permissions[PermissionSection.Zones] = permissions;
+                foreach (var (section, permission) in permissions)
+                    _permissions[section] = permission;
                 if (ldap is not null)
                     SetLdapSettings(ldap);
             }
@@ -965,7 +994,7 @@ namespace DnsServerCore.Auth
             _ldapEnabled = ldap.Enabled;
         }
 
-        private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
+        private void WriteConfigTo(Stream s, IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -998,7 +1027,12 @@ namespace DnsServerCore.Auth
             {
                 users = new ConcurrentDictionary<string, User>(_users);
                 foreach (var (name, user) in stagedUsers)
-                    users[name] = user;
+                {
+                    if (user is null)
+                        users.TryRemove(name, out _);
+                    else
+                        users[name] = user;
+                }
             }
             bW.Write(Convert.ToByte(users.Count));
             foreach (User user in users.Values)
@@ -1007,7 +1041,7 @@ namespace DnsServerCore.Auth
             bW.Write(_permissions.Count);
 
             foreach (KeyValuePair<PermissionSection, Permission> permission in _permissions)
-                (permission.Key == PermissionSection.Zones && zonePermissions is not null ? zonePermissions : permission.Value).WriteTo(bW);
+                (stagedPermissions?.TryGetValue(permission.Key, out Permission staged) == true ? staged : permission.Value).WriteTo(bW);
 
             List<UserSession> activeSessions = new List<UserSession>(_sessions.Count);
 
@@ -1015,8 +1049,7 @@ namespace DnsServerCore.Auth
             {
                 if (session.Value.HasExpired())
                     _sessions.TryRemove(session.Key, out _);
-                else if (stagedUsers?.TryGetValue(session.Value.User.Username, out User staged) != true ||
-                    !staged.Disabled || session.Value.Type is not (UserSessionType.Standard or UserSessionType.SingleUse))
+                else if (!SessionRemovedByManifest(session.Value, stagedUsers))
                     activeSessions.Add(session.Value);
             }
 
@@ -1641,6 +1674,13 @@ namespace DnsServerCore.Auth
             return null;
         }
 
+        internal bool HasStaticSession(User user) =>
+            _staticSessions?.Values.Any(session => session.User.Equals(user)) == true;
+
+        private static bool SessionRemovedByManifest(UserSession session, IReadOnlyDictionary<string, User> stagedUsers) =>
+            stagedUsers?.TryGetValue(session.User.Username, out User staged) == true &&
+            (staged is null || staged.Disabled && session.Type is UserSessionType.Standard or UserSessionType.SingleUse);
+
         public List<UserSession> GetSessions(User user)
         {
             List<UserSession> userSessions = new List<UserSession>();
@@ -1661,14 +1701,7 @@ namespace DnsServerCore.Auth
             if (type == UserSessionType.ClusterApiToken)
                 throw new InvalidOperationException();
 
-            UserSession session = new UserSession(type, tokenName, user, remoteAddress, userAgent);
-
-            if (!_sessions.TryAdd(session.Token, session))
-                throw new DnsWebServiceException("Error while creating session. Please try again.");
-
-            user.LoggedInFrom(remoteAddress);
-
-            return session;
+            return CreateSession(type, tokenName, user, remoteAddress, userAgent);
         }
 
         public UserSession CreateSession(UserSessionType type, string tokenName, string username, IPAddress remoteAddress, string userAgent)
@@ -1682,17 +1715,20 @@ namespace DnsServerCore.Auth
 
         public UserSession CreateSession(UserSessionType type, string tokenName, User user, IPAddress remoteAddress, string userAgent)
         {
-            if (user.Disabled)
-                throw new DnsWebServiceException("User account is disabled. Please contact your administrator.");
+            lock (_saveLock)
+            {
+                if (!ReferenceEquals(GetUser(user.Username), user))
+                    throw new DnsWebServiceException("User account is unavailable. Please contact your administrator.");
+                if (user.Disabled)
+                    throw new DnsWebServiceException("User account is disabled. Please contact your administrator.");
 
-            UserSession session = new UserSession(type, tokenName, user, remoteAddress, userAgent);
+                UserSession session = new UserSession(type, tokenName, user, remoteAddress, userAgent);
+                if (!_sessions.TryAdd(session.Token, session))
+                    throw new DnsWebServiceException("Error while creating session. Please try again.");
 
-            if (!_sessions.TryAdd(session.Token, session))
-                throw new DnsWebServiceException("Error while creating session. Please try again.");
-
-            user.LoggedInFrom(remoteAddress);
-
-            return session;
+                user.LoggedInFrom(remoteAddress);
+                return session;
+            }
         }
 
         public UserSession DeleteSession(string token)

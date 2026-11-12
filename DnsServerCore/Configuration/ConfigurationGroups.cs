@@ -68,8 +68,7 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static SortedDictionary<string, Group> Prepare(ConfigurationManifest manifest, AuthManager auth,
-            ConfigurationLdap.Settings ldap)
+        internal static SortedDictionary<string, Group> Prepare(ConfigurationManifest manifest, AuthManager auth)
         {
             var changes = new SortedDictionary<string, Group>(StringComparer.Ordinal);
             if (!TryGetDeclaration(manifest, out JsonElement groups))
@@ -78,7 +77,7 @@ namespace DnsServerCore.Configuration
             if (groups.ValueKind == JsonValueKind.Null)
             {
                 foreach (Group group in auth.Groups.Where(group => !IsReserved(group.Name)))
-                    Remove(group.Name.ToLowerInvariant(), group, ConfigurationPlan.AppendPath(Path, group.Name));
+                    changes.Add(group.Name.ToLowerInvariant(), null);
                 return changes;
             }
 
@@ -98,7 +97,7 @@ namespace DnsServerCore.Configuration
                     if (IsReserved(name))
                         throw new InvalidDataException($"{path}: A built-in group cannot be removed.");
                     if (current is not null)
-                        Remove(name, current, path);
+                        changes.Add(name, null);
                     continue;
                 }
 
@@ -117,21 +116,30 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{Path}: At most 255 groups can be stored.");
             return changes;
 
-            void Remove(string name, Group group, string path)
+        }
+
+        internal static void ValidateRemovals(AuthManager auth, IReadOnlyDictionary<string, Group> groups, ConfigurationLdap.Settings ldap,
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users)
+        {
+            foreach (var (name, candidate) in groups)
             {
-                ValidateRemoval(auth, group, ldap, path);
-                changes.Add(name, null);
+                if (candidate is null && auth.GetGroup(name) is Group group)
+                    ValidateRemoval(auth, group, ldap, users);
             }
         }
 
-        internal static void ValidateRemoval(AuthManager auth, Group group, ConfigurationLdap.Settings ldap, string path)
+        private static void ValidateRemoval(AuthManager auth, Group group, ConfigurationLdap.Settings ldap,
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users)
         {
-            if (auth.GetGroupMembers(group).Count > 0 ||
+            string name = group.Name.ToLowerInvariant();
+            if (auth.GetGroupMembers(group).Any(user =>
+                    users?.TryGetValue(user.Username, out ConfigurationUsers.Change change) != true ||
+                    !change.Remove && change.Groups.Contains(name)) ||
                 auth.Permissions.Any(permission => permission.GroupPermissions.ContainsKey(group) ||
                     permission.SubItemPermissions.Values.Any(item => item.GroupPermissions.ContainsKey(group))) ||
                 (ldap ?? auth.GetManifestLdapSettings()).GroupMap?.Values.Any(IsMapping) == true ||
                 auth.SsoGroupMap?.Values.Any(IsMapping) == true)
-                throw new InvalidDataException($"{path}: The group is still referenced by authentication settings.");
+                throw new InvalidDataException($"{GroupPath(name)}: The group is still referenced by authentication settings.");
 
             bool IsMapping(string mapped) => mapped.Equals(group.Name, StringComparison.OrdinalIgnoreCase);
         }
@@ -165,9 +173,8 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        internal static void WriteSnapshot(Utf8JsonWriter writer, ConfigurationManifest manifest, AuthManager auth, ConfigurationLdap.Settings ldap)
+        internal static void WriteSnapshot(Utf8JsonWriter writer, AuthManager auth, IReadOnlyDictionary<string, Group> changes)
         {
-            var changes = Prepare(manifest, auth, ldap);
             writer.WriteStartObject("manifestGroups");
             writer.WritePropertyName("current");
             Export(auth).WriteTo(writer);

@@ -15,7 +15,7 @@ namespace DnsServerCore.Configuration
         internal const string Path = "/auth/users";
 
         internal sealed record Change(User Current, string Name, string DisplayName, bool Disabled, int Timeout,
-            string[] Groups, string Password, int Iterations, string[] Fields)
+            string[] Groups, string Password, int Iterations, string[] Fields, bool Remove = false)
         {
             internal User Stage(AuthManager auth, IReadOnlyDictionary<string, Group> groupChanges)
             {
@@ -47,7 +47,11 @@ namespace DnsServerCore.Configuration
             if (!TryGetDeclaration(manifest, out JsonElement users))
                 return changes;
             if (users.ValueKind == JsonValueKind.Null)
-                throw new InvalidDataException($"{Path}: Removing users through the manifest is not implemented.");
+            {
+                foreach (User user in auth.Users.Where(user => user.Type == UserType.Local && user.Username != "admin"))
+                    Remove(user);
+                return changes;
+            }
 
             var names = new HashSet<string>(StringComparer.Ordinal);
             int additions = 0;
@@ -61,9 +65,15 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{path}: Duplicate username.");
 
                 JsonElement declaration = entry.Value;
-                if (declaration.ValueKind == JsonValueKind.Null)
-                    throw new InvalidDataException($"{path}: Removing users through the manifest is not implemented.");
                 User current = auth.GetUser(name);
+                if (declaration.ValueKind == JsonValueKind.Null)
+                {
+                    if (name == "admin")
+                        throw new InvalidDataException($"{path}: The built-in administrator cannot be removed.");
+                    if (current is not null)
+                        Remove(current);
+                    continue;
+                }
                 if (current is not null && current.Type != UserType.Local ||
                     declaration.TryGetProperty("type", out JsonElement type) && type.ValueKind != JsonValueKind.Null && !type.ValueEquals("Local"))
                     throw new InvalidDataException($"{path}/type: Only local accounts can be reconciled.");
@@ -156,9 +166,26 @@ namespace DnsServerCore.Configuration
                 if (current is null || fields.Count > 0 || includeUnchanged)
                     changes.Add(name, new Change(current, name, displayName, disabled, timeout, groups.Keys.ToArray(), password, iterations, fields.ToArray()));
             }
-            if (auth.Users.Count + additions > byte.MaxValue)
+            if (auth.Users.Count + additions - changes.Values.Count(change => change.Remove) > byte.MaxValue)
                 throw new InvalidDataException($"{Path}: At most 255 users can be stored.");
             return changes;
+
+            void Remove(User user)
+            {
+                CheckRemoval(auth, user, actor);
+                changes.Add(user.Username, new Change(user, user.Username, null, false, 0, [], null, 0, [], Remove: true));
+            }
+        }
+
+        internal static void CheckRemoval(AuthManager auth, User user, User actor)
+        {
+            string path = ConfigurationPlan.AppendPath(Path, user.Username);
+            if (user.Username == "admin" || ReferenceEquals(actor, user))
+                throw new InvalidDataException($"{path}: The built-in or applying administrator cannot be removed.");
+            if (user.Type != UserType.Local)
+                throw new InvalidDataException($"{path}: Only local accounts can be removed through the manifest.");
+            if (auth.HasStaticSession(user) || auth.GetSessions(user).Any(session => session.Type == UserSessionType.ClusterApiToken))
+                throw new InvalidDataException($"{path}: An account with a static or cluster session cannot be removed.");
         }
 
         private static JsonObject Profile(User user) => new()
@@ -215,7 +242,9 @@ namespace DnsServerCore.Configuration
             foreach (var (name, change) in candidates)
             {
                 string path = ConfigurationPlan.AppendPath(Path, name);
-                if (change.Current is null)
+                if (change.Remove)
+                    writer.WriteNumber(path, (int)ConfigurationChangeKind.Remove);
+                else if (change.Current is null)
                     writer.WriteNumber(path, (int)ConfigurationChangeKind.Add);
                 else
                     foreach (string field in change.Fields)
