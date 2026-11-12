@@ -629,6 +629,12 @@ namespace DnsServerCore
                     }
                 }
 
+                if (_dnsWebService._clusterManager.ClusterInitialized &&
+                    _dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary &&
+                    _dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.View))
+                    manifest["cluster"] = System.Text.Json.Nodes.JsonNode.Parse(
+                        ConfigurationClusterOptions.Export(_dnsWebService._clusterManager.GetManifestOptions()).GetRawText());
+
                 if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
                 if (dns.Forwarders?.Count > 0 && manifest["dns"]?["forwarding"]?["servers"] is null)
@@ -1051,6 +1057,13 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    if (ConfigurationClusterOptions.IsDeclared(manifest))
+                    {
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Modify))
+                            throw new DnsWebServiceException("Access was denied.");
+                        ConfigurationClusterOptions.WriteSnapshot(writer,
+                            ConfigurationClusterOptions.Prepare(manifest, _dnsWebService._clusterManager).Value);
+                    }
                     writer.WritePropertyName("manifestApplicationOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths);
                     var apps = preparedApps ?? PrepareAppsForSession(manifest, sessionUser);

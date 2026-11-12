@@ -2364,7 +2364,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/primary/deleteSecondary", _clusterApi.DeleteSecondaryNode);
             _webService.MapGetAndPost("/api/admin/cluster/primary/updateSecondary", _clusterApi.UpdateSecondaryNode);
             _webService.MapGetAndPost("/api/admin/cluster/primary/transferConfig", _clusterApi.TransferConfigAsync);
-            _webService.MapGetAndPost("/api/admin/cluster/primary/setOptions", _clusterApi.SetClusterOptions);
+            _webService.MapGetAndPost("/api/admin/cluster/primary/setOptions", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.SetClusterOptions));
             _webService.MapGetAndPost("/api/admin/cluster/initJoin", _clusterApi.InitializeAndJoinClusterAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/leave", _clusterApi.LeaveClusterAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/notify", _clusterApi.ConfigUpdateNotificationAsync);
@@ -3265,13 +3265,21 @@ namespace DnsServerCore
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
                     ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users, staticSessions,
                     sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
+                var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager);
+                Action writeCluster = null;
+                string[] clusterFiles = clusterOptions is { Changed: true } ? ["cluster.config"] : [];
                 DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
                 apps ??= ConfigurationApplications.Prepare(manifest, manager);
                 await ConfigurationApplications.ApplyAsync(manager, apps, ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeApps + writeScopes + zones.Write, [.. appFiles, .. scopeFiles, .. zones.Files], zones.Commit)));
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeApps + writeScopes + zones.Write + (clusterFiles.Length == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
+                        {
+                            writeCluster = write;
+                            zones.Commit(persist);
+                        }))));
             }
             catch
             {

@@ -202,6 +202,8 @@ namespace DnsServerCore.Configuration
 
                 if (section.Name == "zones" && currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     CompareZones(section.Value, zones, changes);
+                else if (section.Name == "cluster" && currentSettings.TryGetProperty("manifestClusterOptions", out JsonElement clusterOptions))
+                    ConfigurationClusterOptions.Compare(clusterOptions, changes);
                 else if (section.Name == "auth")
                 {
                     foreach (JsonProperty authSection in section.Value.EnumerateObject())
@@ -289,6 +291,8 @@ namespace DnsServerCore.Configuration
                     webCertificate.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestProxyPassword", out JsonElement proxyPassword))
                     proxyPassword.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestClusterOptions", out JsonElement clusterOptions))
+                    clusterOptions.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -934,6 +938,14 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
+            if (path == ConfigurationClusterOptions.Path)
+            {
+                foreach (JsonProperty option in value.EnumerateObject())
+                    if (!ConfigurationClusterOptions.Supports(option.Name))
+                        throw new InvalidDataException($"{path}/{option.Name}: This cluster setting is not implemented.");
+                return;
+            }
+
             if (path == "/zones")
             {
                 foreach (JsonProperty zone in value.EnumerateObject())

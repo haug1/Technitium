@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Auth;
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.ResourceRecords;
@@ -269,7 +270,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void SaveConfigFileInternal()
+        private void SaveConfigFileInternal(ConfigurationClusterOptions.Settings? options = null)
         {
             if (!ClusterInitialized)
                 throw new InvalidOperationException();
@@ -279,7 +280,9 @@ namespace DnsServerCore.Cluster
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS);
+                WriteConfigTo(fS, options);
+                if (options.HasValue)
+                    fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpConfigFile, configFile, true);
@@ -383,7 +386,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void WriteConfigTo(Stream s)
+        private void WriteConfigTo(Stream s, ConfigurationClusterOptions.Settings? options = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -391,10 +394,11 @@ namespace DnsServerCore.Cluster
             bW.Write((byte)1); //version
 
             bW.Write(_clusterDomain);
-            bW.Write(_heartbeatRefreshIntervalSeconds);
-            bW.Write(_heartbeatRetryIntervalSeconds);
-            bW.Write(_configRefreshIntervalSeconds);
-            bW.Write(_configRetryIntervalSeconds);
+            var settings = options ?? GetManifestOptions();
+            bW.Write(settings.HeartbeatRefresh);
+            bW.Write(settings.HeartbeatRetry);
+            bW.Write(settings.ConfigRefresh);
+            bW.Write(settings.ConfigRetry);
             s.WriteDateTime(_configLastSynced);
 
             IReadOnlyDictionary<int, ClusterNode> clusterNodes = _clusterNodes;
@@ -890,20 +894,8 @@ namespace DnsServerCore.Cluster
             if (GetSelfNode().Type != ClusterNodeType.Primary)
                 throw new DnsServerException("Failed to update Cluster options: only the Primary node can update the Cluster options.");
 
-            if ((heartbeatRefreshIntervalSeconds < 10) || (heartbeatRefreshIntervalSeconds > 300))
-                throw new ArgumentOutOfRangeException(nameof(heartbeatRefreshIntervalSeconds));
-
-            if ((heartbeatRetryIntervalSeconds < 10) || (heartbeatRetryIntervalSeconds > 300))
-                throw new ArgumentOutOfRangeException(nameof(heartbeatRetryIntervalSeconds));
-
-            if ((configRefreshIntervalSeconds < 30) || (configRefreshIntervalSeconds > 3600))
-                throw new ArgumentOutOfRangeException(nameof(configRefreshIntervalSeconds));
-
-            if ((configRetryIntervalSeconds < 30) || (configRetryIntervalSeconds > 3600))
-                throw new ArgumentOutOfRangeException(nameof(configRetryIntervalSeconds));
-
-            if (configRefreshIntervalSeconds <= heartbeatRefreshIntervalSeconds)
-                throw new ArgumentException("Failed to update Cluster options: The config refresh interval must be greater than the heartbeat refresh interval.");
+            ValidateClusterOptions(new ConfigurationClusterOptions.Settings(heartbeatRefreshIntervalSeconds,
+                heartbeatRetryIntervalSeconds, configRefreshIntervalSeconds, configRetryIntervalSeconds));
 
             bool changed = false;
 
@@ -942,6 +934,54 @@ namespace DnsServerCore.Cluster
                 //trigger notify to all secondary nodes
                 TriggerNotifyAllSecondaryNodes();
             }
+        }
+
+        internal ConfigurationClusterOptions.Settings GetManifestOptions()
+        {
+            lock (_saveLock)
+                return new(_heartbeatRefreshIntervalSeconds, _heartbeatRetryIntervalSeconds, _configRefreshIntervalSeconds, _configRetryIntervalSeconds);
+        }
+
+        internal static void ValidateClusterOptions(ConfigurationClusterOptions.Settings settings)
+        {
+            var (heartbeatRefreshIntervalSeconds, heartbeatRetryIntervalSeconds, configRefreshIntervalSeconds, configRetryIntervalSeconds) = settings;
+            if ((heartbeatRefreshIntervalSeconds < 10) || (heartbeatRefreshIntervalSeconds > 300))
+                throw new ArgumentOutOfRangeException(nameof(heartbeatRefreshIntervalSeconds));
+
+            if ((heartbeatRetryIntervalSeconds < 10) || (heartbeatRetryIntervalSeconds > 300))
+                throw new ArgumentOutOfRangeException(nameof(heartbeatRetryIntervalSeconds));
+
+            if ((configRefreshIntervalSeconds < 30) || (configRefreshIntervalSeconds > 3600))
+                throw new ArgumentOutOfRangeException(nameof(configRefreshIntervalSeconds));
+
+            if ((configRetryIntervalSeconds < 30) || (configRetryIntervalSeconds > 3600))
+                throw new ArgumentOutOfRangeException(nameof(configRetryIntervalSeconds));
+
+            if (configRefreshIntervalSeconds <= heartbeatRefreshIntervalSeconds)
+                throw new ArgumentException("Failed to update Cluster options: The config refresh interval must be greater than the heartbeat refresh interval.");
+
+        }
+
+        internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
+        {
+            if (candidate is not { Changed: true } change)
+            {
+                persist(null);
+                return;
+            }
+
+            lock (_saveLock)
+            {
+                if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Primary || GetSelfNode().Id != change.NodeId ||
+                    GetManifestOptions() != change.Current)
+                    throw new InvalidDataException("/cluster: Cluster options changed during apply. Create a new preview.");
+
+                persist(() => SaveConfigFileInternal(change.Desired));
+                (_heartbeatRefreshIntervalSeconds, _heartbeatRetryIntervalSeconds, _configRefreshIntervalSeconds, _configRetryIntervalSeconds) = change.Desired;
+            }
+
+            UpdateHeartbeatTimerForAllClusterNodes();
+            TriggerNotifyAllSecondaryNodes();
         }
 
         private void FindExistingRecordTtlValues(out uint nsTtl, out uint aTtl)
