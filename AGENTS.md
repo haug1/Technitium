@@ -19,7 +19,7 @@ Match surrounding code. C# uses four-space indentation, braces on separate lines
 
 ## Testing
 
-The solution has no dedicated automated test project. Build the affected projects and reproduce the changed behavior against a local instance with scratch configuration. For persisted settings, restart and verify they reload. For API or UI changes, exercise the affected endpoint or screen and record the commands and expected results.
+Run `dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj` after building the sibling library. Add tests for observable behavior and regressions using scratch configuration and controlled dependencies. For UI changes, exercise the affected screen and record the verification. See [build.md](build.md#regression-tests) for coverage commands.
 
 ## Commits and Pull Requests
 

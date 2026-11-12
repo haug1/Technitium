@@ -1,0 +1,44 @@
+name: Regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: DnsServer
+      - uses: actions/checkout@v5
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          ref: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
+          path: TechnitiumLibrary
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build TechnitiumLibrary
+        working-directory: TechnitiumLibrary
+        run: |
+          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
+            dotnet build "$project/$project.csproj" -c Release
+          done
+      - name: Run regression tests
+        working-directory: DnsServer
+        run: |
+          dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj \
+            --settings DnsServerCore.Tests/coverage.runsettings \
+            --collect "XPlat Code Coverage" --logger trx \
+            --results-directory "${{ runner.temp }}/technitium-test-results"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: regression-test-results
+          path: ${{ runner.temp }}/technitium-test-results/

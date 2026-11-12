@@ -25,6 +25,16 @@ DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES=127.0.0.1 \
 
 Open the web console URL printed at startup. A fresh configuration uses DNS port 53, which must be available and may require bind privileges. Use the web console to change the DNS listener to a development port such as 5353 for subsequent runs with the same configuration directory.
 
+## Regression tests
+
+Build the sibling library first, then run the xUnit suite from the repository root. To run inside the Nix environment from outside the shell, prefix the command with `nix develop --command`.
+
+```sh
+dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj
+```
+
+To collect C# line and branch coverage by assembly, add `--settings DnsServerCore.Tests/coverage.runsettings --collect "XPlat Code Coverage"`. The test runner prints the path to the Cobertura report. The GitHub Actions regression workflow publishes the report and test results as an artifact.
+
 ## For Windows
 
 To build the Technitium DNS Server Windows Setup, you need to install [Microsoft Visual Studio Community](https://visualstudio.microsoft.com/vs/) and [Inno Setup](https://jrsoftware.org/isinfo.php) on your computer. Once you have it installed, follow the steps below:
