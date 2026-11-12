@@ -113,6 +113,9 @@ namespace DnsServerCore.Tests
                 server.AdminToken));
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "zones/records/add?zone=member.test&domain=www.member.test&type=A&ipAddress=192.0.2.42", server.AdminToken));
+            const string catalogPermissions = "zones/permissions/get?zone=cluster-catalog.cluster.test";
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/permissions/set?zone=cluster-catalog.cluster.test&groupPermissions=Everyone%7Ctrue%7Cfalse%7Cfalse", server.AdminToken));
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
             JsonElement response = export.GetProperty("response");
@@ -122,12 +125,17 @@ namespace DnsServerCore.Tests
                     path.ValueEquals("/zones/route.test"));
             Assert.Equal("cluster-catalog.cluster.test", response.GetProperty("manifest").GetProperty("zones")
                 .GetProperty("route.test").GetProperty("catalog").GetProperty("name").GetString());
+            var catalogGrant = Assert.Single(response.GetProperty("manifest").GetProperty("zones")
+                .GetProperty("cluster-catalog.cluster.test").EnumerateObject());
+            Assert.Equal("permissions", catalogGrant.Name);
+            Assert.Equal("Everyone", Assert.Single(catalogGrant.Value.GetProperty("groups").EnumerateObject()).Name);
             JsonElement member = response.GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
             Assert.Equal(733, member.GetProperty("catalog").GetProperty("apexNameServerTtl").GetInt32());
             Assert.False(member.TryGetProperty("replaceApexNameServers", out _));
             Assert.Equal("Primary", cluster.GetProperty("bootstrap").GetProperty("role").GetString());
             string bootstrapManifest = JsonSerializer.Serialize(new { schemaVersion = 1, cluster });
             await using var restored = await LoopbackWebService.StartAsync("restored.cluster.test", enableTls: true, startupManifest: bootstrapManifest);
+            var initialCatalog = await ReadCatalogPermissionsAsync();
             JsonElement restoredExport = await restored.CallAsync("settings/config/export", restored.AdminToken);
             LoopbackWebService.AssertOk(restoredExport);
             Assert.True(JsonElement.DeepEquals(cluster, restoredExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")));
@@ -145,6 +153,13 @@ namespace DnsServerCore.Tests
             using var applyBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
             LoopbackWebService.AssertOk(await restored.CallAsync("settings/config/apply", restored.AdminToken, applyBody,
                 preview.GetProperty("response").GetProperty("revision").GetString()));
+            var migratedCatalog = await ReadCatalogPermissionsAsync();
+            Assert.Contains(migratedCatalog.EnumerateArray(),
+                grant => grant.GetProperty("name").ValueEquals("Everyone") && grant.GetProperty("canView").GetBoolean());
+            Assert.True(JsonElement.DeepEquals(
+                Assert.Single(initialCatalog.EnumerateArray(), grant => grant.GetProperty("name").ValueEquals("DNS Administrators")),
+                Assert.Single(migratedCatalog.EnumerateArray(), grant => grant.GetProperty("name").ValueEquals("DNS Administrators"))));
+            Assert.DoesNotContain("cluster-catalog.cluster.test", restored.Dns.AuthZoneManager.ManifestOwnedZones.Keys);
             Assert.Equal(600, (await restored.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
             JsonElement zone = await restored.CallAsync("zones/options/get?zone=route.test", restored.AdminToken);
             LoopbackWebService.AssertOk(zone);
@@ -208,6 +223,13 @@ namespace DnsServerCore.Tests
                 grant => grant.GetProperty("name").ValueEquals("Everyone") && grant.GetProperty("canView").GetBoolean());
             Assert.DoesNotContain("member.test", replacement.Dns.AuthZoneManager.ManifestOwnedZones.Keys);
             await AssertMigrationReapplyAsync(replacement, permissions);
+
+            async Task<JsonElement> ReadCatalogPermissionsAsync()
+            {
+                JsonElement current = await restored.CallAsync(catalogPermissions, restored.AdminToken);
+                LoopbackWebService.AssertOk(current);
+                return current.GetProperty("response").GetProperty("groupPermissions");
+            }
 
             async Task JoinPeerAsync(LoopbackWebService peer)
             {

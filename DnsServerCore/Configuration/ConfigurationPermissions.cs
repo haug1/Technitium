@@ -205,7 +205,8 @@ namespace DnsServerCore.Configuration
                     var defaults = zone is null ? Defaults(section) : new Dictionary<string, PermissionFlag>
                     {
                         [Group.ADMINISTRATORS.ToLowerInvariant()] = PermissionFlag.ViewModifyDelete,
-                        [Group.DNS_ADMINISTRATORS.ToLowerInvariant()] = PermissionFlag.ViewModifyDelete
+                        [Group.DNS_ADMINISTRATORS.ToLowerInvariant()] =
+                            currentGroups.GetValueOrDefault(Group.DNS_ADMINISTRATORS.ToLowerInvariant(), PermissionFlag.ViewModifyDelete)
                     };
                     foreach (string name in currentGroups.Keys.Union(defaults.Keys, StringComparer.Ordinal))
                         AddChange(section, true, name, currentGroups, defaults.TryGetValue(name, out var flags) ? flags : null, zone);
@@ -348,13 +349,15 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        internal static JsonObject ExportGrants(Permission permission)
+        internal static JsonObject ExportGrants(Permission permission, bool includeBuiltInZoneGroups = true)
         {
             return new JsonObject
             {
                 ["replace"] = true,
                 ["users"] = WriteGrants(permission?.UserPermissions.Select(entry => (entry.Key.Username, entry.Value)) ?? []),
-                ["groups"] = WriteGrants(permission?.GroupPermissions.Select(entry => (entry.Key.Name, entry.Value)) ?? [])
+                ["groups"] = WriteGrants(permission?.GroupPermissions
+                    .Where(entry => includeBuiltInZoneGroups || !IsRequiredGrant(PermissionSection.Zones, entry.Key.Name.ToLowerInvariant()))
+                    .Select(entry => (entry.Key.Name, entry.Value)) ?? [])
             };
 
             static JsonObject WriteGrants(IEnumerable<(string Name, PermissionFlag Flags)> grants)

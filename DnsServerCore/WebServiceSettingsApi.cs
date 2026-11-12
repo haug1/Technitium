@@ -1369,7 +1369,6 @@ namespace DnsServerCore
                     if (zone is not null && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zone.Name, sessionUser, PermissionFlag.View))
                         throw new DnsWebServiceException("Access was denied.");
 
-                    ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
                     if (ConfigurationPermissions.IsZonePermissionOnly(declaration.Value))
                     {
                         if (zone is null)
@@ -1379,6 +1378,7 @@ namespace DnsServerCore
                         writer.WriteEndObject();
                         continue;
                     }
+                    ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
                     if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type))
                         throw new InvalidDataException($"{zonePath}: Apply requires a supported zone outside catalogs.");

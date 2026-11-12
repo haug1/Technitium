@@ -27,16 +27,18 @@ namespace DnsServerCore.Configuration
 
                 string catalog = zone.CatalogZoneName;
                 AuthZoneType? catalogType = catalog is null ? null : dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type;
-                if (isClusterInfrastructure(zone.Name))
-                    continue;
-
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
                 Permission permission = getPermission?.Invoke(zone.Name);
+                if (isClusterInfrastructure(zone.Name))
+                {
+                    if (OperatorGrants(permission).Any())
+                        result.Add(name, new JsonObject { ["permissions"] = ConfigurationPermissions.ExportGrants(permission, includeBuiltInZoneGroups: false) });
+                    continue;
+                }
                 if (catalogType == AuthZoneType.SecondaryCatalog)
                 {
-                    Permission catalogPermission = !isClusterInfrastructure(catalog) && canView(catalog)
-                        ? getPermission?.Invoke(catalog) : null;
+                    Permission catalogPermission = canView(catalog) ? getPermission?.Invoke(catalog) : null;
                     if (permission is not null && !OperatorGrants(permission).SequenceEqual(OperatorGrants(catalogPermission)))
                         result.Add(name, new JsonObject { ["permissions"] = ConfigurationPermissions.ExportGrants(permission) });
                     continue;
