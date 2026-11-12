@@ -5609,6 +5609,14 @@ namespace DnsServerCore.Tests
                   "servers":[{"address":"{{{{{upstream.EndPoint}}}}}"}],"transferProtocol":"Tcp","validateZone":false
                 }}}}
                 """;
+            JsonNode unsupported = JsonNode.Parse(manifest)!;
+            unsupported["zones"]!["replica.test"]!["updates"] = new JsonObject { ["mode"] = "AllowOnlyZoneNameServers" };
+            using (var body = new StringContent(unsupported.ToJsonString(), Encoding.UTF8, "application/json"))
+            {
+                JsonElement denied = await server.CallAsync("settings/config/plan", server.AdminToken, body);
+                Assert.Equal("error", denied.GetProperty("status").GetString());
+                Assert.Contains("/zones/replica.test/updates/mode", denied.GetProperty("errorMessage").GetString());
+            }
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
             await WaitForTransferAsync(server);

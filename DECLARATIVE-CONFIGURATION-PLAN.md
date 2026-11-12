@@ -5,6 +5,7 @@ A versioned `technitium.json` manifest should reproduce the operator-controlled 
 ## 1. Close configuration and export gaps
 
 - Audit the inventory against the schema, preview, apply, and export. Close gaps where an operator-controlled value is lost or a valid source configuration cannot be represented. Use the same domain rules for equivalent manifest and API inputs.
+- Preserve the local NOTIFY and dynamic-update settings that the zone options API accepts on catalog-provisioned replicas. Apply them after catalog transfer supplies membership and records.
 
 **Acceptance.** Every operator-settable field in the inventory has a documented manifest representation and a migration path.
 

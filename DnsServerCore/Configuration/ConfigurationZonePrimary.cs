@@ -69,7 +69,7 @@ namespace DnsServerCore.Configuration
             if (type is AuthZoneType.Stub or AuthZoneType.SecondaryForwarder &&
                 UsesZoneNameServers(declaration, "query"))
                 throw new InvalidDataException($"{path}/query/mode: This zone type cannot use its name servers for query access.");
-            if (type == AuthZoneType.SecondaryForwarder && UsesZoneNameServers(declaration, "updates"))
+            if (type is AuthZoneType.Secondary or AuthZoneType.SecondaryForwarder && UsesZoneNameServers(declaration, "updates"))
                 throw new InvalidDataException($"{path}/updates/mode: This zone type cannot use its name servers for update access.");
             if (declaration.TryGetProperty("updates", out JsonElement updates) && updates.TryGetProperty("securityPolicies", out _))
                 throw new InvalidDataException($"{path}/updates/securityPolicies: Secondary zones inherit update authorization from the primary.");
