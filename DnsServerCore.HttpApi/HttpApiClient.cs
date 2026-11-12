@@ -451,7 +451,12 @@ namespace DnsServerCore.HttpApi
             JoinClusterWithCapabilitiesAsync(secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, secondaryNodeCertificate,
                 supportsDeclarativeClusterOptions, supportsDeclarativeBlockLists, supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, false, cancellationToken);
 
-        public async Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists, bool supportsDeclarativeDnsPolicy, bool supportsDeclarativeResolverPolicy, CancellationToken cancellationToken)
+        public Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists, bool supportsDeclarativeDnsPolicy, bool supportsDeclarativeResolverPolicy, CancellationToken cancellationToken) =>
+            JoinClusterWithCapabilitiesAsync(secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, secondaryNodeCertificate,
+                supportsDeclarativeClusterOptions, supportsDeclarativeBlockLists, supportsDeclarativeDomainLists,
+                supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, false, cancellationToken);
+
+        public async Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists, bool supportsDeclarativeDnsPolicy, bool supportsDeclarativeResolverPolicy, bool supportsDeclarativeRateLimits, CancellationToken cancellationToken)
         {
             if (!_loggedIn)
                 throw new HttpApiClientException("No active session exists. Please login and try again.");
@@ -465,6 +470,8 @@ namespace DnsServerCore.HttpApi
                 capability += "&supportsDeclarativeDnsPolicy=true";
             if (supportsDeclarativeResolverPolicy)
                 capability += "&supportsDeclarativeResolverPolicy=true";
+            if (supportsDeclarativeRateLimits)
+                capability += "&supportsDeclarativeRateLimits=true";
             Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primary/join?secondaryNodeId={secondaryNodeId}&secondaryNodeUrl={Uri.EscapeDataString(secondaryNodeUrl.OriginalString)}&secondaryNodeIpAddresses={Uri.EscapeDataString(secondaryNodeIpAddresses.Join())}&secondaryNodeCertificate={Base64Url.EncodeToString(secondaryNodeCertificate.Export(X509ContentType.Cert))}{capability}", cancellationToken);
 
             using JsonDocument jsonDoc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);

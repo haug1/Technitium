@@ -5313,6 +5313,8 @@ The cluster Primary can apply `dns.authoritative`, `dns.checkForUpdates`, `dns.u
 
 The Primary can also apply `dns.recursion`, `dns.blocking`, and `dns.forwarding`. To change those values or their ownership, every peer must advertise `supportsDeclarativeResolverPolicy`.
 
+The Primary can apply `dns.rateLimits` when every peer advertises `supportsDeclarativeRateLimits`. Secondaries receive the settings and ownership through cluster sync and preserve them when applying node-local manifests.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7447,6 +7449,7 @@ WHERE:
 - `supportsDeclarativeDomainLists` (optional): Set to true when the Secondary can inherit manifest ownership of allow and block domains. Required when the Primary already manages either list.
 - `supportsDeclarativeDnsPolicy` (optional): Set to true when the Secondary can inherit manifest ownership of DNS policy. Required when the Primary manages a supported cluster-wide DNS policy field.
 - `supportsDeclarativeResolverPolicy` (optional): Set to true when the Secondary can inherit manifest ownership of recursion, blocking, and forwarding policy. Required when the Primary manages any of those fields.
+- `supportsDeclarativeRateLimits` (optional): Set to true when the Secondary can inherit manifest ownership of query-rate limits. Required when the Primary manages any query-rate limit field.
 
 RESPONSE:
 ```

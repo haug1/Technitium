@@ -141,6 +141,8 @@ def verify(current, previous, folder, propagation, graceful):
         dns_policy_revision = ok(primary.call("settings/config/plan", manifest=dns_policy))["revision"]
         resolver_policy = {"schemaVersion": 1, "dns": {"forwarding": {"retries": 5}}}
         resolver_revision = ok(primary.call("settings/config/plan", manifest=resolver_policy))["revision"]
+        rate_policy = {"schemaVersion": 1, "dns": {"rateLimits": {"sampleMinutes": 2}}}
+        rate_revision = ok(primary.call("settings/config/plan", manifest=rate_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -150,12 +152,27 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeClusterOptions"] is True
             assert joined["supportsDeclarativeDnsPolicy"] is True
             assert joined["supportsDeclarativeResolverPolicy"] is True
+            assert joined["supportsDeclarativeRateLimits"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeResolverPolicy"), joined
+        assert not joined.get("supportsDeclarativeRateLimits"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=rate_policy),
+            primary.call("settings/config/apply", manifest=rate_policy, revision=rate_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative rate limits" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            settings = ok(node.call("settings/get"))
+            assert settings["qpmLimitSampleMinutes"] == 5 and "/dns/rateLimits/sampleMinutes" not in settings["managedSettings"]
+        if joined.get("supportsDeclarativeResolverPolicy"):
+            plan = ok(primary.call("settings/config/plan", manifest=resolver_policy))
+            ok(primary.call("settings/config/apply", manifest=resolver_policy, revision=plan["revision"]))
+            assert ok(primary.call("settings/get"))["forwarderRetries"] == 5
+            print("Mixed-build check passed. Existing resolver policy support allowed the forwarding update and rejected rate limits.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=resolver_policy),
             primary.call("settings/config/apply", manifest=resolver_policy, revision=resolver_revision),
@@ -536,12 +553,15 @@ def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
                        "clientSubnet": {"enabled": True, "ipv4PrefixLength": 23},
                        "recursion": {"mode": "AllowOnlyForPrivateNetworks", "timeoutMs": 4200},
                        "blocking": {"answerTtl": 47},
-                       "forwarding": {"retries": 5}},
+                       "forwarding": {"retries": 5},
+                       "rateLimits": {"ipv4": [], "ipv6": [], "sampleMinutes": 2,
+                                      "udpTruncationPercentage": 75, "bypassNetworks": ["192.0.2.0/24"]}},
                "apps": {"autoUpdate": False}}
     paths = {"/dns/authoritative/defaultRecordTtl", "/dns/checkForUpdates", "/dns/udpPayloadSize",
              "/dns/dnssecValidation", "/dns/clientSubnet/enabled", "/dns/clientSubnet/ipv4PrefixLength",
              "/apps/autoUpdate", "/dns/recursion/mode", "/dns/recursion/timeoutMs",
-             "/dns/blocking/answerTtl", "/dns/forwarding/retries"}
+             "/dns/blocking/answerTtl", "/dns/forwarding/retries", "/dns/rateLimits/ipv4", "/dns/rateLimits/ipv6",
+             "/dns/rateLimits/sampleMinutes", "/dns/rateLimits/udpTruncationPercentage", "/dns/rateLimits/bypassNetworks"}
     denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "dns": desired["dns"]})
     assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
 
@@ -558,6 +578,9 @@ def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
                 and state["dnsAppsEnableAutomaticUpdate"] is False
                 and state["recursion"] == "AllowOnlyForPrivateNetworks" and state["resolverTimeout"] == timeout
                 and state["blockingAnswerTtl"] == block_ttl and state["forwarderRetries"] == retries
+                and state["qpmPrefixLimitsIPv4"] == desired["dns"]["rateLimits"]["ipv4"] and state["qpmPrefixLimitsIPv6"] == []
+                and state["qpmLimitSampleMinutes"] == desired["dns"]["rateLimits"]["sampleMinutes"]
+                and state["qpmLimitUdpTruncationPercentage"] == 75 and state["qpmLimitBypassList"] == ["192.0.2.0/24"]
                 and paths.intersection(state["managedSettings"]) == owned)
 
     def blocked_soa_minimum():
@@ -595,6 +618,11 @@ def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
     denied = secondary.call("settings/set?forwarderRetries=6")
     assert denied["status"] == "error" and "/dns/forwarding/retries" in denied["errorMessage"], denied
 
+    denied = secondary.call("settings/set?qpmLimitSampleMinutes=3")
+    assert denied["status"] == "error" and "/dns/rateLimits/sampleMinutes" in denied["errorMessage"], denied
+
+    desired["dns"]["rateLimits"]["ipv4"] = [{"prefix": 32, "udpLimit": 600, "tcpLimit": 600}]
+    desired["dns"]["rateLimits"]["sampleMinutes"] = 3
     desired["dns"]["recursion"]["timeoutMs"] = 4300
     desired["dns"]["blocking"]["answerTtl"] = 48
     desired["dns"]["forwarding"]["retries"] = 6

@@ -1107,7 +1107,7 @@ namespace DnsServerCore
                         if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager) is { } dnsPolicy)
                         {
                             writer.WritePropertyName("dnsPolicyPeers");
-                            JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy });
+                            JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits });
                         }
                         if (ConfigurationPlan.CheckClusterDomainListSupport(manifest, _dnsWebService._clusterManager) is { } domainLists)
                         {

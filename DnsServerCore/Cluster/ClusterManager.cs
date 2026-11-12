@@ -870,7 +870,7 @@ namespace DnsServerCore.Cluster
             return Convert.ToHexString(SHA256.HashData(payload));
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
@@ -890,6 +890,9 @@ namespace DnsServerCore.Cluster
 
             if (_dnsWebService.DnsServer.HasManagedClusterResolverPolicy && !supportsDeclarativeResolverPolicy)
                 throw new DnsServerException("/dns: The Secondary must support declarative resolver policy before joining.");
+
+            if (_dnsWebService.DnsServer.HasManagedRateLimits && !supportsDeclarativeRateLimits)
+                throw new DnsServerException("/dns/rateLimits: The Secondary must support declarative rate limits before joining.");
 
             string secondaryNodeDomain = secondaryNodeUrl.Host.ToLowerInvariant();
 
@@ -912,7 +915,8 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeBlockLists = supportsDeclarativeBlockLists,
                 SupportsDeclarativeDomainLists = supportsDeclarativeDomainLists,
                 SupportsDeclarativeDnsPolicy = supportsDeclarativeDnsPolicy,
-                SupportsDeclarativeResolverPolicy = supportsDeclarativeResolverPolicy
+                SupportsDeclarativeResolverPolicy = supportsDeclarativeResolverPolicy,
+                SupportsDeclarativeRateLimits = supportsDeclarativeRateLimits
             };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
@@ -1275,11 +1279,13 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        internal int[] CheckDeclarativeDnsPolicyPeers(bool requiresResolverPolicy)
+        internal int[] CheckDeclarativeDnsPolicyPeers(bool requiresResolverPolicy, bool requiresRateLimits)
         {
             var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id).ToArray();
             foreach (ClusterNode peer in peers)
             {
+                if (requiresRateLimits && !peer.SupportsDeclarativeRateLimits)
+                    throw new InvalidDataException($"/dns/rateLimits: Node '{peer.Name}' has not advertised support for declarative rate limits.");
                 if (requiresResolverPolicy && !peer.SupportsDeclarativeResolverPolicy)
                     throw new InvalidDataException($"/dns: Node '{peer.Name}' has not advertised support for declarative resolver policy.");
                 if (!peer.SupportsDeclarativeDnsPolicy)
@@ -1890,7 +1896,7 @@ namespace DnsServerCore.Cluster
 
                 //join cluster
                 primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
-                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, cancellationToken);
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, cancellationToken);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);

@@ -3290,7 +3290,7 @@ namespace DnsServerCore
                 } : null;
                 Action checkDnsPolicyPeers = dnsPolicyChange is { } dnsPolicy ? () =>
                 {
-                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy).SequenceEqual(dnsPolicy.Peers))
+                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits).SequenceEqual(dnsPolicy.Peers))
                         throw new InvalidDataException("/dns: Cluster membership changed during apply. Create a new preview.");
                 } : null;
                 var clusterFiles = new List<string>(2);
