@@ -79,8 +79,9 @@ namespace DnsServerCore.Auth
             _subItemPermissions = new ConcurrentDictionary<string, Permission>(1, 1);
         }
 
-        public Permission(BinaryReader bR, IReadOnlyDictionary<string, User> users, IReadOnlyDictionary<string, Group> groups)
+        public Permission(BinaryReader bR, IReadOnlyDictionary<string, User> users, IReadOnlyDictionary<string, Group> groups, string subItemName = null)
         {
+            _subItemName = subItemName;
             byte version = bR.ReadByte();
             switch (version)
             {
@@ -128,10 +129,9 @@ namespace DnsServerCore.Auth
 
                         for (int i = 0; i < count; i++)
                         {
-                            string subItemName = bR.BaseStream.ReadShortString();
-                            Permission subItemPermission = new Permission(bR, users, groups);
-
-                            _subItemPermissions.TryAdd(subItemName.ToLowerInvariant(), subItemPermission);
+                            string name = bR.BaseStream.ReadShortString().ToLowerInvariant();
+                            Permission subItemPermission = new Permission(bR, users, groups, name);
+                            _subItemPermissions.TryAdd(name, subItemPermission);
                         }
                     }
 
@@ -254,6 +254,9 @@ namespace DnsServerCore.Auth
         {
             return _subItemPermissions.TryRemove(subItemName, out _);
         }
+
+        internal void ReplaceSubItemPermission(string name, Permission permission) =>
+            _subItemPermissions[name] = permission;
 
         public Permission GetSubItemPermission(string subItemName)
         {

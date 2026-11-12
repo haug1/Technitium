@@ -208,13 +208,10 @@ namespace DnsServerCore.Configuration
                     {
                         if (authSection.Name == "ldap" && currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
                             ConfigurationLdap.Compare(ldap, changes);
-                        else if ((authSection.Name is "groups" or "users" or "permissions") &&
-                            currentSettings.TryGetProperty(authSection.Name switch
-                            {
-                                "groups" => "manifestGroups",
-                                "users" => "manifestUsers",
-                                _ => "manifestPermissions"
-                            }, out JsonElement snapshot))
+                        else if (authSection.Name == "permissions" && currentSettings.TryGetProperty("manifestPermissions", out _))
+                            continue;
+                        else if ((authSection.Name is "groups" or "users") &&
+                            currentSettings.TryGetProperty(authSection.Name == "groups" ? "manifestGroups" : "manifestUsers", out JsonElement snapshot))
                         {
                             foreach (JsonProperty change in snapshot.GetProperty("changes").EnumerateObject())
                                 changes.Add(new ConfigurationChange(change.Name, (ConfigurationChangeKind)change.Value.GetInt32(), false));
@@ -227,6 +224,12 @@ namespace DnsServerCore.Configuration
                     ConfigurationDhcp.Compare(section.Value, scopes, changes);
                 else
                     Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log, declaredWebTlsPort);
+            }
+
+            if (currentSettings.TryGetProperty("manifestPermissions", out JsonElement permissions))
+            {
+                foreach (JsonProperty change in permissions.GetProperty("changes").EnumerateObject())
+                    changes.Add(new ConfigurationChange(change.Name, (ConfigurationChangeKind)change.Value.GetInt32(), false));
             }
 
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
@@ -930,7 +933,7 @@ namespace DnsServerCore.Configuration
                             }
                             continue;
                         }
-                        if (field.Name is "enabled" or "records" ||
+                        if (field.Name is "enabled" or "records" or "permissions" ||
                             (field.Name == "type" && field.Value.ValueEquals("Primary")))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
@@ -1119,7 +1122,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled" or "records") && !ConfigurationZonePolicies.IsPolicy(field.Name))
+                    if (field.Name is not ("type" or "enabled" or "records" or "permissions") && !ConfigurationZonePolicies.IsPolicy(field.Name))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 

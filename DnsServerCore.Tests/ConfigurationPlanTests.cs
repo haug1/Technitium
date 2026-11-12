@@ -3343,6 +3343,62 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestZoneGrantsApplyWithZoneCreationAndCanBeReset()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string password = "fixture-zone-viewer-password";
+            using var user = new FormUrlEncodedContent([new("user", "zone-reader"), new("pass", password)]);
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/create", server.AdminToken, user));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"permission.test":{"type":"Primary",
+                    "permissions":{"users":{"zone-reader":["View"]}}}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                change.GetProperty("path").ValueEquals("/zones/permission.test/permissions/users/zone-reader") &&
+                change.GetProperty("kind").ValueEquals("Add"));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            string token = await server.LoginAsync("zone-reader", password);
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/records/get?zone=permission.test&domain=permission.test", token));
+            Assert.Equal("error", (await server.CallAsync(
+                "zones/records/add?zone=permission.test&domain=unauthorized.permission.test&type=A&ipAddress=192.0.2.42", token))
+                .GetProperty("status").GetString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement denied = await server.CallAsync("zones/permissions/set?zone=permission.test&userPermissions=", server.AdminToken);
+            Assert.Equal("error", denied.GetProperty("status").GetString());
+            Assert.Contains("/zones/permission.test/permissions/users/zone-reader", denied.GetProperty("errorMessage").GetString());
+
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement grants = export.GetProperty("response").GetProperty("manifest").GetProperty("zones")
+                .GetProperty("permission.test").GetProperty("permissions").GetProperty("users");
+            Assert.Collection(grants.GetProperty("zone-reader").EnumerateArray(), flag => Assert.Equal("View", flag.GetString()));
+
+            using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+            backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+            backup.EnsureSuccessStatusCode();
+            byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
+            const string reset = """{"schemaVersion":1,"zones":{"permission.test":{"permissions":null}}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+            using var restoreForm = new MultipartFormDataContent();
+            restoreForm.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, restoreForm);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/zones/permission.test/permissions/users/", restore.GetProperty("errorMessage").GetString());
+            token = await server.LoginAsync("zone-reader", password);
+            Assert.Equal("error", (await server.CallAsync("zones/records/get?zone=permission.test&domain=permission.test", token)).GetProperty("status").GetString());
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/records/get?zone=permission.test&domain=permission.test", server.AdminToken));
+        }
+
+        [Fact]
         public async Task ManagedSectionGrantsRejectConflictingEditsAndRestoreUntilReleased()
         {
             await using var server = await LoopbackWebService.StartAsync();

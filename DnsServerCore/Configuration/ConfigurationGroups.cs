@@ -137,8 +137,9 @@ namespace DnsServerCore.Configuration
                     !change.Remove && change.Groups.Contains(name)) ||
                 auth.Permissions.Any(permission =>
                     (permission.GroupPermissions.ContainsKey(group) && !grants.Any(grant =>
-                        grant.Section == permission.Section && grant.Group && grant.Name == name && grant.After is null)) ||
-                    permission.SubItemPermissions.Values.Any(item => item.GroupPermissions.ContainsKey(group))) ||
+                        grant.Zone is null && grant.Section == permission.Section && grant.Group && grant.Name == name && grant.After is null)) ||
+                    permission.SubItemPermissions.Values.Any(item => item.GroupPermissions.ContainsKey(group) &&
+                        !grants.Any(grant => grant.Zone == item.SubItemName && grant.Group && grant.Name == name && grant.After is null))) ||
                 (ldap ?? auth.GetManifestLdapSettings()).GroupMap?.Values.Any(IsMapping) == true ||
                 auth.SsoGroupMap?.Values.Any(IsMapping) == true)
                 throw new InvalidDataException($"{GroupPath(name)}: The group is still referenced by authentication settings.");

@@ -317,14 +317,13 @@ namespace DnsServerCore
                     jsonWriter.WriteString("subItem", subItem.Length == 0 ? "." : subItem);
 
                 jsonWriter.WriteStartArray("managedSettings");
-                if (subItem is null)
+                string scope = subItem is null ? $"{ConfigurationPermissions.Path}/{permission.Section}" :
+                    ConfigurationPermissions.ZonePath(permission.SubItemName);
+                foreach (string path in _dnsWebService._authManager.ManagedPermissionPaths)
                 {
-                    string sectionPath = $"{ConfigurationPermissions.Path}/{permission.Section}";
-                    foreach (string path in _dnsWebService._authManager.ManagedPermissionPaths)
-                    {
-                        if (path == ConfigurationPermissions.Path || path == sectionPath || path.StartsWith(sectionPath + "/", StringComparison.Ordinal))
-                            jsonWriter.WriteStringValue(path);
-                    }
+                    if ((subItem is null && path == ConfigurationPermissions.Path) ||
+                        path == scope || path.StartsWith(scope + "/", StringComparison.Ordinal))
+                        jsonWriter.WriteStringValue(path);
                 }
                 jsonWriter.WriteEndArray();
 

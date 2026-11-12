@@ -15,51 +15,64 @@ namespace DnsServerCore.Configuration
         private static readonly PermissionSection[] _sections = Enum.GetValues<PermissionSection>()
             .Where(section => section != PermissionSection.Unknown).ToArray();
 
-        internal static string GrantPath(PermissionSection section, bool group, string name) =>
-            ConfigurationPlan.AppendPath($"{Path}/{section}/{(group ? "groups" : "users")}", name.ToLowerInvariant());
+        internal static string GrantPath(PermissionSection section, bool group, string name, string zone = null) =>
+            ConfigurationPlan.AppendPath($"{(zone is null ? $"{Path}/{section}" : ZonePath(zone))}/{(group ? "groups" : "users")}",
+                name.ToLowerInvariant());
 
         internal static string[] GetOwnedPaths(ConfigurationManifest manifest)
         {
-            if (!TryGetDeclaration(manifest, out JsonElement permissions))
-                return [];
-            if (permissions.ValueKind == JsonValueKind.Null)
-                return [Path];
-
             var paths = new SortedSet<string>(StringComparer.Ordinal);
-            foreach (JsonProperty entry in permissions.EnumerateObject())
+            if (TryGetDeclaration(manifest, out JsonElement permissions))
             {
-                var section = Enum.Parse<PermissionSection>(entry.Name, ignoreCase: true);
-                if (entry.Value.ValueKind == JsonValueKind.Null)
+                if (permissions.ValueKind == JsonValueKind.Null)
+                    paths.Add(Path);
+                else
                 {
-                    paths.Add($"{Path}/{section}");
-                    continue;
+                    foreach (JsonProperty entry in permissions.EnumerateObject())
+                        AddScope(Enum.Parse<PermissionSection>(entry.Name, ignoreCase: true), entry.Value);
                 }
-                foreach (JsonProperty map in entry.Value.EnumerateObject())
-                    foreach (JsonProperty grant in map.Value.EnumerateObject())
-                        paths.Add(GrantPath(section, map.NameEquals("groups"), grant.Name));
+            }
+            if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+            {
+                foreach (JsonProperty entry in zones.EnumerateObject())
+                {
+                    if (entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("permissions", out JsonElement value))
+                        AddScope(PermissionSection.Zones, value,
+                            ConfigurationManifest.CanonicalDnsName(entry.Name, "/zones", allowRoot: true));
+                }
             }
             return paths.ToArray();
+
+            void AddScope(PermissionSection section, JsonElement value, string zone = null)
+            {
+                if (value.ValueKind == JsonValueKind.Null)
+                {
+                    paths.Add(zone is null ? $"{Path}/{section}" : ZonePath(zone));
+                    return;
+                }
+                foreach (JsonProperty map in value.EnumerateObject())
+                    foreach (JsonProperty grant in map.Value.EnumerateObject())
+                        paths.Add(GrantPath(section, map.NameEquals("groups"), grant.Name, zone));
+            }
         }
 
-        internal static bool OwnsGrant(IReadOnlyList<string> paths, PermissionSection section, string path) =>
-            paths.Contains(Path) || paths.Contains($"{Path}/{section}") || paths.Contains(path);
-
-        internal static void CheckGrant(IReadOnlyList<string> paths, PermissionSection section, bool group, string name)
+        internal static void CheckGrant(IReadOnlyList<string> paths, PermissionSection section, bool group, string name, string zone = null)
         {
-            string path = GrantPath(section, group, name);
-            if (OwnsGrant(paths, section, path))
+            string path = GrantPath(section, group, name, zone);
+            bool ownsScope = zone is null ? paths.Contains(Path) || paths.Contains($"{Path}/{section}") : paths.Contains(ZonePath(zone));
+            if (ownsScope || paths.Contains(path))
                 throw new InvalidDataException($"{path}: This permission grant is managed by the manifest.");
         }
 
         internal static void CheckWrite(IReadOnlyList<string> paths, Permission current,
             IReadOnlyDictionary<User, PermissionFlag> users, IReadOnlyDictionary<Group, PermissionFlag> groups)
         {
-            if (paths.Count == 0 || current.SubItemName is not null)
+            if (paths.Count == 0)
                 return;
             if (users is not null)
-                CheckMap(current.Section, false, current.UserPermissions, users, user => user.Username, paths);
+                CheckMap(current.Section, false, current.UserPermissions, users, user => user.Username, paths, current.SubItemName);
             if (groups is not null)
-                CheckMap(current.Section, true, current.GroupPermissions, groups, group => group.Name, paths);
+                CheckMap(current.Section, true, current.GroupPermissions, groups, group => group.Name, paths, current.SubItemName);
         }
 
         internal static void CheckRestore(AuthManager auth, IReadOnlyDictionary<PermissionSection, Permission> restored)
@@ -68,13 +81,23 @@ namespace DnsServerCore.Configuration
             {
                 Permission current = auth.GetPermission(section);
                 restored.TryGetValue(section, out Permission candidate);
-                CheckMap(section, false, current?.UserPermissions, candidate?.UserPermissions, user => user.Username, auth.ManagedPermissionPaths);
-                CheckMap(section, true, current?.GroupPermissions, candidate?.GroupPermissions, group => group.Name, auth.ManagedPermissionPaths);
+                CheckScope(section, current, candidate);
+                if (section != PermissionSection.Zones)
+                    continue;
+
+                foreach (string zone in (current?.SubItemPermissions.Keys ?? []).Union(candidate?.SubItemPermissions.Keys ?? [], StringComparer.Ordinal))
+                    CheckScope(section, current?.GetSubItemPermission(zone), candidate?.GetSubItemPermission(zone), zone);
+            }
+
+            void CheckScope(PermissionSection section, Permission current, Permission candidate, string zone = null)
+            {
+                CheckMap(section, false, current?.UserPermissions, candidate?.UserPermissions, user => user.Username, auth.ManagedPermissionPaths, zone);
+                CheckMap(section, true, current?.GroupPermissions, candidate?.GroupPermissions, group => group.Name, auth.ManagedPermissionPaths, zone);
             }
         }
 
         private static void CheckMap<T>(PermissionSection section, bool group, IReadOnlyDictionary<T, PermissionFlag> current,
-            IReadOnlyDictionary<T, PermissionFlag> candidate, Func<T, string> name, IReadOnlyList<string> paths)
+            IReadOnlyDictionary<T, PermissionFlag> candidate, Func<T, string> name, IReadOnlyList<string> paths, string zone)
         {
             var before = ToMap(current);
             var after = ToMap(candidate);
@@ -82,17 +105,23 @@ namespace DnsServerCore.Configuration
             {
                 if (before.GetValueOrDefault(principal) != after.GetValueOrDefault(principal) ||
                     before.ContainsKey(principal) != after.ContainsKey(principal))
-                    CheckGrant(paths, section, group, principal);
+                    CheckGrant(paths, section, group, principal, zone);
             }
 
             Dictionary<string, PermissionFlag> ToMap(IReadOnlyDictionary<T, PermissionFlag> source) =>
                 source?.ToDictionary(entry => name(entry.Key).ToLowerInvariant(), entry => entry.Value) ?? [];
         }
 
-        internal sealed record Grant(PermissionSection Section, bool Group, string Name, PermissionFlag? Before, PermissionFlag? After)
+        internal sealed record Grant(PermissionSection Section, bool Group, string Name, PermissionFlag? Before, PermissionFlag? After, string Zone = null)
         {
-            internal string SettingPath => GrantPath(Section, Group, Name);
+            internal string SettingPath => GrantPath(Section, Group, Name, Zone);
         }
+
+        internal static string ZonePath(string zone) =>
+            ConfigurationPlan.AppendPath("/zones", zone.Length == 0 ? "." : zone) + "/permissions";
+
+        internal static bool DeclaresZonePermissions(JsonElement zones) => zones.EnumerateObject().Any(entry =>
+            entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("permissions", out _));
 
         internal static bool TryGetDeclaration(ConfigurationManifest manifest, out JsonElement permissions)
         {
@@ -105,6 +134,20 @@ namespace DnsServerCore.Configuration
             IReadOnlyDictionary<string, Group> groups, IReadOnlyDictionary<string, ConfigurationUsers.Change> users, User actor)
         {
             var changes = new List<Grant>();
+            if (manifest is null)
+                return changes;
+            if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+            {
+                foreach (JsonProperty entry in zones.EnumerateObject())
+                {
+                    if (entry.Value.ValueKind != JsonValueKind.Object || !entry.Value.TryGetProperty("permissions", out JsonElement value))
+                        continue;
+                    string zone = ConfigurationManifest.CanonicalDnsName(entry.Name, "/zones", allowRoot: true);
+                    PrepareSection(PermissionSection.Zones, value, zone);
+                    ValidateActor(PermissionSection.Zones, PermissionFlag.View, zone);
+                    ValidateActor(PermissionSection.Zones, PermissionFlag.Delete, zone);
+                }
+            }
             if (!TryGetDeclaration(manifest, out JsonElement declaration))
                 return changes;
 
@@ -134,34 +177,45 @@ namespace DnsServerCore.Configuration
             }
             return changes;
 
-            void PrepareSection(PermissionSection section, JsonElement value)
+            void PrepareSection(PermissionSection section, JsonElement value, string zone = null)
             {
-                Permission current = auth.GetPermission(section);
+                Permission current = zone is null ? auth.GetPermission(section) : auth.GetPermission(section, zone);
                 var currentUsers = current?.UserPermissions.ToDictionary(grant => grant.Key.Username, grant => grant.Value) ?? [];
                 var currentGroups = current?.GroupPermissions.ToDictionary(grant => grant.Key.Name.ToLowerInvariant(), grant => grant.Value) ?? [];
+                if (zone is not null && current is null)
+                {
+                    currentGroups[Group.ADMINISTRATORS.ToLowerInvariant()] = PermissionFlag.ViewModifyDelete;
+                    currentGroups[Group.DNS_ADMINISTRATORS.ToLowerInvariant()] = PermissionFlag.ViewModifyDelete;
+                    if (actor is not null)
+                        currentUsers[actor.Username] = PermissionFlag.ViewModifyDelete;
+                }
                 if (value.ValueKind == JsonValueKind.Null)
                 {
                     foreach (var (name, flags) in currentUsers)
-                        changes.Add(new Grant(section, false, name, flags, null));
-                    var defaults = Defaults(section);
+                        changes.Add(new Grant(section, false, name, flags, null, zone));
+                    var defaults = zone is null ? Defaults(section) : new Dictionary<string, PermissionFlag>
+                    {
+                        [Group.ADMINISTRATORS.ToLowerInvariant()] = PermissionFlag.ViewModifyDelete,
+                        [Group.DNS_ADMINISTRATORS.ToLowerInvariant()] = PermissionFlag.ViewModifyDelete
+                    };
                     foreach (string name in currentGroups.Keys.Union(defaults.Keys, StringComparer.Ordinal))
-                        AddChange(section, true, name, currentGroups, defaults.TryGetValue(name, out var flags) ? flags : null);
+                        AddChange(section, true, name, currentGroups, defaults.TryGetValue(name, out var flags) ? flags : null, zone);
                     return;
                 }
 
                 if (value.TryGetProperty("users", out JsonElement userMap))
-                    ReadMap(section, false, userMap, currentUsers);
+                    ReadMap(section, false, userMap, currentUsers, zone);
                 if (value.TryGetProperty("groups", out JsonElement groupMap))
-                    ReadMap(section, true, groupMap, currentGroups);
+                    ReadMap(section, true, groupMap, currentGroups, zone);
             }
 
-            void ReadMap(PermissionSection section, bool group, JsonElement map, Dictionary<string, PermissionFlag> current)
+            void ReadMap(PermissionSection section, bool group, JsonElement map, Dictionary<string, PermissionFlag> current, string zone)
             {
                 var names = new HashSet<string>(StringComparer.Ordinal);
                 foreach (JsonProperty entry in map.EnumerateObject())
                 {
                     string name = entry.Name.ToLowerInvariant();
-                    string path = ConfigurationPlan.AppendPath($"{Path}/{section}/{(group ? "groups" : "users")}", name);
+                    string path = GrantPath(section, group, name, zone);
                     if (group ? string.IsNullOrWhiteSpace(name) || name.Length > 255 : !User.IsUsernameValid(name))
                         throw new InvalidDataException($"{path}: Invalid principal name.");
                     if (!names.Add(name))
@@ -185,24 +239,25 @@ namespace DnsServerCore.Configuration
                             : users?.TryGetValue(name, out var candidateUser) == true ? candidateUser.Remove : auth.GetUser(name) is null))
                         throw new InvalidDataException($"{path}: The principal does not exist in the effective configuration.");
 
-                    AddChange(section, group, name, current, desired);
+                    AddChange(section, group, name, current, desired, zone);
                 }
             }
 
-            void AddChange(PermissionSection section, bool group, string name, Dictionary<string, PermissionFlag> current, PermissionFlag? after)
+            void AddChange(PermissionSection section, bool group, string name, Dictionary<string, PermissionFlag> current, PermissionFlag? after, string zone)
             {
                 PermissionFlag? before = current.TryGetValue(name, out PermissionFlag flags) ? flags : null;
                 if (before != after)
-                    changes.Add(new Grant(section, group, name, before, after));
+                    changes.Add(new Grant(section, group, name, before, after, zone));
             }
 
-            void ValidateActor(PermissionSection section, PermissionFlag flag)
+            void ValidateActor(PermissionSection section, PermissionFlag flag, string zone = null)
             {
-                var relevant = changes.Where(change => change.Section == section).ToArray();
-                if (relevant.Length == 0 || !auth.IsPermitted(section, actor, flag))
+                var relevant = changes.Where(change => change.Section == section && change.Zone == zone).ToArray();
+                if (actor is null || relevant.Length == 0 ||
+                    (zone is null ? !auth.IsPermitted(section, actor, flag) : !auth.IsPermitted(section, zone, actor, flag)))
                     return;
 
-                var current = auth.GetPermission(section);
+                var current = zone is null ? auth.GetPermission(section) : auth.GetPermission(section, zone);
                 string[] memberships = users?.TryGetValue(actor.Username, out var actorChange) == true
                     ? actorChange.Groups : actor.MemberOfGroups.Select(group => group.Name.ToLowerInvariant()).ToArray();
                 var direct = relevant.FirstOrDefault(change => !change.Group && change.Name == actor.Username);
@@ -216,7 +271,7 @@ namespace DnsServerCore.Configuration
                         auth.GetGroup(name) is Group group && current?.GroupPermissions.TryGetValue(group, out var granted) == true && granted.HasFlag(flag);
                 }
                 if (!retained)
-                    throw new InvalidDataException($"{Path}/{section}: The applying administrator must retain access.");
+                    throw new InvalidDataException($"{(zone is null ? $"{Path}/{section}" : ZonePath(zone))}: The applying administrator must retain access.");
             }
         }
 
@@ -260,13 +315,18 @@ namespace DnsServerCore.Configuration
             foreach (Permission permission in auth.Permissions.Where(permission => permission.Section != PermissionSection.Unknown)
                 .OrderBy(permission => permission.Section.ToString(), StringComparer.Ordinal))
             {
-                result[permission.Section.ToString()] = new JsonObject
-                {
-                    ["users"] = WriteGrants(permission.UserPermissions.Select(entry => (entry.Key.Username, entry.Value))),
-                    ["groups"] = WriteGrants(permission.GroupPermissions.Select(entry => (entry.Key.Name, entry.Value)))
-                };
+                result[permission.Section.ToString()] = ExportGrants(permission);
             }
             return result;
+        }
+
+        internal static JsonObject ExportGrants(Permission permission)
+        {
+            return new JsonObject
+            {
+                ["users"] = WriteGrants(permission?.UserPermissions.Select(entry => (entry.Key.Username, entry.Value)) ?? []),
+                ["groups"] = WriteGrants(permission?.GroupPermissions.Select(entry => (entry.Key.Name, entry.Value)) ?? [])
+            };
 
             static JsonObject WriteGrants(IEnumerable<(string Name, PermissionFlag Flags)> grants)
             {
@@ -283,11 +343,27 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static void WriteSnapshot(Utf8JsonWriter writer, AuthManager auth, IReadOnlyList<Grant> changes)
+        internal static void WriteSnapshot(Utf8JsonWriter writer, AuthManager auth, IReadOnlyList<Grant> changes, JsonElement declaredZones, bool declaresSections)
         {
             writer.WriteStartObject("manifestPermissions");
-            writer.WritePropertyName("current");
-            Export(auth).WriteTo(writer);
+            if (declaresSections)
+            {
+                writer.WritePropertyName("current");
+                Export(auth).WriteTo(writer);
+            }
+            writer.WriteStartObject("zones");
+            if (declaredZones.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty entry in declaredZones.EnumerateObject().OrderBy(entry => entry.Name, StringComparer.Ordinal))
+                {
+                    if (entry.Value.ValueKind != JsonValueKind.Object || !entry.Value.TryGetProperty("permissions", out _))
+                        continue;
+                    string zone = ConfigurationManifest.CanonicalDnsName(entry.Name, "/zones", allowRoot: true);
+                    writer.WritePropertyName(zone);
+                    ExportGrants(auth.GetPermission(PermissionSection.Zones, zone)).WriteTo(writer);
+                }
+            }
+            writer.WriteEndObject();
             writer.WriteStartObject("changes");
             foreach (Grant change in changes.OrderBy(change => change.SettingPath, StringComparer.Ordinal))
             {

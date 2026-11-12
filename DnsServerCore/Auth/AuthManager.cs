@@ -595,6 +595,14 @@ namespace DnsServerCore.Auth
                         permissions.Add(grant.Section, section);
                     }
 
+                    if (grant.Zone is not null)
+                    {
+                        Permission zone = section.GetSubItemPermission(grant.Zone)?.CopySection() ??
+                            new Permission(PermissionSection.Zones, grant.Zone);
+                        section.ReplaceSubItemPermission(grant.Zone, zone);
+                        section = zone;
+                    }
+
                     if (grant.Group)
                     {
                         Group group = GetGroup(grant.Name);
@@ -1753,11 +1761,23 @@ namespace DnsServerCore.Auth
         {
             if (_managedPermissionPaths.Length == 0)
                 return;
-            foreach (Permission permission in _permissions.Values.Where(hasGrant))
+            foreach (Permission permission in _permissions.Values)
             {
-                ConfigurationPermissions.CheckGrant(_managedPermissionPaths, permission.Section, group, name);
+                Check(permission);
+                if (permission.Section == PermissionSection.Zones)
+                {
+                    foreach (Permission zone in permission.SubItemPermissions.Values)
+                        Check(zone);
+                }
+            }
+
+            void Check(Permission permission)
+            {
+                if (!hasGrant(permission))
+                    return;
+                ConfigurationPermissions.CheckGrant(_managedPermissionPaths, permission.Section, group, name, permission.SubItemName);
                 if (newName is not null)
-                    ConfigurationPermissions.CheckGrant(_managedPermissionPaths, permission.Section, group, newName);
+                    ConfigurationPermissions.CheckGrant(_managedPermissionPaths, permission.Section, group, newName, permission.SubItemName);
             }
         }
 

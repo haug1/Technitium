@@ -2660,6 +2660,10 @@ function showZonePermissionsModal(zone) {
         success: function (responseJSON) {
             $("#lblEditPermissionsName").text(responseJSON.response.section + " / " + (responseJSON.response.subItem == "." ? "<root>" : responseJSON.response.subItem));
 
+            var managedSettings = responseJSON.response.managedSettings || [];
+            if (managedSettings.length > 0)
+                $("#lblEditPermissionsManaged").text("Manifest-managed permissions: " + managedSettings.join(", ")).show();
+
             //user permissions
             for (var i = 0; i < responseJSON.response.userPermissions.length; i++) {
                 addEditPermissionUserRow(i, responseJSON.response.userPermissions[i].username, responseJSON.response.userPermissions[i].canView, responseJSON.response.userPermissions[i].canModify, responseJSON.response.userPermissions[i].canDelete);

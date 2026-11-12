@@ -578,7 +578,9 @@ namespace DnsServerCore
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
                 {
                     var zones = ConfigurationZoneExport.Export(dns, _dnsWebService._clusterManager.ClusterInitialized,
-                        name => _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.View), missingInputs);
+                        name => _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.View),
+                        _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify)
+                            ? name => _dnsWebService._authManager.GetPermission(PermissionSection.Zones, name) : null, missingInputs);
                     if (zones.Count > 0)
                         manifest.Add("zones", zones);
                 }
@@ -1009,6 +1011,23 @@ namespace DnsServerCore
                     bool declaresPermissions = ConfigurationPermissions.TryGetDeclaration(manifest, out _);
                     if ((declaresGroups || declaresPermissions) && !auth.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
                         throw new DnsWebServiceException("Access was denied.");
+                    JsonElement permissionZones = default;
+                    bool declaresZonePermissions = manifest is not null && manifest.Settings.TryGetProperty("zones", out permissionZones) &&
+                        ConfigurationPermissions.DeclaresZonePermissions(permissionZones);
+                    if (declaresZonePermissions)
+                    {
+                        if (!auth.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify))
+                            throw new DnsWebServiceException("Access was denied.");
+                        foreach (JsonProperty entry in permissionZones.EnumerateObject())
+                        {
+                            if (entry.Value.ValueKind != JsonValueKind.Object || !entry.Value.TryGetProperty("permissions", out _))
+                                continue;
+                            string zone = ConfigurationManifest.CanonicalDnsName(entry.Name, "/zones", allowRoot: true);
+                            if (_dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(zone) is not null &&
+                                !auth.IsPermitted(PermissionSection.Zones, zone, sessionUser, PermissionFlag.Delete))
+                                throw new DnsWebServiceException("Access was denied.");
+                        }
+                    }
                     var grants = ConfigurationPermissions.Prepare(manifest, auth, groups, users, sessionUser);
                     if (declaresGroups)
                     {
@@ -1017,8 +1036,8 @@ namespace DnsServerCore
                     }
                     if (users is not null)
                         ConfigurationUsers.WriteSnapshot(writer, users, _configurationRevisionKey);
-                    if (declaresPermissions)
-                        ConfigurationPermissions.WriteSnapshot(writer, auth, grants);
+                    if (declaresPermissions || declaresZonePermissions)
+                        ConfigurationPermissions.WriteSnapshot(writer, auth, grants, permissionZones, declaresPermissions);
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
                     if (webCertificate.HasValue)

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DnsServerCore.Auth;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ResourceRecords;
 using DnsServerCore.Dns.Zones;
@@ -14,7 +15,7 @@ namespace DnsServerCore.Configuration
 {
     internal static class ConfigurationZoneExport
     {
-        internal static JsonObject Export(DnsServer dns, bool clustered, Func<string, bool> canView, ISet<string> missingInputs)
+        internal static JsonObject Export(DnsServer dns, bool clustered, Func<string, bool> canView, Func<string, Permission> getPermission, ISet<string> missingInputs)
         {
             var result = new JsonObject();
             foreach (AuthZoneInfo zone in dns.AuthZoneManager.GetAllZones().OrderBy(zone => zone.Name, StringComparer.Ordinal))
@@ -54,6 +55,9 @@ namespace DnsServerCore.Configuration
                     missingInputs.Add(path + "/updates/securityPolicies");
                 else
                     declaration["updates"].AsObject()["securityPolicies"] = ConfigurationZoneUpdatePolicies.Write(zone.UpdateSecurityPolicies);
+
+                if (getPermission?.Invoke(zone.Name) is Permission permission)
+                    declaration["permissions"] = ConfigurationPermissions.ExportGrants(permission);
 
                 var records = new List<DnsResourceRecord>();
                 dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);
