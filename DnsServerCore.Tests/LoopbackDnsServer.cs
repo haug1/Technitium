@@ -51,7 +51,7 @@ namespace DnsServerCore.Tests
             _configuration.Delete(recursive: true);
         }
 
-        private static IPEndPoint GetLoopbackEndPoint()
+        internal static IPEndPoint GetLoopbackEndPoint()
         {
             for (int attempt = 0; attempt < 10; attempt++)
             {
