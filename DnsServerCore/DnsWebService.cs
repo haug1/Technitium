@@ -2032,10 +2032,22 @@ namespace DnsServerCore
             _ssoEnabled = ssoEnabled;
         }
 
-        private async Task StopWebServiceAsync()
+        private async Task StopWebServiceAsync(bool drainRequests = false)
         {
             if (_webService is not null)
             {
+                if (drainRequests)
+                {
+                    // Let the apply response leave Kestrel before disposing its connections.
+                    // Other requests can be waiting for the configuration lock held by apply.
+                    using var drain = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    try
+                    {
+                        await _webService.StopAsync(drain.Token);
+                    }
+                    catch (OperationCanceledException) when (drain.IsCancellationRequested)
+                    { }
+                }
                 await _webService.DisposeAsync();
                 _webService = null;
             }
@@ -2994,7 +3006,7 @@ namespace DnsServerCore
 
             try
             {
-                await StopWebServiceAsync();
+                await StopWebServiceAsync(drainRequests: true);
                 StageWebListeners(listeners);
                 byte[] generated = webCertificate is { Changed: true } candidate ? StageWebCertificate(candidate, manifest.GetServerDomain()) : null;
                 if (webCertificate is not { Changed: true } && previous.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)

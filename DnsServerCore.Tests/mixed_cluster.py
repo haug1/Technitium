@@ -1047,7 +1047,7 @@ def verify_sso_policy(primary, secondary, cluster_manifest, local_web):
             def operation_state():
                 try:
                     status = ok(node.call(f"settings/config/status?operationId={operation}"))
-                except (urllib.error.URLError, TimeoutError):
+                except (urllib.error.URLError, ConnectionError, TimeoutError):
                     return None
                 return None if status["state"] == "pending" else status["state"]
             assert wait_for(operation_state, "the Primary SSO web restart") == "applied"
@@ -1056,7 +1056,7 @@ def verify_sso_policy(primary, secondary, cluster_manifest, local_web):
     def matches(enabled, secret, owned):
         try:
             config = ok(secondary.call("admin/sso/get"))
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
             return False
         return (config["ssoEnabled"] is enabled and config["ssoClientId"] == sso["clientId"]
                 and "email" in config["ssoScopes"] and set(config["managedSettings"]) == owned
