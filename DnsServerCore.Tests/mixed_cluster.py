@@ -664,7 +664,7 @@ def verify_domain_lists(primary, secondary, cluster_manifest, local_web, primary
         state = ok(secondary.call("settings/get"))
         if paths.intersection(state["managedSettings"]) != managed:
             return False
-        exported = ok(secondary.call("settings/config/export"))["manifest"]
+        exported = ok(secondary.call("settings/config/export?includePreviewOnly=true"))["manifest"]
         return exported["allowZones"] == allowed and exported["blockZones"] == blocked
 
     plan = apply_primary(desired)
@@ -835,7 +835,7 @@ def verify_proxy_policy(primary, secondary, cluster_manifest, local_web):
     apply(secondary, local_web)
     assert matches(secondary, first_reference, paths)
 
-    exported = ok(secondary.call("settings/config/export"))
+    exported = ok(secondary.call("settings/config/export?includePreviewOnly=true"))
     assert "/dns/proxy/password" in exported["missingInputs"]
     assert os.environ[first_reference] not in json.dumps(exported)
     rejected = secondary.call("settings/set?proxyType=None")
@@ -959,7 +959,7 @@ def verify_tsig_policy(primary, secondary, cluster_manifest, local_web):
     legacy = "|".join(catalog[field] for field in ("keyName", "sharedSecret", "algorithmName"))
     denied = secondary.call("settings/set", form={"tsigKeys": legacy})
     assert denied["status"] == "error" and path in denied["errorMessage"], denied
-    exported = ok(secondary.call("settings/config/export"))
+    exported = ok(secondary.call("settings/config/export?includePreviewOnly=true"))
     assert path + "/secret" in exported["missingInputs"]
     assert os.environ[first] not in json.dumps(exported)
     assert catalog_name not in exported["manifest"]["dns"]["tsigKeys"]

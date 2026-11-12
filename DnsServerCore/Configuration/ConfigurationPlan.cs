@@ -1332,14 +1332,15 @@ namespace DnsServerCore.Configuration
         public static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly) =>
             Export(currentSettings, includePreviewOnly, null);
 
-        internal static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly, ISet<string> missingInputs)
+        internal static JsonObject Export(JsonElement currentSettings, bool includePreviewOnly, ISet<string> missingInputs, bool includeClusterPolicy = true)
         {
             RequireSettingsObject(currentSettings);
             var manifest = new JsonObject { ["schemaVersion"] = ConfigurationManifest.CurrentSchemaVersion };
 
             foreach (var (path, setting) in _settings.OrderBy(entry => entry.Key, StringComparer.Ordinal))
             {
-                if (setting.OmitFromExport || (!includePreviewOnly && !setting.CanApply))
+                if (setting.OmitFromExport || (!includePreviewOnly && !setting.CanApply) ||
+                    (!includeClusterPolicy && IsClusterPolicy(path)))
                     continue;
 
                 JsonElement value = GetCurrentSetting(currentSettings, path, setting);
@@ -1378,12 +1379,12 @@ namespace DnsServerCore.Configuration
 
             foreach (string field in new[] { "allowZones", "blockZones" })
             {
-                if (currentSettings.TryGetProperty(field, out JsonElement domains))
+                if (includeClusterPolicy && currentSettings.TryGetProperty(field, out JsonElement domains))
                     manifest.Add(field, JsonSerializer.SerializeToNode(domains.EnumerateArray().Select(item =>
                         item.GetString() is { Length: > 0 } name ? name : ".")));
             }
 
-            if (currentSettings.TryGetProperty("tsigKeys", out JsonElement keys) && keys.GetArrayLength() > 0)
+            if (includeClusterPolicy && currentSettings.TryGetProperty("tsigKeys", out JsonElement keys) && keys.GetArrayLength() > 0)
             {
                 string catalogKey = currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain)
                     ? ConfigurationTsig.GetCatalogKey(clusterDomain.GetString()) : null;
@@ -1392,7 +1393,7 @@ namespace DnsServerCore.Configuration
                     manifest["dns"]!.AsObject().Add("tsigKeys", exportedKeys);
             }
 
-            if (currentSettings.TryGetProperty("proxy", out JsonElement currentProxy))
+            if (includeClusterPolicy && currentSettings.TryGetProperty("proxy", out JsonElement currentProxy))
             {
                 var proxy = new JsonObject();
                 foreach (string field in new[] { "type", "address", "port", "username", "bypass" })
@@ -1410,6 +1411,17 @@ namespace DnsServerCore.Configuration
 
             return manifest;
         }
+
+        private static bool IsClusterPolicy(string path) =>
+            path is "/apps/autoUpdate" or "/dns/checkForUpdates" or "/dns/dnssecValidation" or "/dns/udpPayloadSize" ||
+            path.StartsWith("/blocklists/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/authoritative/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/clientSubnet/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/recursion/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/blocking/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/forwarding/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/rateLimits/", StringComparison.Ordinal) ||
+            path.StartsWith("/dns/tuning/", StringComparison.Ordinal);
 
         private static void RequireSettingsObject(JsonElement currentSettings)
         {

@@ -567,9 +567,12 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 bool includePreviewOnly = context.Request.TryGetQueryOrForm("includePreviewOnly", bool.Parse, out bool include) && include;
-                using JsonDocument snapshot = CaptureConfigurationSnapshot(sessionUser: sessionUser, exportDomainLists: true);
+                var cluster = _dnsWebService._clusterManager;
+                bool secondary = cluster.ClusterInitialized && cluster.GetSelfNode().Type == ClusterNodeType.Secondary;
+                bool includeClusterPolicy = !secondary || includePreviewOnly;
+                using JsonDocument snapshot = CaptureConfigurationSnapshot(sessionUser: sessionUser, exportDomainLists: includeClusterPolicy);
                 var missingInputs = new SortedSet<string>(StringComparer.Ordinal);
-                var manifest = ConfigurationPlan.Export(snapshot.RootElement, includePreviewOnly, missingInputs);
+                var manifest = ConfigurationPlan.Export(snapshot.RootElement, includePreviewOnly, missingInputs, includeClusterPolicy);
                 DnsServer dns = _dnsWebService._dnsServer;
 
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.View))
@@ -579,8 +582,7 @@ namespace DnsServerCore
                         manifest.Add("dhcp", new System.Text.Json.Nodes.JsonObject { ["scopes"] = scopes });
                 }
 
-                if ((!_dnsWebService._clusterManager.ClusterInitialized ||
-                    _dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary) &&
+                if (!secondary &&
                     _dnsWebService._authManager.IsPermitted(PermissionSection.Apps, sessionUser, PermissionFlag.View))
                 {
                     var apps = ConfigurationApplications.Export(dns.DnsApplicationManager, missingInputs);
@@ -590,7 +592,6 @@ namespace DnsServerCore
 
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
                 {
-                    var cluster = _dnsWebService._clusterManager;
                     var zones = ConfigurationZoneExport.Export(dns,
                         name => cluster.ClusterInitialized && (cluster.IsClusterPrimaryZone(name) || cluster.IsClusterCatalogZone(name)),
                         name => _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.View),
@@ -602,14 +603,7 @@ namespace DnsServerCore
 
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.View))
                 {
-                    if (!_dnsWebService._clusterManager.ClusterInitialized)
-                        manifest.Add("auth", new System.Text.Json.Nodes.JsonObject
-                        {
-                            ["groups"] = ConfigurationGroups.Export(_dnsWebService._authManager),
-                            ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs),
-                            ["permissions"] = ConfigurationPermissions.Export(_dnsWebService._authManager)
-                        });
-                    else if (_dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary)
+                    if (!secondary)
                         manifest["auth"] = new System.Text.Json.Nodes.JsonObject
                         {
                             ["groups"] = ConfigurationGroups.Export(_dnsWebService._authManager),
@@ -623,9 +617,9 @@ namespace DnsServerCore
                         manifest["auth"]["staticSessions"] = staticSessions;
                     }
                     ConfigurationSso.Settings sso = _dnsWebService._authManager.GetManifestSsoSettings();
-                    if (!ConfigurationSso.Same(sso, ConfigurationSso.Default))
+                    if (includeClusterPolicy && !ConfigurationSso.Same(sso, ConfigurationSso.Default))
                     {
-                        if (_dnsWebService._clusterManager.ClusterInitialized && _dnsWebService._clusterManager.GetSelfNode().Type != ClusterNodeType.Primary)
+                        if (secondary)
                             missingInputs.Add(ConfigurationSso.Path);
                         else
                         {
@@ -636,9 +630,9 @@ namespace DnsServerCore
                             missingInputs.Add(ConfigurationSso.Path + "/clientSecret");
                     }
                     ConfigurationLdap.Settings ldap = _dnsWebService._authManager.GetManifestLdapSettings();
-                    if (!ConfigurationLdap.Same(ldap, ConfigurationLdap.Default))
+                    if (includeClusterPolicy && !ConfigurationLdap.Same(ldap, ConfigurationLdap.Default))
                     {
-                        if (_dnsWebService._clusterManager.ClusterInitialized && _dnsWebService._clusterManager.GetSelfNode().Type != ClusterNodeType.Primary)
+                        if (secondary)
                             missingInputs.Add(ConfigurationLdap.Path);
                         else
                         {
@@ -650,13 +644,13 @@ namespace DnsServerCore
                     }
                 }
 
-                if (_dnsWebService._clusterManager.ClusterInitialized &&
+                if (cluster.ClusterInitialized &&
                     _dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.View))
-                    manifest["cluster"] = ConfigurationClusterOptions.ExportTopology(_dnsWebService._clusterManager, missingInputs);
+                    manifest["cluster"] = ConfigurationClusterOptions.ExportTopology(cluster, missingInputs);
 
-                if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
+                if (includeClusterPolicy && dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
-                if (!string.IsNullOrEmpty(dns.Proxy?.Credential?.Password))
+                if (includeClusterPolicy && !string.IsNullOrEmpty(dns.Proxy?.Credential?.Password))
                     missingInputs.Add("/dns/proxy/password");
                 if (!string.IsNullOrEmpty(dns.DnsTlsCertificatePassword))
                     missingInputs.Add("/dns/listeners/certificate/password");
@@ -664,7 +658,7 @@ namespace DnsServerCore
                     missingInputs.Add("/web/rootPath");
                 if (!string.IsNullOrEmpty(_dnsWebService._webServiceTlsCertificatePassword))
                     missingInputs.Add("/web/certificate/password");
-                if (dns.TsigKeys is not null)
+                if (includeClusterPolicy && dns.TsigKeys is not null)
                 {
                     string catalogKey = _dnsWebService._clusterManager.ClusterInitialized
                         ? ConfigurationTsig.GetCatalogKey(_dnsWebService._clusterManager.ClusterDomain) : null;

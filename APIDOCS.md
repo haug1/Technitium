@@ -5333,7 +5333,7 @@ The Primary can apply section-level `auth.permissions` when every peer advertise
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
 
-The response contains a versioned `manifest` and a sorted `missingInputs` array of JSON Pointer paths. The array identifies configured inputs omitted from the export, including proxy and certificate passwords, TSIG secrets, blocklist source URLs, and individual forwarder addresses containing potentially credential-bearing URLs. The export response omits the values of those inputs.
+The response contains a versioned `manifest` and a sorted `missingInputs` array of JSON Pointer paths. The array identifies configured inputs omitted from the export, including proxy and certificate passwords, TSIG secrets, blocklist source URLs, and individual forwarder addresses containing potentially credential-bearing URLs. The export response omits the values of those inputs. A Secondary’s regular export includes its topology and node-local configuration. Shared DNS settings, blocklists, apps, and authentication are supplied by the Primary.
 
 Entries in `blocklists.sources` can be strings or environment references. Preview and apply resolve the references on the server, and a change to the effective source list invalidates the preview revision. Use a local startup manifest for file references.
 

@@ -377,11 +377,19 @@ namespace DnsServerCore.Tests
 
             await secondary.RestartAsync(null, () => File.Delete(passwordFile));
             Assert.Equal(joinedId, await GetSecondaryIdAsync());
+            LoopbackWebService.AssertOk(await secondary.CallAsync("settings/set?maxLogFileDays=41", secondary.AdminToken));
 
             JsonElement exported = await secondary.CallAsync("settings/config/export", secondary.AdminToken);
             LoopbackWebService.AssertOk(exported);
             JsonElement response = exported.GetProperty("response");
-            JsonElement cluster = response.GetProperty("manifest").GetProperty("cluster");
+            JsonElement manifestExport = response.GetProperty("manifest");
+            JsonElement cluster = manifestExport.GetProperty("cluster");
+            Assert.False(manifestExport.GetProperty("dns").TryGetProperty("authoritative", out _));
+            Assert.False(manifestExport.TryGetProperty("blocklists", out _));
+            JsonElement inspection = await secondary.CallAsync("settings/config/export?includePreviewOnly=true", secondary.AdminToken);
+            LoopbackWebService.AssertOk(inspection);
+            Assert.Equal(180, inspection.GetProperty("response").GetProperty("manifest").GetProperty("dns")
+                .GetProperty("authoritative").GetProperty("defaultRecordTtl").GetInt32());
             Assert.Equal("cluster.test", cluster.GetProperty("domain").GetString());
             JsonElement bootstrap = cluster.GetProperty("bootstrap");
             Assert.Equal("Secondary", bootstrap.GetProperty("role").GetString());
@@ -406,6 +414,27 @@ namespace DnsServerCore.Tests
             JsonElement restoredExport = await restored.CallAsync("settings/config/export", restored.AdminToken);
             LoopbackWebService.AssertOk(restoredExport);
             Assert.True(JsonElement.DeepEquals(cluster, restoredExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")));
+
+            JsonNode migration = JsonNode.Parse(manifestExport.GetRawText())!;
+            JsonElement local = await restored.GetSettingsAsync();
+            migration["dns"]!["serverDomain"] = "restored.cluster.test";
+            migration["dns"]!["localEndpoints"] = JsonNode.Parse(local.GetProperty("dnsServerLocalEndPoints").GetRawText());
+            migration["web"]!["httpPort"] = local.GetProperty("webServiceHttpPort").GetInt32();
+            migration["web"]!["tlsPort"] = local.GetProperty("webServiceTlsPort").GetInt32();
+            using var planBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            JsonElement plan = await restored.CallAsync("settings/config/plan", restored.AdminToken, planBody);
+            LoopbackWebService.AssertOk(plan);
+            using var applyBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await restored.CallAsync("settings/config/apply", restored.AdminToken, applyBody,
+                plan.GetProperty("response").GetProperty("revision").GetString()));
+            await restored.RestartAsync(null, () => File.Delete(Path.Combine(restored.ConfigurationDirectory, "technitium.json")));
+            JsonElement migrated = await restored.GetSettingsAsync();
+            Assert.Equal(41, migrated.GetProperty("maxLogFileDays").GetInt32());
+            Assert.Equal(180, migrated.GetProperty("defaultRecordTtl").GetInt32());
+            using var repeatBody = new StringContent(migration.ToJsonString(), Encoding.UTF8, "application/json");
+            JsonElement repeat = await restored.CallAsync("settings/config/plan", restored.AdminToken, repeatBody);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
 
             void WriteManifest(string domain)
             {
@@ -578,14 +607,23 @@ namespace DnsServerCore.Tests
                 new("primaryNameServerAddresses", $"127.0.0.1:{primary.DnsPort}")
             ]);
             LoopbackWebService.AssertOk(await secondary.CallAsync("zones/options/set", token, catalog));
+            // The initial refresh may already be waiting on the default DNS port.
+            await secondary.RestartAsync();
+            token = secondary.AdminToken;
+            string primaryTlsaName = $"_{primaryUrl.Port}._tcp.{primaryUrl.Host}";
             Assert.True(await WaitForAsync(async () =>
             {
-                if ((await secondary.CallAsync("zones/options/get?zone=cluster.test", token)).GetProperty("status").ValueEquals("ok"))
+                var zones = secondary.Dns.AuthZoneManager;
+                if (zones.GetAuthZoneInfo("cluster.test") is not null &&
+                    zones.GetRecords("cluster.test", primaryTlsaName, DnsResourceRecordType.TLSA).Count > 0)
                     return true;
                 LoopbackWebService.AssertOk(await secondary.CallAsync("zones/resync?zone=cluster-catalog.cluster.test", token));
                 return false;
             }),
-                "The Secondary did not transfer the cluster zone.");
+                "The Secondary did not transfer the Primary's TLSA record.");
+            // Reopen the peer client after the signed zone is available for DANE.
+            await secondary.RestartAsync();
+            token = secondary.AdminToken;
 
             using (var secondaryBody = new StringContent(clear, Encoding.UTF8, "application/json"))
             {
@@ -631,7 +669,7 @@ namespace DnsServerCore.Tests
                 path => path.ValueEquals("/apps/packages/Fixture/configuration"));
             JsonElement secondaryExport = await secondary.CallAsync("settings/config/export", token);
             LoopbackWebService.AssertOk(secondaryExport);
-            Assert.False(secondaryExport.GetProperty("response").GetProperty("manifest").GetProperty("apps").TryGetProperty("packages", out _));
+            Assert.False(secondaryExport.GetProperty("response").GetProperty("manifest").TryGetProperty("apps", out _));
 
             await using var restored = await LoopbackWebService.StartAsync();
             await restored.RestartAsync(null, () =>
