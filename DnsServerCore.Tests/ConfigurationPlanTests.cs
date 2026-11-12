@@ -780,6 +780,7 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain(tsigSecret, first.GetRawText());
             Assert.DoesNotContain(forwarderToken, first.GetRawText());
             Assert.Collection(response.GetProperty("missingInputs").EnumerateArray(),
+                entry => Assert.Equal("/auth/users/admin/password", entry.GetString()),
                 entry => Assert.Equal("/dns/forwarding/servers", entry.GetString()),
                 entry => Assert.Equal("/dns/proxy/password", entry.GetString()),
                 entry => Assert.Equal("/dns/tsigKeys/migration-key.test/secret", entry.GetString()));
@@ -3333,6 +3334,81 @@ namespace DnsServerCore.Tests
                 LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
                 await server.RestartAsync();
                 LoopbackWebService.AssertOk(await server.CallAsync("admin/ldap/set?ldapServer=other.test", server.AdminToken));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
+        public async Task LocalUserManifestRequiresSecretsAndPreservesAdministrativeAccess()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_LOCAL_OPERATOR_PASSWORD";
+            const string initial = "fixture-local-password";
+            const string rotated = "fixture-rotated-password";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, null);
+            try
+            {
+                const string manifest = """
+                    {"schemaVersion":1,"auth":{
+                        "groups":{"Operators":{}},
+                        "users":{"operator":{"displayName":"Local Operator","groups":["Operators"],"sessionTimeoutSeconds":90,
+                            "password":{"environment":"TECHNITIUM_TEST_LOCAL_OPERATOR_PASSWORD"}}}
+                    }}
+                    """;
+                using (var content = new StringContent(manifest, Encoding.UTF8, "application/json"))
+                {
+                    JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                    Assert.Equal("error", rejected.GetProperty("status").GetString());
+                    Assert.Contains("/auth/users/operator/password", rejected.GetProperty("errorMessage").GetString());
+                }
+                Assert.Equal("error", (await server.CallAsync("admin/groups/get?group=Operators", server.AdminToken)).GetProperty("status").GetString());
+
+                Environment.SetEnvironmentVariable(variable, initial);
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change => change.GetProperty("path").ValueEquals("/auth/users/operator"));
+                Assert.DoesNotContain(initial, preview.GetRawText());
+                string revision = preview.GetProperty("revision").GetString()!;
+                Environment.SetEnvironmentVariable(variable, rotated);
+                Assert.Equal("error", (await ApplyAsync(server, manifest, revision)).GetProperty("status").GetString());
+                revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+                string token = await server.LoginAsync("operator", rotated);
+                LoopbackWebService.AssertOk(await server.CallAsync("user/profile/get", token));
+
+                JsonElement group = await server.CallAsync("admin/groups/get?group=Operators", server.AdminToken);
+                Assert.Contains(group.GetProperty("response").GetProperty("members").EnumerateArray(), member => member.ValueEquals("operator"));
+
+                Environment.SetEnvironmentVariable(variable, initial);
+                preview = await PreviewAsync(server, manifest);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change => change.GetProperty("path").ValueEquals("/auth/users/operator/password"));
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+                await server.RestartAsync();
+                await server.LoginAsync("operator", initial);
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                const string lockout = """{"schemaVersion":1,"auth":{"users":{"admin":{"groups":[],"disabled":true}}}}""";
+                using var lockoutContent = new StringContent(lockout, Encoding.UTF8, "application/json");
+                JsonElement lockoutResponse = await server.CallAsync("settings/config/plan", server.AdminToken, lockoutContent);
+                Assert.Equal("error", lockoutResponse.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/admin", lockoutResponse.GetProperty("errorMessage").GetString());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement response = export.GetProperty("response");
+                JsonElement user = response.GetProperty("manifest").GetProperty("auth").GetProperty("users").GetProperty("operator");
+                Assert.Equal("Local Operator", user.GetProperty("displayName").GetString());
+                Assert.Contains(user.GetProperty("groups").EnumerateArray(), name => name.ValueEquals("Operators"));
+                Assert.Equal(90, user.GetProperty("sessionTimeoutSeconds").GetInt32());
+                Assert.False(user.TryGetProperty("password", out _));
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/auth/users/operator/password"));
+                Assert.DoesNotContain(initial, export.GetRawText());
+                Assert.DoesNotContain(rotated, export.GetRawText());
             }
             finally
             {

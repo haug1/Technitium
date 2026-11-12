@@ -22,6 +22,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -484,15 +485,15 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void SaveConfigFileInternal(Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null)
+        private void SaveConfigFileInternal(Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, zonePermissions, ldap, groupChanges);
-                if (zonePermissions is not null || ldap is not null || groupChanges is not null)
+                WriteConfigTo(fS, zonePermissions, ldap, groupChanges, stagedUsers);
+                if (zonePermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -501,9 +502,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0)
             {
                 persist(null);
                 return;
@@ -515,6 +516,24 @@ namespace DnsServerCore.Auth
                 {
                     if (candidate is null && _groups.TryGetValue(name, out Group group))
                         ConfigurationGroups.ValidateRemoval(this, group, ldap, ConfigurationPlan.AppendPath(ConfigurationGroups.Path, group.Name));
+                }
+
+                Dictionary<string, User> stagedUsers = null;
+                if (userChanges.Count > 0)
+                {
+                    stagedUsers = new Dictionary<string, User>();
+                    if (_users.Count + userChanges.Values.Count(change => change.Current is null) > byte.MaxValue)
+                        throw new InvalidDataException($"{ConfigurationUsers.Path}: At most 255 users can be stored.");
+                    foreach (var (name, change) in userChanges)
+                    {
+                        if (!ReferenceEquals(GetUser(name), change.Current))
+                            throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationUsers.Path, name)}: The user changed during apply.");
+                        if (ReferenceEquals(change.Current, creator) && creator is not null &&
+                            (change.Disabled || creator.IsMemberOfGroup(GetGroup(Group.ADMINISTRATORS)) &&
+                                !change.Groups.Contains(Group.ADMINISTRATORS.ToLowerInvariant())))
+                            throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationUsers.Path, name)}: The applying administrator must retain access.");
+                        stagedUsers.Add(name, change.Stage(this, groupChanges));
+                    }
                 }
 
                 Permission permissions = membership.Count == 0 ? null : GetPermission(PermissionSection.Zones).CopySection();
@@ -533,8 +552,8 @@ namespace DnsServerCore.Auth
 
                 persist(() =>
                 {
-                    if (permissions is not null || ldap is not null || groupChanges.Count > 0)
-                        SaveConfigFileInternal(permissions, ldap, groupChanges.Count > 0 ? groupChanges : null);
+                    if (permissions is not null || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null)
+                        SaveConfigFileInternal(permissions, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers);
                     if (ldapOwnership is not null)
                         WriteOwnership(LdapOwnershipFile, ldapOwnership);
                     if (groupOwnership is not null)
@@ -548,6 +567,24 @@ namespace DnsServerCore.Auth
                         existing.Description = group.Description;
                     else
                         _groups.TryAdd(name, group);
+                }
+
+                if (stagedUsers is not null)
+                {
+                    foreach (var (name, user) in stagedUsers)
+                    {
+                        ConfigurationUsers.Change change = userChanges[name];
+                        if (change.Current is null)
+                            _users.TryAdd(name, user);
+                        else
+                            change.Current.PublishManifest(user, change.Fields.Contains("password"));
+                    }
+                    foreach (var (token, session) in _sessions)
+                    {
+                        if (stagedUsers.TryGetValue(session.User.Username, out User user) && user.Disabled &&
+                            session.Type is UserSessionType.Standard or UserSessionType.SingleUse)
+                            _sessions.TryRemove(token, out _);
+                    }
                 }
 
                 if (ldapOwnership is not null)
@@ -928,7 +965,7 @@ namespace DnsServerCore.Auth
             _ldapEnabled = ldap.Enabled;
         }
 
-        private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null)
+        private void WriteConfigTo(Stream s, Permission zonePermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -956,10 +993,16 @@ namespace DnsServerCore.Auth
                     group.WriteTo(bW);
             }
 
-            bW.Write(Convert.ToByte(_users.Count));
-
-            foreach (KeyValuePair<string, User> user in _users)
-                user.Value.WriteTo(bW);
+            var users = _users;
+            if (stagedUsers is not null)
+            {
+                users = new ConcurrentDictionary<string, User>(_users);
+                foreach (var (name, user) in stagedUsers)
+                    users[name] = user;
+            }
+            bW.Write(Convert.ToByte(users.Count));
+            foreach (User user in users.Values)
+                user.WriteTo(bW);
 
             bW.Write(_permissions.Count);
 
@@ -972,7 +1015,8 @@ namespace DnsServerCore.Auth
             {
                 if (session.Value.HasExpired())
                     _sessions.TryRemove(session.Key, out _);
-                else
+                else if (stagedUsers?.TryGetValue(session.Value.User.Username, out User staged) != true ||
+                    !staged.Disabled || session.Value.Type is not (UserSessionType.Standard or UserSessionType.SingleUse))
                     activeSessions.Add(session.Value);
             }
 
@@ -1387,76 +1431,27 @@ namespace DnsServerCore.Auth
             return null;
         }
 
-        public User CreateUser(string displayName, string username, string password, int iterations = User.DEFAULT_ITERATIONS)
+        public User CreateUser(string displayName, string username, string password, int iterations = User.DEFAULT_ITERATIONS) =>
+            RegisterUser(User.CreateLocalUser(displayName, username, password, iterations));
+
+        public User CreateSsoUser(string displayName, string username, string ssoIdentifier) =>
+            RegisterUser(User.CreateSsoUser(displayName, username, ssoIdentifier));
+
+        public User CreateLdapUser(string displayName, string username) =>
+            RegisterUser(User.CreateLdapUser(displayName, username));
+
+        private User RegisterUser(User user)
         {
-            if (_users.Count >= byte.MaxValue)
-                throw new DnsWebServiceException("Cannot create more than 255 users.");
-
-            username = username.ToLowerInvariant();
-
-            User user = User.CreateLocalUser(displayName, username, password, iterations);
-
-            if (_users.TryAdd(username, user))
+            lock (_saveLock)
             {
-                if (_users.Count > byte.MaxValue)
-                {
-                    _users.TryRemove(username, out _); //undo
+                if (_users.Count >= byte.MaxValue)
                     throw new DnsWebServiceException("Cannot create more than 255 users.");
-                }
 
                 user.AddToGroup(GetGroup(Group.EVERYONE));
+                if (!_users.TryAdd(user.Username, user))
+                    throw new DnsWebServiceException("User already exists: " + user.Username);
                 return user;
             }
-
-            throw new DnsWebServiceException("User already exists: " + username);
-        }
-
-        public User CreateSsoUser(string displayName, string username, string ssoIdentifier)
-        {
-            if (_users.Count >= byte.MaxValue)
-                throw new DnsWebServiceException("Cannot create more than 255 users.");
-
-            username = username.ToLowerInvariant();
-
-            User user = User.CreateSsoUser(displayName, username, ssoIdentifier);
-
-            if (_users.TryAdd(username, user))
-            {
-                if (_users.Count > byte.MaxValue)
-                {
-                    _users.TryRemove(username, out _); //undo
-                    throw new DnsWebServiceException("Cannot create more than 255 users.");
-                }
-
-                user.AddToGroup(GetGroup(Group.EVERYONE));
-                return user;
-            }
-
-            throw new DnsWebServiceException("User already exists: " + username);
-        }
-
-        public User CreateLdapUser(string displayName, string username)
-        {
-            if (_users.Count >= byte.MaxValue)
-                throw new DnsWebServiceException("Cannot create more than 255 users.");
-
-            username = username.ToLowerInvariant();
-
-            User user = User.CreateLdapUser(displayName, username);
-
-            if (_users.TryAdd(username, user))
-            {
-                if (_users.Count > byte.MaxValue)
-                {
-                    _users.TryRemove(username, out _); //undo
-                    throw new DnsWebServiceException("Cannot create more than 255 users.");
-                }
-
-                user.AddToGroup(GetGroup(Group.EVERYONE));
-                return user;
-            }
-
-            throw new DnsWebServiceException("User already exists: " + username);
         }
 
         public bool HasDefaultCredentials()
@@ -1468,19 +1463,22 @@ namespace DnsServerCore.Auth
 
         public void ChangeUsername(User user, string newUsername)
         {
-            if (user.Username.Equals(newUsername, StringComparison.OrdinalIgnoreCase))
-                return;
-
-            string oldUsername = user.Username;
-            user.SetUsername(newUsername);
-
-            if (!_users.TryAdd(user.Username, user))
+            lock (_saveLock)
             {
-                user.SetUsername(oldUsername); //revert
-                throw new DnsWebServiceException("User already exists: " + newUsername);
-            }
+                if (user.Username.Equals(newUsername, StringComparison.OrdinalIgnoreCase))
+                    return;
 
-            _users.TryRemove(oldUsername, out _);
+                string oldUsername = user.Username;
+                user.SetUsername(newUsername);
+
+                if (!_users.TryAdd(user.Username, user))
+                {
+                    user.SetUsername(oldUsername); //revert
+                    throw new DnsWebServiceException("User already exists: " + newUsername);
+                }
+
+                _users.TryRemove(oldUsername, out _);
+            }
         }
 
         public async Task<User> ChangePasswordAsync(string username, string password, string totp, IPAddress remoteAddress, string newPassword, int iterations)

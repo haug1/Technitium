@@ -2212,12 +2212,12 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/user/createSingleUseToken", _authApi.CreateSingleUseToken);
             _webService.MapGetAndPost("/api/user/session/get", _authApi.GetCurrentSessionDetails);
             _webService.MapGetAndPost("/api/user/session/delete", delegate (HttpContext context) { _authApi.DeleteSession(context, false); });
-            _webService.MapGetAndPost("/api/user/changePassword", _authApi.ChangePasswordAsync);
+            _webService.MapGetAndPost("/api/user/changePassword", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.ChangePasswordAsync));
             _webService.MapGetAndPost("/api/user/2fa/init", _authApi.Initialize2FA);
             _webService.MapGetAndPost("/api/user/2fa/enable", _authApi.Enable2FA);
             _webService.MapGetAndPost("/api/user/2fa/disable", _authApi.Disable2FA);
             _webService.MapGetAndPost("/api/user/profile/get", _authApi.GetProfile);
-            _webService.MapGetAndPost("/api/user/profile/set", _authApi.SetProfile);
+            _webService.MapGetAndPost("/api/user/profile/set", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.SetProfile));
             _webService.MapGetAndPost("/api/user/checkForUpdate", _api.CheckForUpdateAsync);
 
             //dashboard
@@ -2332,10 +2332,10 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/sessions/createToken", _authApi.CreateApiToken);
             _webService.MapGetAndPost("/api/admin/sessions/delete", delegate (HttpContext context) { _authApi.DeleteSession(context, true); });
             _webService.MapGetAndPost("/api/admin/users/list", _authApi.ListUsers);
-            _webService.MapGetAndPost("/api/admin/users/create", _authApi.CreateUser);
+            _webService.MapGetAndPost("/api/admin/users/create", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.CreateUser));
             _webService.MapGetAndPost("/api/admin/users/get", _authApi.GetUserDetails);
             _webService.MapGetAndPost("/api/admin/users/set", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.SetUserDetails));
-            _webService.MapGetAndPost("/api/admin/users/delete", _authApi.DeleteUser);
+            _webService.MapGetAndPost("/api/admin/users/delete", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.DeleteUser));
             _webService.MapGetAndPost("/api/admin/groups/list", _authApi.ListGroups);
             _webService.MapGetAndPost("/api/admin/groups/create", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.CreateGroup));
             _webService.MapGetAndPost("/api/admin/groups/get", _authApi.GetGroupDetails);
@@ -3080,7 +3080,7 @@ namespace DnsServerCore
             return candidate;
         }
 
-        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig, User creator, ConfigurationLdap.Settings ldap)
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig, User creator, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> users)
         {
             WebListeners previous = CaptureWebListeners();
             SslServerAuthenticationOptions previousTlsOptions;
@@ -3104,7 +3104,7 @@ namespace DnsServerCore
                 await StartWebServiceAsync(false, listeners);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
                 await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners,
-                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap);
+                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users);
             }
             catch
             {
@@ -3236,7 +3236,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3258,7 +3258,7 @@ namespace DnsServerCore
             try
             {
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
-                    ldap ?? ConfigurationLdap.Prepare(manifest, _authManager));
+                    ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users);
                 await _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),

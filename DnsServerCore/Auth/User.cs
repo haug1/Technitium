@@ -70,7 +70,7 @@ namespace DnsServerCore.Auth
         DateTime _recentSessionLoggedOn;
         IPAddress _recentSessionRemoteAddress;
 
-        readonly ConcurrentDictionary<string, Group> _memberOfGroups;
+        ConcurrentDictionary<string, Group> _memberOfGroups;
 
         bool? _hasDefaultCredentials; //only used for 'admin' user to cache hashing result
 
@@ -259,6 +259,31 @@ namespace DnsServerCore.Auth
         #endregion
 
         #region internal
+
+        internal int PasswordIterations => _iterations;
+
+        internal User CopyForManifest()
+        {
+            var copy = (User)MemberwiseClone();
+            copy._memberOfGroups = new ConcurrentDictionary<string, Group>(_memberOfGroups);
+            return copy;
+        }
+
+        internal void PublishManifest(User staged, bool changePassword)
+        {
+            _displayName = staged._displayName;
+            _disabled = staged._disabled;
+            _sessionTimeoutSeconds = staged._sessionTimeoutSeconds;
+            _memberOfGroups = staged._memberOfGroups;
+            if (changePassword)
+            {
+                _passwordHashType = staged._passwordHashType;
+                _iterations = staged._iterations;
+                _salt = staged._salt;
+                _passwordHash = staged._passwordHash;
+                _hasDefaultCredentials = null;
+            }
+        }
 
         internal void SetUsername(string username)
         {
