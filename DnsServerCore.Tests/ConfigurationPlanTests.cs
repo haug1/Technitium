@@ -2144,6 +2144,40 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task BlockListSourceReferenceChangesInvalidatePreviewBeforeApply()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            string variable = "TECHNITIUM_TEST_BLOCKLIST_" + Guid.NewGuid().ToString("N");
+            string manifest = $$$"""
+                {"schemaVersion":1,"blocklists":{"sources":[{"environment":"{{{variable}}}"}],"updateIntervalHours":0}}
+                """;
+            const string first = "https://example.test/list?token=fixture-first";
+            const string second = "https://example.test/list?token=fixture-second";
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, first);
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.DoesNotContain(first, preview.GetRawText());
+                Environment.SetEnvironmentVariable(variable, second);
+                JsonElement rejected = await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!);
+                Assert.Equal("stale-preview", rejected.GetProperty("errorCode").GetString());
+                Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("blockListUrls").ValueKind);
+
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                Assert.Equal(second, Assert.Single((await server.GetSettingsAsync()).GetProperty("blockListUrls").EnumerateArray()).GetString());
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain(second, export.GetRawText());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, null);
+            }
+        }
+
+        [Fact]
         public async Task ManagedWebHeadersTakeEffectLiveAndRejectConflictingRestore()
         {
             await using var server = await LoopbackWebService.StartAsync();

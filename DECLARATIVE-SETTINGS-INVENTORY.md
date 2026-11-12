@@ -54,7 +54,7 @@ Sources and scheduling are cluster-wide and apply live. The blocklist manager pe
 
 | Proposed manifest path | API field | Type and default | Validation and dependencies |
 | --- | --- | --- | --- |
-| `blocklists.sources` | `blockListUrls` | Ordered string array, empty | Up to 255 entries of at most 255 characters. The manager validates URIs, accepts `!`-prefixed allowlist URLs and `#` comments, and deduplicates identical URL entries. |
+| `blocklists.sources` | `blockListUrls` | Ordered array of strings or secret references, empty | Up to 255 entries of at most 255 UTF-8 bytes each after resolution. The manager validates URIs, accepts `!`-prefixed allowlist URLs and `#` comments, and deduplicates identical URL entries. |
 | `blocklists.updateIntervalHours` | `blockListUpdateIntervalHours` | Integer hours, 24 | Range 0–168. Zero disables automatic updates. A positive interval needs at least one source to schedule downloads. |
 
 Downloaded lists, update timestamps, the next scheduled refresh, and temporary blocking pauses are runtime state. DNS blocking policy and individually allowed and blocked names have separate configuration paths.

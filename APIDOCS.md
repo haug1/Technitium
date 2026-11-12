@@ -5335,6 +5335,8 @@ Send `GET /api/settings/config/export` with a bearer token that has Settings vie
 
 The response contains a versioned `manifest` and a sorted `missingInputs` array of JSON Pointer paths. The array identifies configured inputs omitted from the export, including proxy and certificate passwords, TSIG secrets, blocklist source URLs, and forwarder lists containing potentially credential-bearing URLs. The export response omits the values of those inputs.
 
+Entries in `blocklists.sources` can be strings or environment references. Preview and apply resolve the references on the server, and a change to the effective source list invalidates the preview revision. Use a local startup manifest for file references.
+
 ### Apply Declarative Configuration
 
 Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header. A stale revision returns `status: error` with `errorCode: stale-preview` before applying any changes.

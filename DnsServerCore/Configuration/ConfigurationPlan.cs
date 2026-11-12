@@ -234,7 +234,7 @@ namespace DnsServerCore.Configuration
                 else if (section.Name == "dhcp" && currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
                     ConfigurationDhcp.Compare(section.Value, scopes, changes);
                 else
-                    Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log, declaredWebTlsPort);
+                    Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log, declaredWebTlsPort, manifest);
             }
 
             if (currentSettings.TryGetProperty("manifestPermissions", out JsonElement permissions))
@@ -271,6 +271,8 @@ namespace DnsServerCore.Configuration
             {
                 writer.WriteStartArray();
                 manifest.Settings.WriteTo(writer);
+                if (manifest.BlockListSources is { } sources)
+                    JsonSerializer.Serialize(writer, sources);
                 writer.WriteStartObject();
                 foreach (var (path, setting) in _settings.OrderBy(entry => entry.Key, StringComparer.Ordinal))
                 {
@@ -395,7 +397,7 @@ namespace DnsServerCore.Configuration
                 if (isClusterSecondary)
                     persist(null);
                 else
-                    dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), persist);
+                    dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), manifest.BlockListSources, persist);
             }
 
             void ApplyAllowedZones(Action<Action> persist)
@@ -553,12 +555,6 @@ namespace DnsServerCore.Configuration
                 web.TryGetProperty("realIpHeader", out JsonElement realIp) ? ConfigurationManifest.ReadWebHeader(realIp, realIp: true) : null,
                 web.TryGetProperty("frameAncestors", out JsonElement ancestors) ? ConfigurationManifest.ReadWebHeader(ancestors, realIp: false) : null,
                 web.TryGetProperty("reverseProxyAcl", out JsonElement acl) ? ConfigurationManifest.ReadWebReverseProxyAcl(acl) : null);
-        }
-
-        private static IReadOnlyList<string> GetBlockListSources(ConfigurationManifest manifest)
-        {
-            return manifest.Settings.TryGetProperty("blocklists", out JsonElement blocklists) &&
-                blocklists.TryGetProperty("sources", out JsonElement value) ? ConfigurationManifest.ReadBlockListSources(value) : null;
         }
 
         private static int? GetBlockListInterval(ConfigurationManifest manifest)
@@ -1138,7 +1134,7 @@ namespace DnsServerCore.Configuration
             if (!cluster.ClusterInitialized)
                 return [];
 
-            IReadOnlyList<string> sources = GetBlockListSources(manifest);
+            IReadOnlyList<string> sources = manifest.BlockListSources;
             int? interval = GetBlockListInterval(manifest);
             if (sources is null && !interval.HasValue)
                 return [];
@@ -1811,7 +1807,7 @@ namespace DnsServerCore.Configuration
                 comments.EndsWith("' DHCP scope", StringComparison.Ordinal);
         }
 
-        private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
+        private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort, ConfigurationManifest manifest)
         {
             if (path is "/allowZones" or "/blockZones")
             {
@@ -1856,7 +1852,7 @@ namespace DnsServerCore.Configuration
                 void ComparePrefetch<T>(string field, T? value) where T : struct
                 {
                     if (value.HasValue)
-                        Compare(JsonSerializer.SerializeToElement(value.Value), path + "/" + field, currentSettings, changes, log, declaredWebTlsPort);
+                        Compare(JsonSerializer.SerializeToElement(value.Value), path + "/" + field, currentSettings, changes, log, declaredWebTlsPort, manifest);
                 }
             }
 
@@ -1876,7 +1872,7 @@ namespace DnsServerCore.Configuration
                         byte prefix = subnet.Ipv6Prefix ?? currentSettings.GetProperty("eDnsClientSubnetIPv6PrefixLength").GetByte();
                         value = JsonSerializer.SerializeToElement(DnsServer.NormalizeClientSubnetOverride(subnet.Ipv6Override, prefix).ToString());
                     }
-                    Compare(value, AppendPath(path, field.Name), currentSettings, changes, log, declaredWebTlsPort);
+                    Compare(value, AppendPath(path, field.Name), currentSettings, changes, log, declaredWebTlsPort, manifest);
                 }
                 return;
             }
@@ -1986,8 +1982,8 @@ namespace DnsServerCore.Configuration
                     }
                     else if (path == BlockListSourcesPath)
                     {
-                        candidate = NormalizeBlockListSources(desired);
-                        current = NormalizeBlockListSources(current);
+                        candidate = SerializeBlockListSources(manifest.BlockListSources);
+                        current = SerializeBlockListSources(ConfigurationManifest.ReadBlockListSources(current));
                     }
                     else if (path == DnsEndpointsPath)
                     {
@@ -2030,15 +2026,15 @@ namespace DnsServerCore.Configuration
 
             if (desired.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket")
             {
-                Compare(desired, path + "/enabled", currentSettings, changes, log, declaredWebTlsPort);
-                Compare(desired, path + "/path", currentSettings, changes, log, declaredWebTlsPort);
+                Compare(desired, path + "/enabled", currentSettings, changes, log, declaredWebTlsPort, manifest);
+                Compare(desired, path + "/path", currentSettings, changes, log, declaredWebTlsPort, manifest);
                 return;
             }
 
             if ((desired.ValueKind == JsonValueKind.Object) && _settings.Keys.Any(field => field.StartsWith(path + "/", StringComparison.Ordinal)))
             {
                 foreach (JsonProperty property in desired.EnumerateObject())
-                    Compare(property.Value, AppendPath(path, property.Name), currentSettings, changes, log, declaredWebTlsPort);
+                    Compare(property.Value, AppendPath(path, property.Name), currentSettings, changes, log, declaredWebTlsPort, manifest);
 
                 return;
             }
@@ -2087,11 +2083,8 @@ namespace DnsServerCore.Configuration
             return JsonSerializer.SerializeToElement(address.Length == 0 ? null : address);
         }
 
-        private static JsonElement NormalizeBlockListSources(JsonElement value)
-        {
-            IReadOnlyList<string> sources = ConfigurationManifest.ReadBlockListSources(value);
-            return JsonSerializer.SerializeToElement(sources.Count == 0 ? null : sources);
-        }
+        private static JsonElement SerializeBlockListSources(IReadOnlyList<string> sources) =>
+            JsonSerializer.SerializeToElement(sources.Count == 0 ? null : sources);
 
         private static Setting Field<T>(string apiField, T defaultValue, bool restartWebService = false, bool canApply = false)
         {

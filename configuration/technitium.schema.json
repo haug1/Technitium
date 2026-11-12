@@ -88,7 +88,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "sources": {"anyOf": [{"type": "array", "items": {"type": "string", "maxLength": 255}, "maxItems": 255}, {"type": "null"}]},
+        "sources": {"anyOf": [{"type": "array", "items": {"anyOf": [{"type": "string", "maxLength": 255}, {"$ref": "#/$defs/secretReference"}]}, "maxItems": 255}, {"type": "null"}]},
         "updateIntervalHours": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 168}, {"type": "null"}]}
       }
     },

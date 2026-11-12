@@ -25,17 +25,24 @@ namespace DnsServerCore.Configuration
 
         private static readonly UTF8Encoding _secretFileEncoding = new(encoderShouldEmitUTF8Identifier: true, throwOnInvalidBytes: true);
         private static readonly Lazy<JsonSchema> _schema = new(LoadSchema);
+        private readonly Lazy<IReadOnlyList<string>> _blockListSources;
 
         private ConfigurationManifest(string filePath, JsonElement settings)
         {
             FilePath = filePath;
             Settings = settings;
+            if (settings.ValueKind == JsonValueKind.Object && settings.TryGetProperty("blocklists", out JsonElement blocklists) &&
+                blocklists.TryGetProperty("sources", out JsonElement sources))
+                _blockListSources = new(() => ReadBlockListSources(sources, this));
         }
 
         public string FilePath { get; }
 
         // Keep explicit nulls so callers can distinguish a reset from an omitted setting.
         public JsonElement Settings { get; }
+
+        // Use the same resolved values to calculate the revision and apply this manifest.
+        internal IReadOnlyList<string> BlockListSources => _blockListSources?.Value;
 
         internal static ConfigurationManifest ReferenceContext(string configFolder) =>
             new(Path.Combine(configFolder, DefaultFileName), default);
@@ -334,14 +341,24 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static IReadOnlyList<string> ReadBlockListSources(JsonElement value)
+        internal static IReadOnlyList<string> ReadBlockListSources(JsonElement value, ConfigurationManifest manifest = null)
         {
             if (value.ValueKind == JsonValueKind.Null)
                 return [];
 
             try
             {
-                return BlockListZoneManager.NormalizeBlockListUrls(value.EnumerateArray().Select(item => item.GetString()).ToArray());
+                var sources = new List<string>();
+                int index = 0;
+                foreach (JsonElement item in value.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.String)
+                        sources.Add(item.GetString());
+                    else if (manifest is not null)
+                        sources.Add(manifest.ResolveReference(item, $"/blocklists/sources/{index}"));
+                    index++;
+                }
+                return BlockListZoneManager.NormalizeBlockListUrls(sources);
             }
             catch (ArgumentException)
             {
@@ -483,6 +500,12 @@ namespace DnsServerCore.Configuration
 
         private void ValidateReferences(JsonElement element, string path, bool deferClusterJoinSecrets = false)
         {
+            if (path == "/blocklists/sources")
+            {
+                ReadBlockListSources(element, this);
+                return;
+            }
+
             if (deferClusterJoinSecrets && path is "/cluster/bootstrap/password" or "/cluster/bootstrap/totp")
                 return;
 

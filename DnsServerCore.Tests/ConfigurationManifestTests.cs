@@ -63,6 +63,24 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public void BlockListFileReferenceValidatesItsSourceWithoutEchoingIt()
+        {
+            string path = WriteManifest("""{"schemaVersion":1,"blocklists":{"sources":[{"file":"list-url"}]}}""");
+            ConfigurationManifest manifest = ConfigurationManifest.Load(path);
+            var missing = Assert.Throws<InvalidDataException>(manifest.ValidateReferences);
+            Assert.Contains("/blocklists/sources/0", missing.Message);
+
+            string input = Path.Combine(_directory.FullName, "list-url");
+            File.WriteAllText(input, "invalid fixture-secret");
+            var invalid = Assert.Throws<InvalidDataException>(manifest.ValidateReferences);
+            Assert.Contains("/blocklists/sources", invalid.Message);
+            Assert.DoesNotContain("fixture-secret", invalid.Message);
+
+            File.WriteAllText(input, "!https://example.test/list?token=fixture-secret");
+            manifest.ValidateReferences();
+        }
+
+        [Fact]
         public void DnsHttp3MayDependOnAnExistingHttpsListener()
         {
             string path = WriteManifest("""{"schemaVersion":1,"dns":{"listeners":{"https":{"http3Enabled":true}}}}""");
