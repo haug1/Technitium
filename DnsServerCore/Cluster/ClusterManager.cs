@@ -838,6 +838,32 @@ namespace DnsServerCore.Cluster
             DeleteAllClusterConfig();
         }
 
+        internal void CompletePrimaryHandoff(int successorId, string revision)
+        {
+            if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Primary ||
+                !_clusterNodes.TryGetValue(successorId, out ClusterNode successor) || successor.Type != ClusterNodeType.Secondary)
+                throw new DnsServerException("Cluster handoff requires a registered Secondary successor.");
+
+            string currentRevision = GetPrimaryHandoffRevision(GetSelfNode().Id, successorId);
+            if (!string.Equals(revision, currentRevision, StringComparison.Ordinal))
+                throw new DnsServerException("/cluster: The interval policy changed during handoff. Retry promotion.");
+
+            DeleteAllClusterConfig();
+        }
+
+        private string GetPrimaryHandoffRevision(int primaryId, int successorId)
+        {
+            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                domain = _clusterDomain,
+                primaryId,
+                successorId,
+                options = GetManifestOptions(),
+                ownership = _managedOptionNames.Where(ConfigurationClusterOptions.IsInterval).Order(StringComparer.Ordinal)
+            });
+            return Convert.ToHexString(SHA256.HashData(payload));
+        }
+
         public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions)
         {
             if (!ClusterInitialized)
@@ -2416,12 +2442,34 @@ namespace DnsServerCore.Cluster
 
             if (!forceDeletePrimary)
             {
-                //resync complete config from current primary node to ensure all data is synced
-                _configLastSynced = DateTime.UnixEpoch; //to ensure complete config resync
-                await existingPrimaryNode.SyncConfigAsync();
+                try
+                {
+                    _configLastSynced = DateTime.UnixEpoch; //ensure a complete configuration transfer
+                    await existingPrimaryNode.SyncConfigAsync();
 
-                //delete current cluster primary node
-                await existingPrimaryNode.DeleteClusterAsync(true);
+                    ClusterInfo currentPrimary = await existingPrimaryNode.GetClusterStateAsync();
+                    UpdateClusterFromPrimaryNode(currentPrimary, rescheduleRefresh: false);
+                    string revision;
+                    lock (_saveLock)
+                    {
+                        SaveConfigFile(immediately: true);
+                        revision = GetPrimaryHandoffRevision(existingPrimaryNode.Id, selfNewPrimaryNode.Id);
+                    }
+
+                    if (currentPrimary.SupportsDeclarativeClusterHandoff)
+                    {
+                        await existingPrimaryNode.DeleteClusterAsync(true, successorNodeId: selfNewPrimaryNode.Id, revision: revision);
+                    }
+                    else
+                    {
+                        await existingPrimaryNode.DeleteClusterAsync(true);
+                    }
+                }
+                catch
+                {
+                    UpdateConfigRefreshTimer();
+                    throw;
+                }
             }
 
             //dispose primary node immediately to stop heartbeat

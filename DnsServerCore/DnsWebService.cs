@@ -2370,7 +2370,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/secondary/notify", _clusterApi.ConfigUpdateNotificationAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/resync", _clusterApi.ResyncCluster);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/updatePrimary", _clusterApi.UpdatePrimaryNodeAsync);
-            _webService.MapGetAndPost("/api/admin/cluster/secondary/promote", _clusterApi.PromoteToPrimaryNodeAsync);
+            _webService.MapGetAndPost("/api/admin/cluster/secondary/promote", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.PromoteToPrimaryNodeAsync));
             _webService.MapGetAndPost("/api/admin/cluster/updateIpAddress", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.UpdateSelfNodeIPAddress));
 
             //logs

@@ -536,7 +536,8 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        public async Task<ClusterInfo> DeleteClusterAsync(bool forceDelete = false, CancellationToken cancellationToken = default)
+        public async Task<ClusterInfo> DeleteClusterAsync(bool forceDelete = false, CancellationToken cancellationToken = default,
+            int? successorNodeId = null, string revision = null)
         {
             if (_type != ClusterNodeType.Primary)
                 throw new InvalidOperationException();
@@ -545,7 +546,9 @@ namespace DnsServerCore.Cluster
 
             try
             {
-                ClusterInfo clusterInfo = await apiClient.DeleteClusterAsync(forceDelete, cancellationToken);
+                ClusterInfo clusterInfo = successorNodeId is int id
+                    ? await apiClient.HandoffClusterAsync(id, revision, cancellationToken)
+                    : await apiClient.DeleteClusterAsync(forceDelete, cancellationToken);
 
                 _lastSeen = DateTime.UtcNow;
                 _state = ClusterNodeState.Unreachable; //node is deleted, so mark as unreachable

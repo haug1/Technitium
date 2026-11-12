@@ -407,12 +407,18 @@ namespace DnsServerCore.HttpApi
             return clusterInfo;
         }
 
-        public async Task<ClusterInfo> DeleteClusterAsync(bool forceDelete = false, CancellationToken cancellationToken = default)
+        public Task<ClusterInfo> DeleteClusterAsync(bool forceDelete = false, CancellationToken cancellationToken = default) =>
+            DeleteClusterAsync($"forceDelete={forceDelete}", cancellationToken);
+
+        public Task<ClusterInfo> HandoffClusterAsync(int successorNodeId, string revision, CancellationToken cancellationToken = default) =>
+            DeleteClusterAsync($"forceDelete=true&successorNodeId={successorNodeId}&handoffRevision={Uri.EscapeDataString(revision)}", cancellationToken);
+
+        private async Task<ClusterInfo> DeleteClusterAsync(string query, CancellationToken cancellationToken)
         {
             if (!_loggedIn)
                 throw new HttpApiClientException("No active session exists. Please login and try again.");
 
-            Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primary/delete?forceDelete={forceDelete}", cancellationToken);
+            Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primary/delete?{query}", cancellationToken);
 
             using JsonDocument jsonDoc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             JsonElement rootElement = jsonDoc.RootElement;

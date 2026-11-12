@@ -62,6 +62,7 @@ namespace DnsServerCore
                 jsonWriter.WriteString("dnsServerDomain", _dnsWebService._dnsServer.ServerDomain);
                 jsonWriter.WriteBoolean("clusterInitialized", _dnsWebService._clusterManager.ClusterInitialized);
                 jsonWriter.WriteBoolean("supportsDeclarativeClusterOptions", true);
+                jsonWriter.WriteBoolean("supportsDeclarativeClusterHandoff", true);
 
                 if (_dnsWebService._clusterManager.ClusterInitialized)
                 {
@@ -288,7 +289,19 @@ namespace DnsServerCore
                 bool forceDelete = request.GetQueryOrForm("forceDelete", bool.Parse, false);
 
                 string clusterDomain = _dnsWebService._clusterManager.ClusterDomain;
-                _dnsWebService._clusterManager.DeleteCluster(forceDelete);
+                bool hasSuccessor = request.TryGetQueryOrForm("successorNodeId", int.Parse, out int successorNodeId);
+                string handoffRevision = request.GetQueryOrForm("handoffRevision", null);
+                if (hasSuccessor || handoffRevision is not null)
+                {
+                    if (!forceDelete || !hasSuccessor || handoffRevision is null || context.GetCurrentSession().Type != UserSessionType.ClusterApiToken)
+                        throw new DnsWebServiceException("Cluster handoff requires a successor, its revision, and a Cluster API token.");
+
+                    _dnsWebService._clusterManager.CompletePrimaryHandoff(successorNodeId, handoffRevision);
+                }
+                else
+                {
+                    _dnsWebService._clusterManager.DeleteCluster(forceDelete);
+                }
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Cluster (" + clusterDomain + ") was deleted successfully.");
 

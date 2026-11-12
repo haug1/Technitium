@@ -26,6 +26,7 @@ namespace DnsServerCore.HttpApi.Models
     {
         public bool ClusterInitialized { get; set; }
         public bool SupportsDeclarativeClusterOptions { get; set; }
+        public bool SupportsDeclarativeClusterHandoff { get; set; }
         public string[]? ManagedOptionPaths { get; set; }
         public string? ClusterDomain { get; set; }
         public ushort HeartbeatRefreshIntervalSeconds { get; set; }

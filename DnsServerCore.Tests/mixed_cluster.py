@@ -117,7 +117,7 @@ def wait_for(check, description, timeout=45):
     raise RuntimeError(f"Timed out waiting for {description}.")
 
 
-def verify(current, previous, folder, propagation):
+def verify(current, previous, folder, propagation, graceful):
     ports = allocate_ports()
     password = secrets.token_hex(16)
     primary = Node(current, folder / "primary", "primary.cluster.test", ports[:3], password)
@@ -137,7 +137,7 @@ def verify(current, previous, folder, propagation):
         }))
         if propagation:
             assert joined["supportsDeclarativeClusterOptions"] is True
-            verify_propagation(primary, secondary)
+            verify_propagation(primary, secondary, graceful)
             return
         assert "supportsDeclarativeClusterOptions" not in joined
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
@@ -163,7 +163,7 @@ def verify(current, previous, folder, propagation):
         primary.stop()
 
 
-def verify_propagation(primary, secondary):
+def verify_propagation(primary, secondary, graceful):
     catalog = "cluster-catalog.cluster.test"
     web_port = ok(secondary.call("settings/get"))["webServiceHttpPort"]
     ok(secondary.call("zones/options/set", form={
@@ -219,15 +219,25 @@ def verify_propagation(primary, secondary):
 
     wait_for(primary_received_addresses, "the Primary to receive the Secondary's new address")
     assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == web_port
-    primary.stop()
-    promoted = ok(secondary.call("admin/cluster/secondary/promote?forceDeletePrimary=true"))
+    if graceful:
+        current = ok(primary.call("admin/cluster/state"))
+        successor, = (node for node in current["clusterNodes"] if node["type"] == "Secondary")
+        rejected = primary.call(f"admin/cluster/primary/delete?forceDelete=true&successorNodeId={successor['id']}&handoffRevision=invalid")
+        assert rejected["status"] == "error" and "Cluster API token" in rejected["errorMessage"], rejected
+        assert ok(primary.call("admin/cluster/state"))["clusterInitialized"] is True
+        promoted = ok(secondary.call("admin/cluster/secondary/promote"))
+        assert ok(primary.call("admin/cluster/state"))["clusterInitialized"] is False
+    else:
+        primary.stop()
+        promoted = ok(secondary.call("admin/cluster/secondary/promote?forceDeletePrimary=true"))
     assert_promoted_policy(promoted)
     secondary.stop()
     secondary.start()
     assert_promoted_policy(ok(secondary.call("admin/cluster/state")))
     rejected = secondary.call("admin/cluster/primary/setOptions?configRefreshIntervalSeconds=180")
     assert rejected["status"] == "error" and "/cluster/configRefreshSeconds" in rejected["errorMessage"], rejected
-    print("Forced failover check passed. The promoted Primary retained interval and address ownership after restart.")
+    mode = "Graceful handoff" if graceful else "Forced failover"
+    print(f"{mode} check passed. The promoted Primary retained interval and address ownership after restart.")
 
 
 def assert_promoted_policy(state):
@@ -246,14 +256,17 @@ def main():
     parser.add_argument("current", type=Path, help="current published DnsServerApp.dll")
     parser.add_argument("previous", type=Path, nargs="?", help="published DnsServerApp.dll from a revision without the capability")
     parser.add_argument("--propagation", action="store_true", help="run the current build on both nodes and verify interval propagation")
+    parser.add_argument("--graceful", action="store_true", help="verify graceful promotion instead of forced failover")
     args = parser.parse_args()
+    if args.graceful and not args.propagation:
+        parser.error("--graceful requires --propagation")
     if args.propagation == (args.previous is not None):
         parser.error("supply a previous build or --propagation")
     folder = Path(tempfile.mkdtemp(prefix="technitium-mixed-cluster-"))
     print(f"Fixture logs: {folder}", flush=True)
     current = args.current.resolve(strict=True)
     previous = current if args.propagation else args.previous.resolve(strict=True)
-    verify(current, previous, folder, args.propagation)
+    verify(current, previous, folder, args.propagation, args.graceful)
 
 
 if __name__ == "__main__":
