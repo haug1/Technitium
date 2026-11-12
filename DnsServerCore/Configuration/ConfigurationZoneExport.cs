@@ -70,8 +70,14 @@ namespace DnsServerCore.Configuration
                         declaration.Remove("transfer");
                         declaration.Remove("notify");
                     }
-                    if (zone.Type == AuthZoneType.Stub)
+                    if (zone.Type is AuthZoneType.Stub or AuthZoneType.SecondaryCatalog)
                         declaration.Remove("updates");
+                    if (zone.Type == AuthZoneType.SecondaryCatalog)
+                    {
+                        declaration.Remove("query");
+                        declaration.Remove("transfer");
+                        declaration.Remove("notify");
+                    }
                 }
                 else if (zone.UpdateSecurityPolicies?.Keys.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                     missingInputs.Add(path + "/updates/securityPolicies");

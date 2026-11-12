@@ -4406,6 +4406,61 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task SecondaryCatalogManifestProvisionsMembersAndExportsItsSource()
+        {
+            await using var primary = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await primary.CallAsync("zones/create?zone=catalog.test&type=Catalog", primary.AdminToken));
+            LoopbackWebService.AssertOk(await primary.CallAsync("zones/options/set?zone=catalog.test&zoneTransfer=Allow", primary.AdminToken));
+            LoopbackWebService.AssertOk(await primary.CallAsync("zones/create?zone=member.test&type=Primary&catalog=catalog.test", primary.AdminToken));
+
+            await using var replica = await LoopbackWebService.StartAsync();
+            string address = $"127.0.0.1:{primary.DnsPort}";
+            string manifest = $$$$$"""
+                {"schemaVersion":1,"zones":{"catalog.test":{"type":"SecondaryCatalog",
+                  "primary":{"servers":[{"address":"{{{{{address}}}}}"}],"transferProtocol":"Tcp"}
+                }}}
+                """;
+            string revision = (await PreviewAsync(replica, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(replica, manifest, revision));
+
+            DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+            JsonElement member;
+            do
+            {
+                member = await replica.CallAsync("zones/options/get?zone=member.test", replica.AdminToken);
+                if (member.GetProperty("status").ValueEquals("ok"))
+                    break;
+                await Task.Delay(250);
+            }
+            while (DateTime.UtcNow < deadline);
+            LoopbackWebService.AssertOk(member);
+            Assert.Empty((await PreviewAsync(replica, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement export = await replica.CallAsync("settings/config/export", replica.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zones = export.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            JsonElement catalog = zones.GetProperty("catalog.test");
+            Assert.Equal("SecondaryCatalog", catalog.GetProperty("type").GetString());
+            Assert.Equal(address, Assert.Single(catalog.GetProperty("primary").GetProperty("servers").EnumerateArray()).GetProperty("address").GetString());
+            Assert.False(catalog.TryGetProperty("records", out _));
+            Assert.False(zones.TryGetProperty("member.test", out _));
+
+            using var remove = new StringContent("""{"schemaVersion":1,"zones":{"catalog.test":null}}""", Encoding.UTF8, "application/json");
+            JsonElement rejected = await replica.CallAsync("settings/config/plan", replica.AdminToken, remove);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("have no members", rejected.GetProperty("errorMessage").GetString());
+
+            string updated = manifest.Replace(address, LoopbackDnsServer.GetLoopbackEndPoint().ToString(), StringComparison.Ordinal);
+            JsonElement plan = await PreviewAsync(replica, updated);
+            Assert.Contains(plan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/catalog.test/primary/servers"));
+            LoopbackWebService.AssertOk(await ApplyAsync(replica, updated, plan.GetProperty("revision").GetString()!));
+            await replica.RestartAsync();
+            LoopbackWebService.AssertOk(await replica.CallAsync("zones/options/get?zone=member.test", replica.AdminToken));
+            Assert.Empty((await PreviewAsync(replica, updated)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task StubAndSecondaryForwarderExportsPreserveTheirUpstreamSettings()
         {
             await using var upstream = new LoopbackDnsServer();

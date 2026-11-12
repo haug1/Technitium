@@ -861,6 +861,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         if (zone is not null)
                         {
+                            CheckManifestZoneRemoval(zone, path);
                             changed.Add((name, zone, true, null, default, default, zone.Type, default));
                             membership.Add(name, false);
                         }
@@ -964,6 +965,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                                 AuthZoneType.Secondary => SecondaryZone.CreateUnrefreshed(_dnsServer, name),
                                 AuthZoneType.SecondaryForwarder => new SecondaryForwarderZone(_dnsServer, name, primary.Servers,
                                     primary.Protocol ?? DnsTransportProtocol.Tcp, primary.TsigKey),
+                                AuthZoneType.SecondaryCatalog => new SecondaryCatalogZone(_dnsServer, name, primary.Servers,
+                                    primary.Protocol ?? DnsTransportProtocol.Tcp, primary.TsigKey),
                                 AuthZoneType.Stub => StubZone.CreateUnrefreshed(_dnsServer, name),
                                 _ => new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme, initializeExpiryTimer: false)
                             };
@@ -1013,12 +1016,14 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     lock (_saveLock)
                     {
-                        foreach (var (name, current, _, _, _, _, _, _) in changed)
+                        foreach (var (name, current, remove, _, _, _, _, _) in changed)
                         {
                             AuthZoneInfo live = GetAuthZoneInfo(name);
                             if (!ReferenceEquals(live?.ApexZone, current?.ApexZone) || live?.CatalogZoneName is not null ||
                                 (recordRevisions.TryGetValue(name, out DateTime revision) && live?.LastModified != revision))
                                 throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}: The zone changed during apply.");
+                            if (remove)
+                                CheckManifestZoneRemoval(current, GetManifestZonePath(name));
                         }
 
                         try
@@ -1066,6 +1071,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                                 if (!_root.TryAdd(zone))
                                     throw new InvalidOperationException("The zone already exists.");
                                 _zoneIndex.Add(new AuthZoneInfo(zone));
+                                if (zone is SecondaryCatalogZone catalog)
+                                {
+                                    catalog.ZoneAdded += SecondaryCatalogZoneAdded;
+                                    catalog.ZoneRemoved += SecondaryCatalogZoneRemoved;
+                                }
                             }
 
                             if (stagedRecords.TryGetValue(name, out var stage))
@@ -1128,6 +1138,13 @@ namespace DnsServerCore.Dns.ZoneManagers
                     _zoneIndexLock.ExitWriteLock();
                 }
             }
+        }
+
+        internal static void CheckManifestZoneRemoval(AuthZoneInfo zone, string path)
+        {
+            if (zone.ApexZone is SecondaryCatalogZone catalog &&
+                (!zone.Disabled || catalog.GetAllMemberZoneNames().Count != 0))
+                throw new InvalidDataException($"{path}: A secondary catalog must be disabled and have no members before manifest removal.");
         }
 
         private static string[] GetOwnedZoneFields(string name, string path, JsonElement declaration)

@@ -1240,7 +1240,7 @@ namespace DnsServerCore.Configuration
                             continue;
                         }
                         if (field.Name is "enabled" or "records" or "permissions" or "primary" ||
-                            (field.Name == "type" && field.Value.GetString() is "Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "Stub"))
+                            (field.Name == "type" && field.Value.GetString() is "Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "SecondaryCatalog" or "Stub"))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
                     }
@@ -1433,7 +1433,7 @@ namespace DnsServerCore.Configuration
                 {
                     if (type is null)
                         throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
-                    if (type is not ("Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "Stub"))
+                    if (type is not ("Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "SecondaryCatalog" or "Stub"))
                         throw new InvalidDataException($"{path}/type: This zone type is not yet supported by manifest apply.");
                     ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
                     changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Add, false));

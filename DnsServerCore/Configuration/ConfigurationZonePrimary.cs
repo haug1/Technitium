@@ -13,7 +13,7 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationZonePrimary
     {
         internal static bool IsReplicated(AuthZoneType type) =>
-            type is AuthZoneType.Secondary or AuthZoneType.SecondaryForwarder or AuthZoneType.Stub;
+            type is AuthZoneType.Secondary or AuthZoneType.SecondaryForwarder or AuthZoneType.SecondaryCatalog or AuthZoneType.Stub;
 
         internal readonly record struct Changes(NameServerAddress[] Servers, DnsTransportProtocol? Protocol, string TsigKey, bool? Validate)
         {
@@ -51,6 +51,14 @@ namespace DnsServerCore.Configuration
 
             if (declaration.TryGetProperty("records", out _))
                 throw new InvalidDataException($"{path}/records: This zone obtains its records from its primary servers.");
+            if (type == AuthZoneType.SecondaryCatalog)
+            {
+                foreach (JsonProperty field in declaration.EnumerateObject())
+                {
+                    if (ConfigurationZonePolicies.IsPolicy(field.Name))
+                        throw new InvalidDataException($"{path}/{field.Name}: Secondary catalog policies are inherited from the catalog.");
+                }
+            }
             if (type is AuthZoneType.Stub or AuthZoneType.SecondaryForwarder &&
                 (declaration.TryGetProperty("transfer", out _) || declaration.TryGetProperty("notify", out _)))
                 throw new InvalidDataException($"{path}: This zone type does not support transfer or notify policies.");
@@ -65,8 +73,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{path}/updates/securityPolicies: Secondary zones inherit update authorization from the primary.");
             if (!declared)
             {
-                if (type == AuthZoneType.SecondaryForwarder && current is null)
-                    throw new InvalidDataException($"{path}/primary/servers: A secondary forwarder requires at least one primary server.");
+                if (type is AuthZoneType.SecondaryForwarder or AuthZoneType.SecondaryCatalog && current is null)
+                    throw new InvalidDataException($"{path}/primary/servers: This zone type requires at least one primary server.");
                 return default;
             }
 
@@ -106,8 +114,9 @@ namespace DnsServerCore.Configuration
             {
                 servers = previousServers.Select(server => ParseAddress(server.ToString(), protocol, path + "/primary/servers")).ToArray();
             }
-            if (type == AuthZoneType.SecondaryForwarder && (servers ?? current?.PrimaryNameServerAddresses) is not { Count: > 0 })
-                throw new InvalidDataException($"{path}/primary/servers: A secondary forwarder requires at least one primary server.");
+            if (type is AuthZoneType.SecondaryForwarder or AuthZoneType.SecondaryCatalog &&
+                (servers ?? current?.PrimaryNameServerAddresses) is not { Count: > 0 })
+                throw new InvalidDataException($"{path}/primary/servers: This zone type requires at least one primary server.");
             if (servers is not null && protocol == previousProtocol && SameServers(servers, current?.PrimaryNameServerAddresses))
                 servers = null;
 
