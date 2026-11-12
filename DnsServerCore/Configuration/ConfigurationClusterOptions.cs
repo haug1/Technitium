@@ -171,8 +171,12 @@ namespace DnsServerCore.Configuration
             IReadOnlyList<IPAddress> currentAddresses = self.IPAddresses;
             string[] intervals = GetDeclaredIntervals(section);
             IReadOnlyList<string> currentOwnership = cluster.ManagedOptionNames;
-            if ((intervals.Length != 0 || currentOwnership.Any(IsInterval)) && self.Type != ClusterNodeType.Primary)
-                throw new InvalidDataException($"{Path}: Only an initialized Primary node can apply cluster options.");
+            if (self.Type == ClusterNodeType.Secondary)
+            {
+                if (intervals.Length != 0)
+                    throw new InvalidDataException($"{Path}: Only an initialized Primary node can apply cluster options.");
+                intervals = currentOwnership.Where(IsInterval).ToArray();
+            }
 
             string[] ownership = addresses is not null ? [.. intervals, AddressName] : intervals;
             Settings current = cluster.GetManifestOptions();

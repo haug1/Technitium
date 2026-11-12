@@ -219,7 +219,26 @@ def verify_propagation(primary, secondary):
 
     wait_for(primary_received_addresses, "the Primary to receive the Secondary's new address")
     assert ok(secondary.call("settings/get"))["webServiceHttpPort"] == web_port
-    print("Propagation check passed. The Secondary received the intervals and its address publication succeeded after the Primary restarted.")
+    primary.stop()
+    promoted = ok(secondary.call("admin/cluster/secondary/promote?forceDeletePrimary=true"))
+    assert_promoted_policy(promoted)
+    secondary.stop()
+    secondary.start()
+    assert_promoted_policy(ok(secondary.call("admin/cluster/state")))
+    rejected = secondary.call("admin/cluster/primary/setOptions?configRefreshIntervalSeconds=180")
+    assert rejected["status"] == "error" and "/cluster/configRefreshSeconds" in rejected["errorMessage"], rejected
+    print("Forced failover check passed. The promoted Primary retained interval and address ownership after restart.")
+
+
+def assert_promoted_policy(state):
+    assert state["configRefreshIntervalSeconds"] == 120, state
+    assert state["configRetryIntervalSeconds"] == 30, state
+    assert set(state["managedOptionPaths"]) == {
+        "/cluster/configRefreshSeconds", "/cluster/configRetrySeconds", "/cluster/node/addresses",
+    }, state
+    node, = state["clusterNodes"]
+    assert node["type"] == "Primary" and node["state"] == "Self", state
+    assert "127.0.0.2" in node["ipAddresses"], state
 
 
 def main():

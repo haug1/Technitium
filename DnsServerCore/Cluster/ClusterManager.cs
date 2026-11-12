@@ -1270,7 +1270,7 @@ namespace DnsServerCore.Cluster
 
             if (change.ValuesChanged)
                 UpdateHeartbeatTimerForAllClusterNodes();
-            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged))
+            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged || change.OwnershipChanged))
                 TriggerNotifyAllSecondaryNodes();
             else if (change.AddressesChanged)
                 TriggerClusterUpdateForSecondaryNodeChanges();
@@ -1778,9 +1778,12 @@ namespace DnsServerCore.Cluster
                     //sync entire config from primary node first to get TSIG keys for secondary catalog zone transfer
                     _configLastSynced = DateTime.UnixEpoch; //reset last sync time to ensure full sync
                     bool manifestJoin = expectedDomain is not null;
-                    await SyncConfigFromAsync(primaryNodeApiClient, cancellationToken: cancellationToken, persistMembership: !manifestJoin);
+                    string[] localOwnership = manifestJoin ? [ConfigurationClusterOptions.AddressName] : [];
+                    string[] ownership = MergePrimaryIntervalOwnership(primaryNodeClusterInfo, localOwnership);
+                    bool journalJoin = ownership.Length != 0;
+                    await SyncConfigFromAsync(primaryNodeApiClient, cancellationToken: cancellationToken, persistMembership: !journalJoin);
 
-                    if (manifestJoin)
+                    if (journalJoin)
                     {
                         var zones = _dnsWebService.DnsServer.AuthZoneManager;
                         ConfigurationJournal.Persist(_dnsWebService.ConfigFolder, () =>
@@ -1788,7 +1791,7 @@ namespace DnsServerCore.Cluster
                             try
                             {
                                 FinishJoin();
-                                WriteManifestOwnership([ConfigurationClusterOptions.AddressName]);
+                                WriteManifestOwnership(ownership);
                             }
                             finally
                             {
@@ -1796,7 +1799,7 @@ namespace DnsServerCore.Cluster
                             }
                         }, "dns.config", "auth.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile,
                             Path.Combine("zones", clusterCatalogDomain + ".zone"));
-                        _managedOptionNames = [ConfigurationClusterOptions.AddressName];
+                        _managedOptionNames = ownership;
                     }
                     else
                     {
@@ -1816,11 +1819,11 @@ namespace DnsServerCore.Cluster
                         auth.SetPermission(PermissionSection.Zones, catalog.Name, auth.GetGroup(Group.DNS_ADMINISTRATORS), PermissionFlag.View);
                         _dnsWebService.DnsServer.ServerDomain = selfSecondaryNode.Name;
 
-                        if (manifestJoin)
+                        if (journalJoin)
                             zones.FlushZoneSaves(clusterCatalogDomain);
-                        _dnsWebService.DnsServer.SaveConfigFile(manifestJoin);
-                        auth.SaveConfigFile(manifestJoin);
-                        SaveConfigFile(manifestJoin);
+                        _dnsWebService.DnsServer.SaveConfigFile(journalJoin);
+                        auth.SaveConfigFile(journalJoin);
+                        SaveConfigFile(journalJoin);
                     }
                 }
                 catch
@@ -1880,7 +1883,8 @@ namespace DnsServerCore.Cluster
             if (secondaryNode.Type != ClusterNodeType.Secondary)
                 throw new DnsServerException("Failed to leave Cluster: only Secondary nodes can leave the Cluster.");
 
-            CheckManifestTopologyChange();
+            if (_managedOptionNames.Contains(ConfigurationClusterOptions.AddressName))
+                throw new DnsServerException("/cluster/node/addresses: Release manifest ownership before leaving the cluster.");
 
             if (!forceLeave)
             {
@@ -2072,7 +2076,7 @@ namespace DnsServerCore.Cluster
                     throw new InvalidOperationException();
 
                 //update cluster options
-                UpdateClusterFromPrimaryNode(await primaryNode.GetClusterStateAsync());
+                UpdateClusterFromPrimaryNode(await primaryNode.GetClusterStateAsync(), rescheduleRefresh: false);
 
                 //sync config from primary node
                 await primaryNode.SyncConfigAsync(_configRefreshIncludeZones);
@@ -2229,7 +2233,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        public void UpdateClusterFromPrimaryNode(ClusterInfo primaryNodeClusterInfo)
+        public void UpdateClusterFromPrimaryNode(ClusterInfo primaryNodeClusterInfo, bool rescheduleRefresh = true)
         {
             IReadOnlyDictionary<int, ClusterNode> existingClusterNodes = _clusterNodes;
 
@@ -2333,35 +2337,55 @@ namespace DnsServerCore.Cluster
                 saveConfig = true;
             }
 
-            if (primaryNodeClusterInfo.HeartbeatRefreshIntervalSeconds != _heartbeatRefreshIntervalSeconds)
+            var desired = new ConfigurationClusterOptions.Settings(primaryNodeClusterInfo.HeartbeatRefreshIntervalSeconds,
+                primaryNodeClusterInfo.HeartbeatRetryIntervalSeconds, primaryNodeClusterInfo.ConfigRefreshIntervalSeconds,
+                primaryNodeClusterInfo.ConfigRetryIntervalSeconds);
+            ConfigurationClusterOptions.Settings current;
+            lock (_saveLock)
             {
-                _heartbeatRefreshIntervalSeconds = primaryNodeClusterInfo.HeartbeatRefreshIntervalSeconds;
-                UpdateHeartbeatTimerForAllClusterNodes(); //apply new interval to all cluster nodes immediately
-                saveConfig = true;
+                if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Secondary)
+                    return;
+
+                current = GetManifestOptions();
+                string[] ownership = MergePrimaryIntervalOwnership(primaryNodeClusterInfo, _managedOptionNames);
+                if (!_managedOptionNames.SequenceEqual(ownership))
+                {
+                    ConfigurationJournal.Persist(_dnsWebService.ConfigFolder, () =>
+                    {
+                        SaveConfigFileInternal(desired);
+                        WriteManifestOwnership(ownership);
+                    }, "cluster.config", ConfigurationClusterOptions.OwnershipFile);
+                    _managedOptionNames = ownership;
+                    _pendingSave = false;
+                    saveConfig = false;
+                }
+                else if (desired != current)
+                {
+                    saveConfig = true;
+                }
+
+                SetManifestOptions(desired);
+                if (saveConfig)
+                    SaveConfigFile();
             }
 
-            if (primaryNodeClusterInfo.HeartbeatRetryIntervalSeconds != _heartbeatRetryIntervalSeconds)
-            {
-                _heartbeatRetryIntervalSeconds = primaryNodeClusterInfo.HeartbeatRetryIntervalSeconds;
-                saveConfig = true;
-            }
+            if (current.HeartbeatRefresh != desired.HeartbeatRefresh)
+                UpdateHeartbeatTimerForAllClusterNodes();
+            if (rescheduleRefresh && current.ConfigRefresh != desired.ConfigRefresh)
+                UpdateConfigRefreshTimer(desired.ConfigRefresh * 1000);
+        }
 
-            if (primaryNodeClusterInfo.ConfigRefreshIntervalSeconds != _configRefreshIntervalSeconds)
-            {
-                _configRefreshIntervalSeconds = primaryNodeClusterInfo.ConfigRefreshIntervalSeconds;
-                UpdateConfigRefreshTimer(_configRefreshIntervalSeconds * 1000); //apply new interval to config refresh timer immediately
-                saveConfig = true;
-            }
+        private static string[] MergePrimaryIntervalOwnership(ClusterInfo primary, string[] local)
+        {
+            if (primary.ManagedOptionPaths is null)
+                return local;
 
-            if (primaryNodeClusterInfo.ConfigRetryIntervalSeconds != _configRetryIntervalSeconds)
-            {
-                _configRetryIntervalSeconds = primaryNodeClusterInfo.ConfigRetryIntervalSeconds;
-                saveConfig = true;
-            }
-
-            //save changes
-            if (saveConfig)
-                SaveConfigFile();
+            const string prefix = "/cluster/";
+            IEnumerable<string> intervals = primary.ManagedOptionPaths
+                .Where(path => path.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(path => path[prefix.Length..]).Where(ConfigurationClusterOptions.IsInterval)
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+            return [.. intervals, .. local.Where(name => !ConfigurationClusterOptions.IsInterval(name))];
         }
 
         public async Task PromoteToPrimaryNodeAsync(bool forceDeletePrimary)

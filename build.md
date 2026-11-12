@@ -45,7 +45,7 @@ python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll /
 
 The fixture starts a current Primary and an older Secondary on loopback ports with disposable configuration directories. It verifies that the older node can join, preview and apply reject an interval change before assigning ownership, and the previous value survives a Primary restart. The command prints the temporary directory for inspecting server logs.
 
-To verify propagation, use the same build for both nodes. This mode configures the Secondary Catalog to transfer over the fixture's loopback DNS port and waits for the signed cluster zone before changing settings. It checks that the Secondary receives the new intervals and retains its local web port. It also stops the Primary, waits for an address publication to fail, and verifies that retry delivers the address after the Primary restarts.
+To verify propagation, use the same build for both nodes. This mode configures the Secondary Catalog to transfer over the fixture's loopback DNS port and waits for the signed cluster zone before changing settings. It checks that the Secondary receives the new intervals and retains its local web port. It also stops the Primary, waits for an address publication to fail, and verifies that retry delivers the address after the Primary restarts. The fixture then forces promotion and verifies that interval and local address ownership survive a restart of the new Primary.
 
 ```sh
 python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll --propagation
