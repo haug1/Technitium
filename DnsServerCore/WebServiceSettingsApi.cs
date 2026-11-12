@@ -666,7 +666,11 @@ namespace DnsServerCore
                     zoneTransferAllowedNetworks, notifyAllowedNetworks);
                 _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
                 bool hasUpdateChecks = request.TryGetQueryOrForm("dnsServerEnableCheckForUpdate", bool.Parse, out bool dnsServerEnableCheckForUpdate);
-                _dnsWebService._dnsServer.CheckManifestUpdateChecks(hasUpdateChecks ? dnsServerEnableCheckForUpdate : null);
+                bool hasUdpPayload = request.TryGetQueryOrForm("udpPayloadSize", ushort.Parse, out ushort udpPayloadSize);
+                bool hasDnssecValidation = request.TryGetQueryOrForm("dnssecValidation", bool.Parse, out bool dnssecValidation);
+                _dnsWebService._dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(
+                    hasUpdateChecks ? dnsServerEnableCheckForUpdate : null, hasUdpPayload ? udpPayloadSize : null,
+                    hasDnssecValidation ? dnssecValidation : null));
 
                 try
                 {
@@ -749,14 +753,14 @@ namespace DnsServerCore
                         if (request.TryQueryOrFormArray("socketPoolExcludedPorts", ushort.Parse, out ushort[] socketPoolExcludedPorts))
                             UdpClientConnection.SocketPoolExcludedPorts = socketPoolExcludedPorts;
 
-                        if (request.TryGetQueryOrForm("udpPayloadSize", ushort.Parse, out ushort udpPayloadSize))
+                        if (hasUdpPayload)
                         {
                             _dnsWebService._dnsServer.UdpPayloadSize = udpPayloadSize;
 
                             clusterParameters.Add("udpPayloadSize", udpPayloadSize.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("dnssecValidation", bool.Parse, out bool dnssecValidation))
+                        if (hasDnssecValidation)
                         {
                             _dnsWebService._dnsServer.DnssecValidation = dnssecValidation;
 

@@ -140,7 +140,14 @@ namespace DnsServerCore.Dns
             NotifyNetworks = 512,
             Ipv4SourceNetworks = 1024,
             Ipv6SourceNetworks = 2048,
-            CheckForUpdates = 4096
+            CheckForUpdates = 4096,
+            UdpPayloadSize = 8192,
+            DnssecValidation = 16384
+        }
+
+        internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
+        {
+            internal bool HasValues => CheckForUpdates.HasValue || UdpPayloadSize.HasValue || DnssecValidation.HasValue;
         }
 
         internal readonly record struct SourceNetworks(IReadOnlyList<NetworkAddress> Ipv4, IReadOnlyList<NetworkAddress> Ipv6);
@@ -714,10 +721,15 @@ namespace DnsServerCore.Dns
             (ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh | ManagedDnsSettings.MinRetry)) != 0;
         private const ManagedDnsSettings SourceOwnership = ManagedDnsSettings.Ipv4SourceNetworks | ManagedDnsSettings.Ipv6SourceNetworks;
         internal bool HasManagedSourceNetworks => (_managedDnsSettings & SourceOwnership) != 0;
+        private const ManagedDnsSettings ResolverOwnership = ManagedDnsSettings.CheckForUpdates |
+            ManagedDnsSettings.UdpPayloadSize | ManagedDnsSettings.DnssecValidation;
+        internal bool ManifestOwnsUdpPayloadSize => _managedDnsSettings.HasFlag(ManagedDnsSettings.UdpPayloadSize);
+        internal bool ManifestOwnsDnssecValidation => _managedDnsSettings.HasFlag(ManagedDnsSettings.DnssecValidation);
+        internal bool HasManagedResolverProtocol => ManifestOwnsUdpPayloadSize || ManifestOwnsDnssecValidation;
         internal bool ManifestOwnsUpdateChecks => _managedDnsSettings.HasFlag(ManagedDnsSettings.CheckForUpdates);
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | SourceOwnership | ManagedDnsSettings.CheckForUpdates)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || ManifestOwnsUpdateChecks;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | SourceOwnership | ResolverOwnership)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -729,6 +741,10 @@ namespace DnsServerCore.Dns
                 yield return "/dns/sourceNetworks/ipv6";
             if (ManifestOwnsUpdateChecks)
                 yield return "/dns/checkForUpdates";
+            if (ManifestOwnsUdpPayloadSize)
+                yield return "/dns/udpPayloadSize";
+            if (ManifestOwnsDnssecValidation)
+                yield return "/dns/dnssecValidation";
             if (ManifestOwnsDefaultRecordTtl)
                 yield return "/dns/authoritative/defaultRecordTtl";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl))
@@ -883,10 +899,32 @@ namespace DnsServerCore.Dns
                 DnsClientConnection.IPv6SourceAddresses = ipv6;
         }
 
-        internal void CheckManifestUpdateChecks(bool? value)
+        internal void CheckManifestResolverSettings(ResolverSettings settings)
         {
-            if (ManifestOwnsUpdateChecks && value.HasValue && value.Value != _enableCheckForUpdate)
+            if (ManifestOwnsUpdateChecks && settings.CheckForUpdates.HasValue && settings.CheckForUpdates != _enableCheckForUpdate)
                 throw new DnsWebServiceException("/dns/checkForUpdates: Setting is managed by the configuration manifest.");
+            if (ManifestOwnsUdpPayloadSize && settings.UdpPayloadSize.HasValue && settings.UdpPayloadSize != _udpPayloadSize)
+                throw new DnsWebServiceException("/dns/udpPayloadSize: Setting is managed by the configuration manifest.");
+            if (ManifestOwnsDnssecValidation && settings.DnssecValidation.HasValue && settings.DnssecValidation != _dnssecValidation)
+                throw new DnsWebServiceException("/dns/dnssecValidation: Setting is managed by the configuration manifest.");
+        }
+
+        private void SetResolverSettings(ResolverSettings settings)
+        {
+            if (settings.CheckForUpdates.HasValue)
+                EnableCheckForUpdate = settings.CheckForUpdates.Value;
+            if (settings.UdpPayloadSize.HasValue && settings.UdpPayloadSize != _udpPayloadSize)
+                UdpPayloadSize = settings.UdpPayloadSize.Value;
+            if (settings.DnssecValidation.HasValue)
+                DnssecValidation = settings.DnssecValidation.Value;
+        }
+
+        internal static ushort[] ReadSocketPoolExcludedPorts(BinaryReader reader)
+        {
+            var ports = new ushort[reader.ReadUInt16()];
+            for (int i = 0; i < ports.Length; i++)
+                ports[i] = reader.ReadUInt16();
+            return ports;
         }
 
         private static bool ReadUpdateChecks(BinaryReader reader, int version)
@@ -910,19 +948,33 @@ namespace DnsServerCore.Dns
                     return;
 
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
-                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks)
+                if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
                 {
                     string responsiblePerson = reader.BaseStream.ReadShortString();
                     defaults = defaults with { ResponsiblePerson = NormalizeDefaultResponsiblePerson(responsiblePerson) };
-                    if (HasManagedSoaTiming || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks)
+                    if (HasManagedSoaTiming || HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
                         defaults = ReadSoaTiming(reader, defaults);
-                    if (HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks)
+                    if (HasManagedAuthoritativeNetworks || ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
                         defaults = ReadAuthoritativeNetworks(reader, defaults);
                 }
 
                 CheckManifestAuthoritativeDefaults(defaults);
-                if (ManifestOwnsUpdateChecks)
-                    CheckManifestUpdateChecks(ReadUpdateChecks(reader, version));
+                if (ManifestOwnsUpdateChecks || HasManagedResolverProtocol)
+                {
+                    bool updateChecks = ReadUpdateChecks(reader, version);
+                    ushort? payloadSize = null;
+                    bool? dnssec = null;
+                    if (HasManagedResolverProtocol)
+                    {
+                        reader.ReadBoolean(); // DNS app automatic updates
+                        reader.ReadByte(); // IPv6 mode or preference
+                        reader.ReadBoolean(); // UDP socket pool enabled
+                        ReadSocketPoolExcludedPorts(reader);
+                        payloadSize = reader.ReadUInt16();
+                        dnssec = reader.ReadBoolean();
+                    }
+                    CheckManifestResolverSettings(new ResolverSettings(updateChecks, payloadSize, dnssec));
+                }
             }
         }
 
@@ -990,11 +1042,7 @@ namespace DnsServerCore.Dns
                 if (!isConfigTransfer)
                     _enableUdpSocketPool = enableUdpSocketPool;
 
-                int count = bR.ReadUInt16();
-                ushort[] socketPoolExcludedPorts = new ushort[count];
-
-                for (int i = 0; i < count; i++)
-                    socketPoolExcludedPorts[i] = bR.ReadUInt16();
+                ushort[] socketPoolExcludedPorts = ReadSocketPoolExcludedPorts(bR);
 
                 if (!isConfigTransfer)
                     UdpClientConnection.SocketPoolExcludedPorts = socketPoolExcludedPorts;
@@ -7232,7 +7280,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, bool? checkForUpdates, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7273,11 +7321,17 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.Ipv4SourceNetworks;
                     if (sourceNetworks.Ipv6 is not null)
                         ownership |= ManagedDnsSettings.Ipv6SourceNetworks;
-                    if (checkForUpdates.HasValue)
+                    if (resolverSettings.CheckForUpdates.HasValue)
                         ownership |= ManagedDnsSettings.CheckForUpdates;
+                    if (resolverSettings.UdpPayloadSize.HasValue)
+                        ownership |= ManagedDnsSettings.UdpPayloadSize;
+                    if (resolverSettings.DnssecValidation.HasValue)
+                        ownership |= ManagedDnsSettings.DnssecValidation;
 
-                    bool previousUpdateChecks = _enableCheckForUpdate;
-                    bool effectiveUpdateChecks = checkForUpdates ?? previousUpdateChecks;
+                    var previousResolverSettings = new ResolverSettings(_enableCheckForUpdate, _udpPayloadSize, _dnssecValidation);
+                    var effectiveResolverSettings = new ResolverSettings(resolverSettings.CheckForUpdates ?? previousResolverSettings.CheckForUpdates,
+                        resolverSettings.UdpPayloadSize ?? previousResolverSettings.UdpPayloadSize,
+                        resolverSettings.DnssecValidation ?? previousResolverSettings.DnssecValidation);
 
                     SourceNetworks previousSourceNetworks = GetSourceNetworks();
                     var effectiveSourceNetworks = new SourceNetworks(
@@ -7293,7 +7347,7 @@ namespace DnsServerCore.Dns
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
                     if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
-                        (effectiveSourceNetworks == previousSourceNetworks) && (effectiveUpdateChecks == previousUpdateChecks))
+                        (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
                         return;
@@ -7303,7 +7357,7 @@ namespace DnsServerCore.Dns
                     _managedDnsSettings = ownership;
                     try
                     {
-                        _enableCheckForUpdate = effectiveUpdateChecks;
+                        SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
                         persist(SaveConfigFileInternal);
@@ -7313,7 +7367,7 @@ namespace DnsServerCore.Dns
                     {
                         _localEndPoints = previous;
                         _managedDnsSettings = previousOwnership;
-                        _enableCheckForUpdate = previousUpdateChecks;
+                        SetResolverSettings(previousResolverSettings);
                         SetAuthoritativeDefaults(previousDefaults);
                         SetSourceNetworks(previousSourceNetworks);
                         throw;

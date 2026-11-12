@@ -50,8 +50,8 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/zoneTransferAllowedNetworks"] = Field("zoneTransferAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/authoritative/notifyAllowedNetworks"] = Field("notifyAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true, canApply: true),
-            ["/dns/dnssecValidation"] = Field("dnssecValidation", true),
-            ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232),
+            ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
+            ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232, canApply: true),
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true),
@@ -127,7 +127,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetUpdateChecks(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
@@ -184,12 +184,21 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        private static bool? GetUpdateChecks(ConfigurationManifest manifest)
+        private static DnsServer.ResolverSettings GetResolverSettings(ConfigurationManifest manifest)
         {
-            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("checkForUpdates", out JsonElement value))
-                return null;
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns))
+                return default;
 
-            return (value.ValueKind == JsonValueKind.Null ? _settings["/dns/checkForUpdates"].Default : value).GetBoolean();
+            JsonElement? payload = ReadValue("udpPayloadSize");
+            return new DnsServer.ResolverSettings(ReadValue("checkForUpdates")?.GetBoolean(),
+                payload.HasValue ? decimal.ToUInt16(payload.Value.GetDecimal()) : null, ReadValue("dnssecValidation")?.GetBoolean());
+
+            JsonElement? ReadValue(string name)
+            {
+                if (!dns.TryGetProperty(name, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/" + name].Default : value;
+            }
         }
 
         internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)
@@ -198,8 +207,8 @@ namespace DnsServerCore.Configuration
                 return;
             if (GetAuthoritativeDefaults(manifest).HasValues)
                 throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
-            if (GetUpdateChecks(manifest).HasValue)
-                throw new InvalidDataException("/dns/checkForUpdates: Applying update checks to a cluster is not implemented.");
+            if (GetResolverSettings(manifest).HasValues)
+                throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }
 
         internal static void CheckApplySupport(ConfigurationManifest manifest)

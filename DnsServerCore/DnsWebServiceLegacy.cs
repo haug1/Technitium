@@ -222,21 +222,21 @@ namespace DnsServerCore
                     ReadLegacyWebConfiguration(reader, version);
                     stream.ReadShortString(); // server domain
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks)
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks || _dnsServer.HasManagedResolverProtocol)
                     {
                         var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(reader, version);
                         if (_dnsServer.HasManagedSourceNetworks && !isConfigTransfer)
                             _dnsServer.CheckManifestSourceNetworks(new DnsServer.SourceNetworks(ipv4 ?? [], ipv6 ?? []));
                         var defaults = new DnsServer.AuthoritativeDefaults(recordTtl, null, null);
-                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks)
+                        if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedResolverProtocol)
                         {
                             string responsiblePerson = version >= 36 ? reader.BaseStream.ReadShortString() : "";
-                            if (_dnsServer.HasManagedSoaTiming || _dnsServer.HasManagedAuthoritativeNetworks)
+                            if (_dnsServer.HasManagedSoaTiming || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedResolverProtocol)
                                 defaults = ReadLegacySoaTiming(reader, version) with { Record = recordTtl };
                             if (_dnsServer.ManifestOwnsResponsiblePerson)
                                 defaults = defaults with { ResponsiblePerson = DnsServer.NormalizeDefaultResponsiblePerson(responsiblePerson) };
                         }
-                        if (_dnsServer.HasManagedAuthoritativeNetworks)
+                        if (_dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedResolverProtocol)
                         {
                             defaults = defaults with
                             {
@@ -245,6 +245,17 @@ namespace DnsServerCore
                             };
                         }
                         _dnsServer.CheckManifestAuthoritativeDefaults(defaults);
+                        if (_dnsServer.HasManagedResolverProtocol)
+                        {
+                            reader.ReadBoolean(); // DNS app automatic updates
+                            reader.ReadBoolean(); // IPv6 preference
+                            if (version >= 42)
+                            {
+                                reader.ReadBoolean(); // UDP socket pool enabled
+                                DnsServer.ReadSocketPoolExcludedPorts(reader);
+                            }
+                            _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null, reader.ReadUInt16(), reader.ReadBoolean()));
+                        }
                     }
                     return;
                 }
@@ -261,6 +272,13 @@ namespace DnsServerCore
 
                     if (_dnsServer.HasManagedSourceNetworks && !isConfigTransfer)
                         _dnsServer.CheckManifestSourceNetworks(new DnsServer.SourceNetworks([], []));
+                    if (version >= 25 && _dnsServer.ManifestOwnsUdpPayloadSize)
+                        throw new InvalidDataException("/dns/udpPayloadSize: Cannot verify the UDP payload size in this backup format.");
+                    if (version >= 26 && _dnsServer.ManifestOwnsDnssecValidation)
+                        throw new InvalidDataException("/dns/dnssecValidation: Cannot verify DNSSEC validation in this backup format.");
+
+                    _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null,
+                        version < 25 ? DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE : null, version < 26 ? true : null));
                     _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(
                         version < 23 ? 3600u : null, null, null, false, 300, 300, "", [], []));
                     return;
@@ -351,13 +369,7 @@ namespace DnsServerCore
                 {
                     _dnsServer.EnableUdpSocketPool = bR.ReadBoolean();
 
-                    int count = bR.ReadUInt16();
-                    ushort[] socketPoolExcludedPorts = new ushort[count];
-
-                    for (int i = 0; i < count; i++)
-                        socketPoolExcludedPorts[i] = bR.ReadUInt16();
-
-                    UdpClientConnection.SocketPoolExcludedPorts = socketPoolExcludedPorts;
+                    UdpClientConnection.SocketPoolExcludedPorts = DnsServer.ReadSocketPoolExcludedPorts(bR);
                 }
                 else
                 {
