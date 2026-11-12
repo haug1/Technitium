@@ -21,6 +21,7 @@ namespace DnsServerCore.Tests
         private DnsWebService? _service;
 
         public HttpClient Client { get; private set; } = null!;
+        public string ConfigurationDirectory => _configuration.FullName;
         public string AdminPassword { get; } = Guid.NewGuid().ToString("N");
         public string AdminToken { get; private set; } = null!;
         private IPEndPoint DnsEndPoint { get; set; } = null!;
@@ -79,11 +80,13 @@ namespace DnsServerCore.Tests
             return result.GetProperty("token").GetString()!;
         }
 
-        public async Task<JsonElement> CallAsync(string path, string? token = null, HttpContent? content = null)
+        public async Task<JsonElement> CallAsync(string path, string? token = null, HttpContent? content = null, string? revision = null)
         {
             using var request = new HttpRequestMessage(content is null ? HttpMethod.Get : HttpMethod.Post, "/api/" + path);
             if (token is not null)
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            if (revision is not null)
+                request.Headers.IfMatch.Add(new EntityTagHeaderValue("\"" + revision + "\""));
             request.Content = content;
 
             using HttpResponseMessage response = await Client.SendAsync(request);

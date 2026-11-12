@@ -69,6 +69,63 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ApplyRejectsAStaleRevisionAndPersistsAnUpdatedPreview()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """{"schemaVersion":1,"logging":{"retentionDays":180,"noStackTrace":true}}""";
+            string staleRevision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?maxLogFileDays=240", server.AdminToken));
+            JsonElement rejected = await ApplyAsync(server, manifest, staleRevision);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("stale", rejected.GetProperty("errorMessage").GetString());
+            JsonElement unchanged = await server.GetSettingsAsync();
+            Assert.Equal(240, unchanged.GetProperty("maxLogFileDays").GetInt32());
+            Assert.False(unchanged.GetProperty("noStackTrace").GetBoolean());
+
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            JsonElement applied = await PreviewAsync(server, manifest);
+            Assert.Equal(0, applied.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, applied.GetProperty("revision").GetString()!));
+
+            await server.RestartAsync();
+            JsonElement restored = await server.GetSettingsAsync();
+            Assert.Equal(180, restored.GetProperty("maxLogFileDays").GetInt32());
+            Assert.True(restored.GetProperty("noStackTrace").GetBoolean());
+        }
+
+        private static async Task<JsonElement> ApplyAsync(LoopbackWebService server, string json, string revision)
+        {
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            return await server.CallAsync("settings/config/apply", server.AdminToken, content, revision);
+        }
+
+        [Fact]
+        public async Task ApplyRestoresLiveLoggingSettingsWhenPersistenceFails()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """{"schemaVersion":1,"logging":{"retentionDays":180,"noStackTrace":true}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            string stagingPath = Path.Combine(server.ConfigurationDirectory, "log.tmp");
+            Directory.CreateDirectory(stagingPath);
+
+            JsonElement rejected = await ApplyAsync(server, manifest, revision);
+
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("persist", rejected.GetProperty("errorMessage").GetString());
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(365, current.GetProperty("maxLogFileDays").GetInt32());
+            Assert.False(current.GetProperty("noStackTrace").GetBoolean());
+
+            Directory.Delete(stagingPath);
+            await server.RestartAsync();
+            JsonElement restored = await server.GetSettingsAsync();
+            Assert.Equal(365, restored.GetProperty("maxLogFileDays").GetInt32());
+            Assert.False(restored.GetProperty("noStackTrace").GetBoolean());
+        }
+
+        [Fact]
         public async Task ExportIsStableAndRoundTripsThroughThePreview()
         {
             await using var server = await LoopbackWebService.StartAsync();

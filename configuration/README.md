@@ -59,3 +59,9 @@ The current preview covers authoritative DNS defaults, selected DNS options, web
 ## Exporting supported settings
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config export https://dns.example.test > technitium.json` with the same token. The command writes stable manifest JSON for the supported preview fields. It omits blocklist source URLs because they can contain credentials, and reports the partial export on standard error. Supply those sources separately if the manifest needs to manage them.
+
+## Applying logging settings
+
+Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config apply path/to/technitium.json https://dns.example.test <revision>` with the revision printed by `config plan` and a token with Settings modify permission. Generate a new preview if the revision becomes stale.
+
+This implementation applies `logging.destination`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Other declarations are rejected before mutation. This slice persists values in `log.config`; durable manifest ownership and startup reconciliation are pending.

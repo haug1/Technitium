@@ -92,6 +92,45 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
+        internal static void ApplyLogging(ConfigurationManifest manifest, JsonElement currentSettings, LogManager log)
+        {
+            foreach (JsonProperty section in manifest.Settings.EnumerateObject())
+            {
+                if (section.Name is "schemaVersion" or "$schema")
+                    continue;
+                if (section.Name != "logging")
+                    throw new InvalidDataException($"/{JsonEncodedText.Encode(section.Name)}: Applying this section is not implemented.");
+
+                foreach (JsonProperty field in section.Value.EnumerateObject())
+                {
+                    if (field.Name is not ("destination" or "noStackTrace" or "retentionDays" or "useLocalTime"))
+                        throw new InvalidDataException($"/logging/{JsonEncodedText.Encode(field.Name)}: Applying this setting is not implemented.");
+                }
+            }
+
+            if (Create(manifest, currentSettings).Count == 0)
+                return;
+
+            JsonElement logging = manifest.Settings.GetProperty("logging");
+            JsonElement? destination = GetLoggingValue(logging, "destination");
+            JsonElement? noStackTrace = GetLoggingValue(logging, "noStackTrace");
+            JsonElement? retention = GetLoggingValue(logging, "retentionDays");
+            JsonElement? localTime = GetLoggingValue(logging, "useLocalTime");
+
+            log.ApplyManifestSettings(
+                destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
+                noStackTrace?.GetBoolean(),
+                retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
+                localTime?.GetBoolean());
+        }
+
+        private static JsonElement? GetLoggingValue(JsonElement logging, string name)
+        {
+            if (!logging.TryGetProperty(name, out JsonElement value))
+                return null;
+            return value.ValueKind == JsonValueKind.Null ? _settings["/logging/" + name].Default : value;
+        }
+
         public static JsonObject Export(JsonElement currentSettings)
         {
             RequireSettingsObject(currentSettings);

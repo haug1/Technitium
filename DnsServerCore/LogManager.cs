@@ -310,6 +310,35 @@ namespace DnsServerCore
             }
         }
 
+        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime)
+        {
+            lock (_saveLock)
+            {
+                LoggingType previousDestination = _loggingType;
+                bool previousNoStackTrace = _noStackTrace;
+                int previousRetentionDays = _maxLogFileDays;
+                bool previousUseLocalTime = _useLocalTime;
+
+                try
+                {
+                    NoStackTrace = noStackTrace ?? previousNoStackTrace;
+                    UseLocalTime = useLocalTime ?? previousUseLocalTime;
+                    MaxLogFileDays = retentionDays ?? previousRetentionDays;
+                    LoggingType = destination ?? previousDestination;
+                    SaveConfigFileInternal();
+                    _pendingSave = false;
+                }
+                catch
+                {
+                    NoStackTrace = previousNoStackTrace;
+                    UseLocalTime = previousUseLocalTime;
+                    MaxLogFileDays = previousRetentionDays;
+                    LoggingType = previousDestination;
+                    throw;
+                }
+            }
+        }
+
         private void SaveConfigFileInternal()
         {
             string tmpLogConfigFile = Path.Combine(_configFolder, "log.tmp");

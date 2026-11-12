@@ -2188,13 +2188,14 @@ namespace DnsServerCore
 
             //settings
             _webService.MapGetAndPost("/api/settings/get", _settingsApi.GetDnsSettings);
-            _webService.MapPost("/api/settings/config/plan", _settingsApi.PreviewConfigurationAsync);
-            _webService.MapGetAndPost("/api/settings/set", _settingsApi.SetDnsSettingsAsync);
+            _webService.MapPost("/api/settings/config/plan", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.PreviewConfigurationAsync));
+            _webService.MapPost("/api/settings/config/apply", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.ApplyConfigurationAsync));
+            _webService.MapGetAndPost("/api/settings/set", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.SetDnsSettingsAsync));
             _webService.MapGetAndPost("/api/settings/getTsigKeyNames", _settingsApi.GetTsigKeyNames);
             _webService.MapGetAndPost("/api/settings/forceUpdateBlockLists", _settingsApi.ForceUpdateBlockLists);
             _webService.MapGetAndPost("/api/settings/temporaryDisableBlocking", _settingsApi.TemporaryDisableBlocking);
             _webService.MapGetAndPost("/api/settings/backup", _settingsApi.BackupSettingsAsync);
-            _webService.MapPost("/api/settings/restore", _settingsApi.RestoreSettingsAsync);
+            _webService.MapPost("/api/settings/restore", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.RestoreSettingsAsync));
 
             //dhcp
             _webService.MapGetAndPost("/api/dhcp/leases/list", _dhcpApi.ListDhcpLeases);

@@ -31,6 +31,7 @@ using System.Net;
 using System.Net.Mail;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -52,6 +53,7 @@ namespace DnsServerCore
 
             readonly DnsWebService _dnsWebService;
             readonly byte[] _configurationRevisionKey = RandomNumberGenerator.GetBytes(32);
+            readonly SemaphoreSlim _configurationLock = new(1, 1);
 
             #endregion
 
@@ -492,16 +494,7 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
-                    using var snapshot = new MemoryStream();
-                    using (var writer = new Utf8JsonWriter(snapshot))
-                    {
-                        writer.WriteStartObject();
-                        WriteDnsSettings(writer);
-                        writer.WriteEndObject();
-                    }
-
-                    snapshot.Position = 0;
-                    using JsonDocument current = JsonDocument.Parse(snapshot);
+                    using JsonDocument current = CaptureConfigurationSnapshot();
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
@@ -522,6 +515,66 @@ namespace DnsServerCore
                 {
                     throw new DnsWebServiceException(ex.Message);
                 }
+            }
+
+            public async Task ApplyConfigurationAsync(HttpContext context)
+            {
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                if (!context.Request.HasJsonContentType())
+                    throw new DnsWebServiceException("Send the configuration manifest as JSON.");
+
+                string expected = context.Request.Headers.IfMatch.ToString();
+                if (expected.Length != 66)
+                    throw new DnsWebServiceException("Supply the preview revision in the If-Match header.");
+
+                try
+                {
+                    ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
+                    using JsonDocument current = CaptureConfigurationSnapshot();
+                    string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
+                    if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
+                        throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+
+                    ConfigurationPlan.ApplyLogging(manifest, current.RootElement, _dnsWebService._log);
+                }
+                catch (InvalidDataException ex)
+                {
+                    throw new DnsWebServiceException(ex.Message);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    throw new DnsWebServiceException("Could not persist the logging settings.");
+                }
+            }
+
+            public async Task WithConfigurationLockAsync(HttpContext context, Func<HttpContext, Task> action)
+            {
+                await _configurationLock.WaitAsync(context.RequestAborted);
+                try
+                {
+                    await action(context);
+                }
+                finally
+                {
+                    _configurationLock.Release();
+                }
+            }
+
+            private JsonDocument CaptureConfigurationSnapshot()
+            {
+                using var snapshot = new MemoryStream();
+                using (var writer = new Utf8JsonWriter(snapshot))
+                {
+                    writer.WriteStartObject();
+                    WriteDnsSettings(writer);
+                    writer.WriteEndObject();
+                }
+
+                snapshot.Position = 0;
+                return JsonDocument.Parse(snapshot);
             }
 
             public async Task SetDnsSettingsAsync(HttpContext context)

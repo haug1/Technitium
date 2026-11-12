@@ -28,6 +28,11 @@ namespace DnsServerApp
                         await WritePlanAsync(LoadManifest(args[2]), ParseServerUrl(args[3]));
                         return 0;
 
+                    case "apply" when args.Length == 5:
+                        await ApplyAsync(LoadManifest(args[2]), ParseServerUrl(args[3]), args[4]);
+                        Console.WriteLine("Configuration applied.");
+                        return 0;
+
                     case "export" when args.Length == 3:
                         JsonElement snapshot = await ReadServerResponseAsync(ParseServerUrl(args[2]), "/api/settings/get");
                         Console.WriteLine(ConfigurationPlan.Export(snapshot).ToJsonString(_exportOptions));
@@ -37,6 +42,7 @@ namespace DnsServerApp
                     default:
                         Console.Error.WriteLine("Usage: DnsServerApp config validate [manifest]");
                         Console.Error.WriteLine("       DnsServerApp config plan <manifest> <server-url>");
+                        Console.Error.WriteLine("       DnsServerApp config apply <manifest> <server-url> <revision>");
                         Console.Error.WriteLine("       DnsServerApp config export <server-url>");
                         return 2;
                 }
@@ -92,7 +98,16 @@ namespace DnsServerApp
             Console.WriteLine($"Revision {preview.GetProperty("revision").GetString()}");
         }
 
-        private static async Task<JsonElement> ReadServerResponseAsync(Uri serverUrl, string apiPath, HttpContent? content = null)
+        private static async Task ApplyAsync(ConfigurationManifest manifest, Uri serverUrl, string revision)
+        {
+            if ((revision.Length != 64) || !Array.TrueForAll(revision.ToCharArray(), char.IsAsciiHexDigit))
+                throw new InvalidDataException("Supply the revision printed by config plan.");
+
+            using var content = new StringContent(manifest.Settings.GetRawText(), Encoding.UTF8, "application/json");
+            await ReadServerResponseAsync(serverUrl, "/api/settings/config/apply", content, revision.ToUpperInvariant());
+        }
+
+        private static async Task<JsonElement> ReadServerResponseAsync(Uri serverUrl, string apiPath, HttpContent? content = null, string? revision = null)
         {
             string? token = Environment.GetEnvironmentVariable("TECHNITIUM_CONFIG_API_TOKEN");
             if (string.IsNullOrWhiteSpace(token))
@@ -106,9 +121,13 @@ namespace DnsServerApp
                 Timeout = TimeSpan.FromSeconds(15)
             };
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            using HttpResponseMessage response = content is null
-                ? await client.GetAsync(apiPath)
-                : await client.PostAsync(apiPath, content);
+            using var request = new HttpRequestMessage(content is null ? HttpMethod.Get : HttpMethod.Post, apiPath)
+            {
+                Content = content
+            };
+            if (revision is not null)
+                request.Headers.IfMatch.Add(new EntityTagHeaderValue("\"" + revision + "\""));
+            using HttpResponseMessage response = await client.SendAsync(request);
             response.EnsureSuccessStatusCode();
 
             using Stream responseStream = await response.Content.ReadAsStreamAsync();

@@ -5297,6 +5297,12 @@ Send a versioned manifest as the JSON body of `POST /api/settings/config/plan`. 
 
 The response contains a `revision` and a `changes` array. Each change contains a manifest `path` as a JSON Pointer, a `kind` of `Add`, `Update`, or `Remove`, and a `restartWebService` boolean. The revision identifies the manifest and settings snapshot on the current server process. The operation reads the snapshot and leaves settings untouched.
 
+### Apply Declarative Configuration
+
+Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header.
+
+The initial apply supports logging destination, stack trace display, retention, and local-time timestamps. The server rejects stale revisions and declarations outside the supported set before writing settings. Successful changes are persisted together in the logging configuration file. Reapplying an up-to-date preview with no effective changes skips persistence.
+
 ### Set DNS Settings
 
 This call allows to change the DNS server settings. 
