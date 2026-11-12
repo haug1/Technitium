@@ -57,7 +57,7 @@ namespace DnsServerCore.Configuration
 
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
-            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments)>();
+            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -66,7 +66,7 @@ namespace DnsServerCore.Configuration
 
                 var info = record.Tag as GenericRecordInfo;
                 if (record.Class != DnsClass.IN || record.Type is DnsResourceRecordType.APP or DnsResourceRecordType.FWD ||
-                    info?.ExpiryTtl > 0 || info is NSRecordInfo { GlueRecords.Count: > 0 } ||
+                    info is NSRecordInfo { GlueRecords.Count: > 0 } ||
                     info is SVCBRecordInfo { AutoIpv4Hint: true } or SVCBRecordInfo { AutoIpv6Hint: true })
                 {
                     missingInputs.Add(path + "/records");
@@ -91,7 +91,7 @@ namespace DnsServerCore.Configuration
                     return null;
                 }
 
-                entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false, info?.Comments ?? string.Empty));
+                entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false, info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u));
             }
 
             var exported = new JsonArray();
@@ -105,7 +105,8 @@ namespace DnsServerCore.Configuration
                     ["data"] = new JsonObject { ["rawHex"] = entry.Hex },
                     ["ttl"] = entry.Ttl,
                     ["disabled"] = entry.Disabled,
-                    ["comments"] = entry.Comments
+                    ["comments"] = entry.Comments,
+                    ["expiryTtl"] = entry.ExpiryTtl
                 });
             }
             return exported;

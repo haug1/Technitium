@@ -1125,7 +1125,7 @@ namespace DnsServerCore.Configuration
         }
 
         internal sealed record ZoneRecordEdit(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data,
-            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, ConfigurationChangeKind? Kind);
+            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, ConfigurationChangeKind? Kind);
 
         internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
             JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords, bool ownsRecords) =>
@@ -1145,7 +1145,7 @@ namespace DnsServerCore.Configuration
                 string recordPath = $"{path}/{index}";
                 foreach (JsonProperty field in record.EnumerateObject())
                 {
-                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments"))
+                    if (field.Name is not ("owner" or "type" or "data" or "ttl" or "disabled" or "comments" or "expiryTtl"))
                         throw new InvalidDataException($"{AppendPath(recordPath, field.Name)}: Planning for this record setting is not implemented.");
                 }
 
@@ -1175,6 +1175,7 @@ namespace DnsServerCore.Configuration
                 uint? ttl = record.TryGetProperty("ttl", out JsonElement ttlValue) ? decimal.ToUInt32(ttlValue.GetDecimal()) : null;
                 bool? disabled = record.TryGetProperty("disabled", out JsonElement disabledValue) ? disabledValue.GetBoolean() : null;
                 string comments = record.TryGetProperty("comments", out JsonElement commentsValue) ? commentsValue.GetString() : null;
+                uint? expiry = record.TryGetProperty("expiryTtl", out JsonElement expiryValue) ? decimal.ToUInt32(expiryValue.GetDecimal()) : null;
                 ConfigurationChangeKind? kind = null;
                 if (existing is null)
                 {
@@ -1190,10 +1191,11 @@ namespace DnsServerCore.Configuration
                     var metadata = existing.Tag as GenericRecordInfo;
                     if ((ttl.HasValue && ttl.Value != existing.OriginalTtlValue) ||
                         (disabled.HasValue && disabled.Value != (metadata?.Disabled ?? false)) ||
-                        (comments is not null && comments != (metadata?.Comments ?? string.Empty)))
+                        (comments is not null && comments != (metadata?.Comments ?? string.Empty)) ||
+                        (expiry.HasValue && expiry.Value != (metadata?.ExpiryTtl ?? 0u)))
                         kind = ConfigurationChangeKind.Update;
                 }
-                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, kind));
+                changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, expiry, kind));
                 index++;
             }
 
@@ -1206,7 +1208,7 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
 
                     changes.Add(new ZoneRecordEdit(record.Name.ToLowerInvariant(), record.Type, record.RDATA,
-                        record, null, null, null, ConfigurationChangeKind.Remove));
+                        record, null, null, null, null, ConfigurationChangeKind.Remove));
                 }
             }
 

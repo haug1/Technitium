@@ -882,7 +882,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         var allRecords = new List<DnsResourceRecord>();
                         if (current is null)
                         {
-                            zone = new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme);
+                            zone = new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme, initializeExpiryTimer: false);
                             created.Add(name, zone);
                             zone.Disabled = disabled.Value;
                             policies.Apply(new AuthZoneInfo(zone));
@@ -970,6 +970,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             else
                             {
                                 PrimaryZone zone = created[name];
+                                zone.InitializeManifestZoneExpiry();
                                 if (!_root.TryAdd(zone))
                                     throw new InvalidOperationException("The primary zone already exists.");
                                 _zoneIndex.Add(new AuthZoneInfo(zone));
@@ -1007,6 +1008,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     live.ApplyManifestRecordHistory(stage.Zone);
                                     stage.Zone.Dispose();
                                 }
+                                uint minExpiryTtl = GetMinExpiryTtlFor(recordsToPublish);
+                                if (minExpiryTtl > 0)
+                                    live.StartRecordExpiryTimer(minExpiryTtl);
                                 live.TriggerNotify();
                             }
                             _dnsServer.CacheZoneManager.DeleteZone(name);
@@ -1128,7 +1132,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                             info.Disabled = edit.Disabled.Value;
                         if (edit.Comments is not null)
                             info.Comments = edit.Comments;
-                        info.LastModified = DateTime.UtcNow;
+                        if (edit.Existing is null || (edit.ExpiryTtl.HasValue && edit.ExpiryTtl.Value != info.ExpiryTtl) ||
+                            (edit.Kind.HasValue && info.ExpiryTtl == 0))
+                            info.LastModified = DateTime.UtcNow;
+                        if (edit.ExpiryTtl.HasValue)
+                            info.ExpiryTtl = edit.ExpiryTtl.Value;
                         replacement.Add(record);
                     }
                     if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count > 1)

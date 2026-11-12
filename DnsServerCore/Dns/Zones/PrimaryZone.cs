@@ -86,10 +86,16 @@ namespace DnsServerCore.Dns.Zones
         }
 
         public PrimaryZone(DnsServer dnsServer, string name, bool useSoaSerialDateScheme)
+            : this(dnsServer, name, useSoaSerialDateScheme, initializeExpiryTimer: true)
+        {
+        }
+
+        internal PrimaryZone(DnsServer dnsServer, string name, bool useSoaSerialDateScheme, bool initializeExpiryTimer)
             : base(dnsServer, name)
         {
             InitNotify();
-            InitRecordExpiry();
+            if (initializeExpiryTimer)
+                InitRecordExpiry();
 
             ZoneTransfer = AuthZoneTransfer.AllowOnlyZoneNameServers;
             Notify = AuthZoneNotify.ZoneNameServers;
@@ -113,6 +119,8 @@ namespace DnsServerCore.Dns.Zones
             _entries[DnsResourceRecordType.SOA] = [soaRecord];
             _entries[DnsResourceRecordType.NS] = [nsRecord];
         }
+
+        internal void InitializeManifestZoneExpiry() => InitRecordExpiry();
 
         internal PrimaryZone(DnsServer dnsServer, string name, DnsSOARecordData soa, DnsNSRecordData ns)
             : base(dnsServer, name)

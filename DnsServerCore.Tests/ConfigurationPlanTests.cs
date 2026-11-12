@@ -3358,6 +3358,34 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneRecordApplyStartsExpiryWithoutRestart()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"expiry.test":{"type":"Primary","records":[
+                    {"owner":"www.expiry.test","type":"A","ttl":60,"expiryTtl":2,"data":{"zoneFile":"192.0.2.42"}}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            Assert.Single((await server.QueryAsync("www.expiry.test", DnsResourceRecordType.A)).Answer);
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            DateTime deadline = DateTime.UtcNow.AddSeconds(8);
+            DnsDatagram answer;
+            do
+            {
+                await Task.Delay(100);
+                answer = await server.QueryAsync("www.expiry.test", DnsResourceRecordType.A);
+            }
+            while (answer.Answer.Count > 0 && DateTime.UtcNow < deadline);
+
+            Assert.Empty(answer.Answer);
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal("Add", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+        }
+
+        [Fact]
         public async Task ZoneRecordApplyRemovesOwnedRecordsAndRetainsApexRecords()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -3834,8 +3862,9 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(export);
             JsonElement response = export.GetProperty("response");
             JsonElement zones = response.GetProperty("manifest").GetProperty("zones");
-            Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), entry => entry.ValueEquals("/zones/expiring.test/records"));
-            Assert.False(zones.GetProperty("expiring.test").TryGetProperty("records", out _));
+            Assert.DoesNotContain(response.GetProperty("missingInputs").EnumerateArray(), entry => entry.ValueEquals("/zones/expiring.test/records"));
+            JsonElement expiring = Assert.Single(zones.GetProperty("expiring.test").GetProperty("records").EnumerateArray());
+            Assert.Equal(3600u, expiring.GetProperty("expiryTtl").GetUInt32());
             JsonElement zone = zones.GetProperty("migration.test");
             Assert.Equal("Deny", zone.GetProperty("transfer").GetProperty("mode").GetString());
             JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray());
