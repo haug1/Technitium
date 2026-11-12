@@ -9,6 +9,11 @@
   <ItemGroup>
     <ProjectReference Include="../Apps/FilterAaaaApp/FilterAaaaApp.csproj" />
     <ProjectReference Include="../DnsServerCore/DnsServerCore.csproj" />
+    <ProjectReference Include="../DnsServerApp/DnsServerApp.csproj" />
+    <None Include="../DnsServerApp/bin/$(Configuration)/DnsServerApp.runtimeconfig.json"
+          Link="DnsServerApp.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../DnsServerApp/bin/$(Configuration)/DnsServerApp.deps.json"
+          Link="DnsServerApp.deps.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Apps/FilterAaaaApp/bin/$(Configuration)/FilterAaaaApp.deps.json"
           Link="FilterAaaaApp.deps.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures/dns-v6.config" CopyToOutputDirectory="PreserveNewest" />
