@@ -1239,8 +1239,8 @@ namespace DnsServerCore.Configuration
                             }
                             continue;
                         }
-                        if (field.Name is "enabled" or "records" or "permissions" ||
-                            (field.Name == "type" && (field.Value.ValueEquals("Primary") || field.Value.ValueEquals("Forwarder"))))
+                        if (field.Name is "enabled" or "records" or "permissions" or "primary" ||
+                            (field.Name == "type" && field.Value.GetString() is "Primary" or "Forwarder" or "Secondary"))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
                     }
@@ -1424,7 +1424,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled" or "records" or "permissions") && !ConfigurationZonePolicies.IsPolicy(field.Name))
+                    if (field.Name is not ("type" or "enabled" or "records" or "permissions" or "primary") && !ConfigurationZonePolicies.IsPolicy(field.Name))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 
@@ -1433,8 +1433,8 @@ namespace DnsServerCore.Configuration
                 {
                     if (type is null)
                         throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
-                    if (type is not ("Primary" or "Forwarder"))
-                        throw new InvalidDataException($"{path}/type: Preview of creation requires a primary or forwarder zone.");
+                    if (type is not ("Primary" or "Forwarder" or "Secondary"))
+                        throw new InvalidDataException($"{path}/type: Preview of creation requires a primary, forwarder, or secondary zone.");
                     ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
                     changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Add, false));
                     continue;
@@ -1444,6 +1444,11 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
 
                 ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
+                if (current.TryGetProperty("primaryChanges", out JsonElement primaryChanges))
+                {
+                    foreach (JsonElement field in primaryChanges.EnumerateArray())
+                        changes.Add(new ConfigurationChange($"{path}/primary/{field.GetString()}", ConfigurationChangeKind.Update, false));
+                }
 
                 if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
                 {

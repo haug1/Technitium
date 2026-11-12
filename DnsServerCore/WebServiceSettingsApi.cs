@@ -1365,17 +1365,36 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Access was denied.");
 
                     ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
-                    if (zone is not null && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) || zone.CatalogZoneName is not null))
-                        throw new InvalidDataException($"{zonePath}: Apply requires a primary or forwarder zone outside catalogs.");
+                    if (zone is not null && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Secondary) || zone.CatalogZoneName is not null))
+                        throw new InvalidDataException($"{zonePath}: Apply requires a primary, forwarder, or secondary zone outside catalogs.");
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
                         ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, zonePath, zone, keys);
                     writer.WriteStartObject(name);
+                    AuthZoneType type = zone?.Type ?? AuthZoneType.Primary;
+                    if (zone is null && declaration.Value.ValueKind == JsonValueKind.Object &&
+                        declaration.Value.TryGetProperty("type", out JsonElement declaredType) && declaredType.ValueKind == JsonValueKind.String)
+                        type = Enum.Parse<AuthZoneType>(declaredType.GetString());
                     if (zone is not null)
                     {
                         writer.WriteString("type", zone.Type.ToString());
                         writer.WriteBoolean("enabled", !zone.Disabled);
                         if (declaration.Value.ValueKind == JsonValueKind.Object)
                             ConfigurationZonePolicies.WriteSnapshot(writer, declaration.Value, zone);
+                    }
+
+                    if (declaration.Value.ValueKind == JsonValueKind.Object)
+                    {
+                        var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, keys, zonePath);
+                        if (primary != default)
+                        {
+                            writer.WritePropertyName("primaryChanges");
+                            JsonSerializer.Serialize(writer, primary.Fields());
+                            if (zone is not null)
+                            {
+                                writer.WritePropertyName("currentPrimary");
+                                ConfigurationZonePrimary.Export(zone).WriteTo(writer);
+                            }
+                        }
                     }
 
                     if (declaration.Value.ValueKind == JsonValueKind.Object &&
@@ -1390,8 +1409,7 @@ namespace DnsServerCore
                         var edits = ConfigurationPlan.PrepareZoneRecordEdits(manifest, name, declaration.Name,
                             _dnsWebService._dnsServer.ServerDomain, records, currentRecords,
                             _dnsWebService._dnsServer.AuthZoneManager.OwnsManifestZoneField(name, "records"),
-                            zone?.Type == AuthZoneType.Forwarder || (zone is null &&
-                                declaration.Value.TryGetProperty("type", out JsonElement type) && type.ValueEquals("Forwarder")));
+                            type == AuthZoneType.Forwarder);
                         writer.WriteStartArray("recordChanges");
                         foreach (var edit in edits)
                         {

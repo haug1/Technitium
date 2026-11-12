@@ -3420,7 +3420,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 AuthZoneManager manager = _dnsWebService._dnsServer.AuthZoneManager;
-                if (zoneInfo.Type == AuthZoneType.Primary)
+                if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Secondary)
                 {
                     CheckMode("queryAccess", "query/mode", zoneInfo.QueryAccess);
                     CheckList("queryAccessNetworkACL", "query/networkAcl", zoneInfo.QueryAccessNetworkACL, NetworkAccessControl.Parse);
@@ -3430,6 +3430,25 @@ namespace DnsServerCore
                     CheckList("notifyNameServers", "notify/nameServers", zoneInfo.NotifyNameServers, IPAddress.Parse);
                     CheckMode("update", "updates/mode", zoneInfo.Update);
                     CheckList("updateNetworkACL", "updates/networkAcl", zoneInfo.UpdateNetworkACL, NetworkAccessControl.Parse);
+                }
+
+                if (zoneInfo.Type == AuthZoneType.Secondary)
+                {
+                    CheckMode("primaryZoneTransferProtocol", "primary/transferProtocol", zoneInfo.PrimaryZoneTransferProtocol);
+                    DnsTransportProtocol protocol = request.TryGetQueryOrFormEnum("primaryZoneTransferProtocol", out DnsTransportProtocol requested)
+                        ? requested : zoneInfo.PrimaryZoneTransferProtocol;
+                    if (Owns("primary/servers"))
+                    {
+                        if (protocol != zoneInfo.PrimaryZoneTransferProtocol)
+                            Reject("primary/servers");
+                        CheckList("primaryNameServerAddresses", "primary/servers", zoneInfo.PrimaryNameServerAddresses,
+                            address => ConfigurationZonePrimary.ParseAddress(address, protocol, AuthZoneManager.GetManifestZonePath(zoneInfo.Name) + "/primary/servers"));
+                    }
+                    if (Owns("primary/tsigKey") && request.QueryOrForm("primaryZoneTransferTsigKeyName") is string key &&
+                        !string.Equals(key, zoneInfo.PrimaryZoneTransferTsigKeyName ?? "", StringComparison.OrdinalIgnoreCase))
+                        Reject("primary/tsigKey");
+                    if (Owns("primary/validateZone") && request.TryGetQueryOrForm("validateZone", bool.Parse, out bool validate) && validate != zoneInfo.ValidateZone)
+                        Reject("primary/validateZone");
                 }
 
                 bool Owns(string field) => manager.OwnsManifestZoneField(zoneInfo.Name, field);
@@ -3573,6 +3592,10 @@ namespace DnsServerCore
                                     DnsServer.ValidateQuicSupport();
 
                                 zoneInfo.PrimaryZoneTransferProtocol = primaryZoneTransferProtocol;
+                            }
+                            else
+                            {
+                                primaryZoneTransferProtocol = zoneInfo.PrimaryZoneTransferProtocol;
                             }
 
                             string primaryNameServerAddresses = request.QueryOrForm("primaryNameServerAddresses");

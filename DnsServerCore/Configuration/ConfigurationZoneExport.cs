@@ -27,7 +27,8 @@ namespace DnsServerCore.Configuration
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
                 if (isClusterInfrastructure(zone.Name) ||
-                    zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) ||
+                    (zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) &&
+                        zone.Type != AuthZoneType.Secondary) ||
                     zone.CatalogZoneName is not null)
                 {
                     missingInputs.Add(path);
@@ -54,7 +55,17 @@ namespace DnsServerCore.Configuration
                     declaration["transfer"].AsObject().Remove("tsigKeys");
                     missingInputs.Add(path + "/transfer/tsigKeys");
                 }
-                if (zone.UpdateSecurityPolicies?.Keys.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
+                if (zone.Type == AuthZoneType.Secondary)
+                {
+                    var primary = ConfigurationZonePrimary.Export(zone);
+                    if (zone.PrimaryZoneTransferTsigKeyName is { Length: > 0 } key && dns.TsigKeys?.ContainsKey(key) != true)
+                    {
+                        primary.Remove("tsigKey");
+                        missingInputs.Add(path + "/primary/tsigKey");
+                    }
+                    declaration["primary"] = primary;
+                }
+                else if (zone.UpdateSecurityPolicies?.Keys.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                     missingInputs.Add(path + "/updates/securityPolicies");
                 else
                     declaration["updates"].AsObject()["securityPolicies"] = ConfigurationZoneUpdatePolicies.Write(zone.UpdateSecurityPolicies);
@@ -62,11 +73,14 @@ namespace DnsServerCore.Configuration
                 if (getPermission?.Invoke(zone.Name) is Permission permission)
                     declaration["permissions"] = ConfigurationPermissions.ExportGrants(permission);
 
-                var records = new List<DnsResourceRecord>();
-                dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);
-                JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, path, records, missingInputs);
-                if (exportedRecords is not null)
-                    declaration.Add("records", exportedRecords);
+                if (zone.Type != AuthZoneType.Secondary)
+                {
+                    var records = new List<DnsResourceRecord>();
+                    dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);
+                    JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, path, records, missingInputs);
+                    if (exportedRecords is not null)
+                        declaration.Add("records", exportedRecords);
+                }
                 result.Add(name, declaration);
             }
             return result;

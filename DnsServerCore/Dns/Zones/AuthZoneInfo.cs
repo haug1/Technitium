@@ -1189,7 +1189,8 @@ namespace DnsServerCore.Dns.Zones
 
         public void WriteTo(BinaryWriter bW) => WriteTo(bW, disabled: null);
 
-        internal void WriteTo(BinaryWriter bW, bool? disabled, ConfigurationZonePolicies.Changes policies = default)
+        internal void WriteTo(BinaryWriter bW, bool? disabled, ConfigurationZonePolicies.Changes policies = default,
+            ConfigurationZonePrimary.Changes primary = default)
         {
             if (_apexZone is null)
                 throw new InvalidOperationException();
@@ -1233,28 +1234,28 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(_overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogPrimaryNameServers);
 
-                    bW.Write((byte)_queryAccess);
-                    WriteNetworkACLTo(_queryAccessNetworkACL, bW);
+                    bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
+                    WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);
 
-                    bW.Write((byte)_zoneTransfer);
-                    WriteNetworkACLTo(_zoneTransferNetworkACL, bW);
-                    WriteZoneTransferTsigKeyNamesTo(_zoneTransferTsigKeyNames, bW);
+                    bW.Write((byte)(policies.Transfer ?? _zoneTransfer));
+                    WriteNetworkACLTo(policies.TransferAcl ?? _zoneTransferNetworkACL, bW);
+                    WriteZoneTransferTsigKeyNamesTo(policies.TransferKeys ?? _zoneTransferTsigKeyNames, bW);
                     WriteZoneHistoryTo(_zoneHistory, bW);
 
-                    bW.Write((byte)_notify);
-                    WriteIPAddressesTo(_notifyNameServers, bW);
+                    bW.Write((byte)(policies.Notify ?? _notify));
+                    WriteIPAddressesTo(policies.NotifyServers ?? _notifyNameServers, bW);
 
-                    bW.Write((byte)_update);
-                    WriteNetworkACLTo(_updateNetworkACL, bW);
+                    bW.Write((byte)(policies.Update ?? _update));
+                    WriteNetworkACLTo(policies.UpdateAcl ?? _updateNetworkACL, bW);
 
                     WriteDnssecPrivateKeysTo(_dnssecPrivateKeys, bW);
 
-                    WriteNameServerAddressesTo(_primaryNameServerAddresses, bW);
-                    bW.Write((byte)_primaryZoneTransferProtocol);
-                    bW.Write(_primaryZoneTransferTsigKeyName ?? "");
+                    WriteNameServerAddressesTo(primary.Servers ?? _primaryNameServerAddresses, bW);
+                    bW.Write((byte)(primary.Protocol ?? _primaryZoneTransferProtocol));
+                    bW.Write(primary.TsigKey ?? _primaryZoneTransferTsigKeyName ?? "");
 
                     bW.BaseStream.WriteDateTime(_expiry);
-                    bW.Write(_validateZone);
+                    bW.Write(primary.Validate ?? _validateZone);
                     bW.Write(_validationFailed);
                     break;
 
@@ -1276,20 +1277,20 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(_overrideCatalogZoneTransfer);
                     bW.Write(_overrideCatalogNotify);
 
-                    bW.Write((byte)_queryAccess);
-                    WriteNetworkACLTo(_queryAccessNetworkACL, bW);
+                    bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
+                    WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);
 
-                    bW.Write((byte)_zoneTransfer);
-                    WriteNetworkACLTo(_zoneTransferNetworkACL, bW);
-                    WriteZoneTransferTsigKeyNamesTo(_zoneTransferTsigKeyNames, bW);
+                    bW.Write((byte)(policies.Transfer ?? _zoneTransfer));
+                    WriteNetworkACLTo(policies.TransferAcl ?? _zoneTransferNetworkACL, bW);
+                    WriteZoneTransferTsigKeyNamesTo(policies.TransferKeys ?? _zoneTransferTsigKeyNames, bW);
                     WriteZoneHistoryTo(_zoneHistory, bW);
 
-                    bW.Write((byte)_notify);
-                    WriteIPAddressesTo(_notifyNameServers, bW);
+                    bW.Write((byte)(policies.Notify ?? _notify));
+                    WriteIPAddressesTo(policies.NotifyServers ?? _notifyNameServers, bW);
 
-                    bW.Write((byte)_update);
-                    WriteNetworkACLTo(_updateNetworkACL, bW);
-                    WriteUpdateSecurityPoliciesTo(_updateSecurityPolicies, bW);
+                    bW.Write((byte)(policies.Update ?? _update));
+                    WriteNetworkACLTo(policies.UpdateAcl ?? _updateNetworkACL, bW);
+                    WriteUpdateSecurityPoliciesTo(policies.UpdatePolicies ?? _updateSecurityPolicies, bW);
                     break;
 
                 case AuthZoneType.SecondaryForwarder:

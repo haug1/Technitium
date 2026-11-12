@@ -1,6 +1,7 @@
 ﻿using DnsServerCore.Configuration;
 using DnsServerCore.Dhcp;
 using DnsServerCore.Dhcp.Options;
+using DnsServerCore.Dns.Zones;
 using System;
 using System.IO;
 using System.IO.Compression;
@@ -4401,6 +4402,67 @@ namespace DnsServerCore.Tests
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.Contains("/zones/records.test/records", rejected.GetProperty("errorMessage").GetString());
             Assert.DoesNotContain("192.0.2.", rejected.GetRawText());
+        }
+
+        [Fact]
+        public async Task SecondaryZoneKeepsTransferredRecordsWhenThePrimarySettingsChange()
+        {
+            await using var upstream = new LoopbackDnsServer();
+            upstream.AddPrimaryZone("replica.test", "www.replica.test", IPAddress.Parse("192.0.2.42"));
+            upstream.Server.AuthZoneManager.GetAuthZoneInfo("replica.test").ZoneTransfer = AuthZoneTransfer.Allow;
+            await upstream.StartAsync();
+            await using var server = await LoopbackWebService.StartAsync();
+            string manifest = $$$$$"""
+                {"schemaVersion":1,"zones":{"replica.test":{"type":"Secondary","primary":{
+                  "servers":[{"address":"{{{{{upstream.EndPoint}}}}}"}],"transferProtocol":"Tcp","validateZone":false
+                }}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await WaitForTransferAsync(server);
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zone = export.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("replica.test");
+            Assert.False(zone.TryGetProperty("records", out _));
+            Assert.Equal(JsonValueKind.Null, zone.GetProperty("primary").GetProperty("tsigKey").ValueKind);
+            string exported = $$"""{"schemaVersion":1,"zones":{"replica.test":{{zone.GetRawText()}} } }""";
+            await using var destination = await LoopbackWebService.StartAsync();
+            revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, revision));
+            await WaitForTransferAsync(destination);
+
+            string unavailable = LoopbackDnsServer.GetLoopbackEndPoint().ToString();
+            string changed = manifest.Replace(upstream.EndPoint.ToString(), unavailable, StringComparison.Ordinal);
+            JsonElement plan = await PreviewAsync(server, changed);
+            Assert.Contains(plan.GetProperty("changes").EnumerateArray(), change => change.GetProperty("path").ValueEquals("/zones/replica.test/primary/servers"));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, changed, plan.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            await AssertAnswerAsync(server);
+            Assert.Empty((await PreviewAsync(server, changed)).GetProperty("changes").EnumerateArray());
+            JsonElement rejected = await server.CallAsync($"zones/options/set?zone=replica.test&primaryNameServerAddresses={upstream.EndPoint}", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/zones/replica.test/primary/servers", rejected.GetProperty("errorMessage").GetString());
+
+            static async Task WaitForTransferAsync(LoopbackWebService server)
+            {
+                DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+                do
+                {
+                    if ((await server.QueryAsync("www.replica.test", DnsResourceRecordType.A)).Answer.Count > 0)
+                        break;
+                    await Task.Delay(250);
+                }
+                while (DateTime.UtcNow < deadline);
+                await AssertAnswerAsync(server);
+            }
+
+            static async Task AssertAnswerAsync(LoopbackWebService server)
+            {
+                var answer = Assert.Single((await server.QueryAsync("www.replica.test", DnsResourceRecordType.A)).Answer);
+                Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
+            }
         }
 
         [Fact]

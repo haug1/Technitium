@@ -119,6 +119,21 @@ namespace DnsServerCore.Dns.Zones
 
         #region static
 
+        internal static SecondaryZone CreateUnrefreshed(DnsServer dnsServer, string name)
+        {
+            var zone = new SecondaryZone(dnsServer, name, null, DnsTransportProtocol.Tcp, null, validateZone: false);
+            zone.InitializeUnrefreshedSoa();
+            return zone;
+        }
+
+        private void InitializeUnrefreshedSoa()
+        {
+            var soa = new DnsSOARecordData(_dnsServer.ServerDomain, "invalid", 0, 300, 60, 604800, 900);
+            var record = new DnsResourceRecord(_name, DnsResourceRecordType.SOA, DnsClass.IN, 0, soa);
+            record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
+            _entries[DnsResourceRecordType.SOA] = [record];
+        }
+
         public static async Task<SecondaryZone> CreateAsync(DnsServer dnsServer, string name, IReadOnlyList<NameServerAddress> primaryNameServerAddresses = null, DnsTransportProtocol primaryZoneTransferProtocol = DnsTransportProtocol.Tcp, string primaryZoneTransferTsigKeyName = null, bool validateZone = false, bool ignoreSoaFailure = false)
         {
             SecondaryZone secondaryZone = new SecondaryZone(dnsServer, name, primaryNameServerAddresses, primaryZoneTransferProtocol, primaryZoneTransferTsigKeyName, validateZone);
@@ -176,11 +191,7 @@ namespace DnsServerCore.Dns.Zones
                     throw;
 
                 //continue with dummy SOA
-                DnsSOARecordData soa = new DnsSOARecordData(secondaryZone._dnsServer.ServerDomain, "invalid", 0, 300, 60, 604800, 900);
-                DnsResourceRecord soaRecord = new DnsResourceRecord(secondaryZone._name, DnsResourceRecordType.SOA, DnsClass.IN, 0, soa);
-                soaRecord.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                secondaryZone._entries[DnsResourceRecordType.SOA] = [soaRecord];
+                secondaryZone.InitializeUnrefreshedSoa();
             }
 
             return secondaryZone;
