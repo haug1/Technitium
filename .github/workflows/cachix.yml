@@ -1,0 +1,33 @@
+name: Publish ARM64 package to Cachix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: haug1
+          skipPush: true
+
+      - name: Build and smoke-test Technitium
+        id: package
+        run: |
+          test "$(uname -m)" = aarch64
+          path=$(nix build .#technitium-dns-server --no-link --print-out-paths -L)
+          bash nix/smoke-test.sh "$path"
+          printf 'path=%s\n' "$path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the tested package and runtime dependencies
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: cachix push haug1 "$PACKAGE_PATH"
