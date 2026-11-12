@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +21,7 @@ namespace DnsServerCore.Configuration
         public const string DefaultFileName = "technitium.json";
         public const int CurrentSchemaVersion = 1;
 
+        private static readonly UTF8Encoding _secretFileEncoding = new(encoderShouldEmitUTF8Identifier: true, throwOnInvalidBytes: true);
         private static readonly Lazy<JsonSchema> _schema = new(LoadSchema);
 
         private ConfigurationManifest(string filePath, JsonElement settings)
@@ -54,6 +56,7 @@ namespace DnsServerCore.Configuration
             }
 
             ConfigurationPlan.CheckApplySupport(manifest);
+            manifest.ValidateReferences();
             return manifest;
         }
 
@@ -334,37 +337,9 @@ namespace DnsServerCore.Configuration
         {
             if (element.ValueKind == JsonValueKind.Object)
             {
-                bool isReference = IsReferencePath(path);
-                if (isReference && element.TryGetProperty("environment", out JsonElement variable))
+                if (IsReferencePath(path) && (element.TryGetProperty("environment", out _) || element.TryGetProperty("file", out _)))
                 {
-                    try
-                    {
-                        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(variable.GetString())))
-                            return;
-                    }
-                    catch (ArgumentException)
-                    {
-                        throw new InvalidDataException($"{DisplayPath(path)}: Invalid environment reference.");
-                    }
-
-                    throw new InvalidDataException($"{DisplayPath(path)}: Referenced environment value is missing or empty.");
-                }
-
-                if (isReference && element.TryGetProperty("file", out JsonElement file))
-                {
-                    string resolvedPath;
-                    try
-                    {
-                        resolvedPath = Path.GetFullPath(file.GetString(), Path.GetDirectoryName(FilePath));
-                    }
-                    catch (ArgumentException)
-                    {
-                        throw new InvalidDataException($"{DisplayPath(path)}: Invalid file reference.");
-                    }
-
-                    if (!File.Exists(resolvedPath))
-                        throw new InvalidDataException($"{DisplayPath(path)}: Referenced file is missing or inaccessible.");
-
+                    ResolveReference(element, path);
                     return;
                 }
 
@@ -377,6 +352,59 @@ namespace DnsServerCore.Configuration
                 foreach (JsonElement item in element.EnumerateArray())
                     ValidateReferences(item, path + "/" + index++);
             }
+        }
+
+        internal string ResolveReference(JsonElement reference, string path)
+        {
+            string secret;
+            if (reference.TryGetProperty("environment", out JsonElement variable))
+            {
+                try
+                {
+                    secret = Environment.GetEnvironmentVariable(variable.GetString());
+                }
+                catch (ArgumentException)
+                {
+                    throw new InvalidDataException($"{DisplayPath(path)}: Invalid environment reference.");
+                }
+
+                if (string.IsNullOrEmpty(secret))
+                    throw new InvalidDataException($"{DisplayPath(path)}: Referenced environment value is missing or empty.");
+
+                return secret;
+            }
+
+            if (FilePath is null)
+                throw new InvalidDataException($"{DisplayPath(path)}: File references require a local manifest file.");
+
+            string resolvedPath;
+            try
+            {
+                resolvedPath = Path.GetFullPath(reference.GetProperty("file").GetString(), Path.GetDirectoryName(FilePath));
+            }
+            catch (ArgumentException)
+            {
+                throw new InvalidDataException($"{DisplayPath(path)}: Invalid file reference.");
+            }
+
+            try
+            {
+                using var file = new StreamReader(resolvedPath, _secretFileEncoding, detectEncodingFromByteOrderMarks: false);
+                secret = file.ReadToEnd();
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new InvalidDataException($"{DisplayPath(path)}: Referenced file is not valid text.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                throw new InvalidDataException($"{DisplayPath(path)}: Referenced file is missing or inaccessible.");
+            }
+
+            if (secret.Length == 0)
+                throw new InvalidDataException($"{DisplayPath(path)}: Referenced file is empty.");
+
+            return secret;
         }
 
         private static bool IsReferencePath(string path)

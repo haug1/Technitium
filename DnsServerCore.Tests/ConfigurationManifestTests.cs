@@ -64,6 +64,25 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public void FileReferenceValidationRejectsEmptyAndInvalidTextWithoutLeakingThePath()
+        {
+            string path = WriteManifest("""{"schemaVersion":1,"web":{"certificate":{"password":{"file":"private-file"}}}}""");
+            ConfigurationManifest manifest = ConfigurationManifest.Load(path);
+            string secretPath = Path.Combine(_directory.FullName, "private-file");
+
+            File.WriteAllText(secretPath, "");
+            InvalidDataException empty = Assert.Throws<InvalidDataException>(manifest.ValidateReferences);
+            Assert.Contains("/web/certificate/password", empty.Message);
+            Assert.Contains("empty", empty.Message);
+            Assert.DoesNotContain("private-file", empty.ToString());
+
+            File.WriteAllBytes(secretPath, [0xff, 0xc0, 0x80]);
+            InvalidDataException invalid = Assert.Throws<InvalidDataException>(manifest.ValidateReferences);
+            Assert.Contains("/web/certificate/password", invalid.Message);
+            Assert.DoesNotContain("private-file", invalid.ToString());
+        }
+
+        [Fact]
         public void NamedSettingsCanUseNamesThatLookLikeReferenceFields()
         {
             string path = WriteManifest("""{"schemaVersion":1,"auth":{"sso":{"groupMap":{"file":"Local group"}}}}""");
