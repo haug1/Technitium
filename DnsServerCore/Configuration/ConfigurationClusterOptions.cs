@@ -57,11 +57,11 @@ namespace DnsServerCore.Configuration
             public override string ToString() => nameof(SecondaryBootstrap);
         }
 
-        internal static bool RequestsPrimaryBootstrap(ConfigurationManifest manifest) =>
+        internal static bool RequestsBootstrap(ConfigurationManifest manifest) =>
             IsDeclared(manifest) && manifest.Settings.GetProperty("cluster").TryGetProperty("bootstrap", out JsonElement bootstrap) &&
-            bootstrap.TryGetProperty("role", out JsonElement role) && role.ValueKind == JsonValueKind.String && role.ValueEquals("Primary");
+            bootstrap.TryGetProperty("role", out JsonElement role) && role.ValueKind == JsonValueKind.String;
 
-        internal static Bootstrap PrepareStartupBootstrap(ConfigurationManifest manifest, ClusterManager cluster, Auth.User admin)
+        internal static Bootstrap PrepareBootstrap(ConfigurationManifest manifest, ClusterManager cluster, Auth.User admin)
         {
             if (cluster.ClusterInitialized || !IsDeclared(manifest))
                 return null;
@@ -88,6 +88,7 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException("/cluster: Only the Primary can declare cluster intervals.");
 
                 domain = ConfigurationManifest.CanonicalDnsName(domain, "/cluster/domain", allowRoot: false);
+                cluster.CheckSecondaryBootstrap(domain);
                 if (!Uri.TryCreate(ReadText("primaryUrl"), UriKind.Absolute, out Uri url) ||
                     url.Scheme != Uri.UriSchemeHttps || url.HostNameType != UriHostNameType.Dns ||
                     url.UserInfo.Length != 0 || url.Query.Length != 0 || url.Fragment.Length != 0 || url.AbsolutePath != "/")
@@ -266,7 +267,7 @@ namespace DnsServerCore.Configuration
 
         internal static void Compare(JsonElement snapshot, List<ConfigurationChange> changes)
         {
-            if (snapshot.TryGetProperty("primaryBootstrap", out _))
+            if (snapshot.TryGetProperty("bootstrap", out _))
             {
                 changes.Add(new ConfigurationChange("/cluster/bootstrap", ConfigurationChangeKind.Add, false));
                 return;

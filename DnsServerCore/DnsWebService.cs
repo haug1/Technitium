@@ -3497,7 +3497,7 @@ namespace DnsServerCore
                 //init cluster manager and load config file
                 _clusterManager = new ClusterManager(this);
                 User bootstrapAdmin = _authManager.GetUser("admin");
-                var bootstrap = ConfigurationClusterOptions.PrepareStartupBootstrap(startupManifest, _clusterManager, bootstrapAdmin);
+                var bootstrap = ConfigurationClusterOptions.PrepareBootstrap(startupManifest, _clusterManager, bootstrapAdmin);
                 if (bootstrap is not null && !IsWebServiceTlsEnabled)
                     throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before bootstrapping the node.");
                 if (startupManifest is not null && bootstrap is null)

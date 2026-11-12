@@ -742,12 +742,21 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     ConfigurationPlan.CheckApplySupport(manifest);
-                    if (PrepareLivePrimaryBootstrap(manifest, sessionUser) is { } bootstrap)
+                    if (PrepareLiveBootstrap(manifest, sessionUser) is { } bootstrap)
                     {
-                        using JsonDocument snapshot = CaptureConfigurationSnapshot(manifest, sessionUser);
+                        using JsonDocument snapshot = CaptureConfigurationSnapshot(manifest, sessionUser, preparedBootstrap: bootstrap);
                         CheckRevision(manifest, snapshot.RootElement, expected);
-                        var reverseRecords = _dnsWebService._clusterManager.PrepareLivePrimaryBootstrap(bootstrap);
-                        _dnsWebService._clusterManager.InitializeLivePrimaryFromManifest(bootstrap, sessionUser, reverseRecords);
+                        if (bootstrap is ConfigurationClusterOptions.PrimaryBootstrap primary)
+                        {
+                            var reverseRecords = _dnsWebService._clusterManager.PrepareLivePrimaryBootstrap(primary);
+                            _dnsWebService._clusterManager.InitializeLivePrimaryFromManifest(primary, sessionUser, reverseRecords);
+                        }
+                        else if (bootstrap is ConfigurationClusterOptions.SecondaryBootstrap secondary)
+                        {
+                            await _dnsWebService._clusterManager.InitializeAndJoinClusterAsync(secondary.Addresses, secondary.PrimaryUrl, secondary.Username,
+                                secondary.Password, secondary.Totp, secondary.PrimaryAddress is null ? null : [secondary.PrimaryAddress],
+                                secondary.IgnoreCertificateErrors, expectedDomain: secondary.Domain);
+                        }
                         return;
                     }
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
@@ -1061,9 +1070,9 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
             }
 
-            private ConfigurationClusterOptions.PrimaryBootstrap PrepareLivePrimaryBootstrap(ConfigurationManifest manifest, User user)
+            private ConfigurationClusterOptions.Bootstrap PrepareLiveBootstrap(ConfigurationManifest manifest, User user)
             {
-                if (_dnsWebService._clusterManager.ClusterInitialized || !ConfigurationClusterOptions.RequestsPrimaryBootstrap(manifest))
+                if (_dnsWebService._clusterManager.ClusterInitialized || !ConfigurationClusterOptions.RequestsBootstrap(manifest))
                     return null;
 
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, user, PermissionFlag.Delete))
@@ -1072,28 +1081,35 @@ namespace DnsServerCore
                     throw new InvalidDataException("/cluster/bootstrap: Configure web TLS before bootstrapping the node.");
 
                 ConfigurationPlan.CheckApplySupport(manifest);
-                return (ConfigurationClusterOptions.PrimaryBootstrap)ConfigurationClusterOptions.PrepareStartupBootstrap(
+                return ConfigurationClusterOptions.PrepareBootstrap(
                     manifest, _dnsWebService._clusterManager, user);
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers = null, ConfigurationStaticSessions.Candidate preparedStaticSessions = null, ConfigurationSso.Settings preparedSso = null, ConfigurationApplications.Entry[] preparedApps = null)
+            private string ProtectBootstrapSecret(string secret) => secret is null ? null :
+                Convert.ToHexString(HMACSHA256.HashData(_configurationRevisionKey, Encoding.UTF8.GetBytes(secret)));
+
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers = null, ConfigurationStaticSessions.Candidate preparedStaticSessions = null, ConfigurationSso.Settings preparedSso = null, ConfigurationApplications.Entry[] preparedApps = null, ConfigurationClusterOptions.Bootstrap preparedBootstrap = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
-                    if (PrepareLivePrimaryBootstrap(manifest, sessionUser) is { } bootstrap)
+                    if ((preparedBootstrap ?? PrepareLiveBootstrap(manifest, sessionUser)) is { } bootstrap)
                     {
-                        var records = _dnsWebService._clusterManager.PrepareLivePrimaryBootstrap(bootstrap);
+                        var records = bootstrap is ConfigurationClusterOptions.PrimaryBootstrap primary
+                            ? _dnsWebService._clusterManager.PrepareLivePrimaryBootstrap(primary) : [];
+                        var secondary = bootstrap as ConfigurationClusterOptions.SecondaryBootstrap;
                         writer.WritePropertyName("manifestClusterOptions");
                         JsonSerializer.Serialize(writer, new
                         {
-                            primaryBootstrap = bootstrap.Domain,
+                            bootstrap = bootstrap.Domain,
                             actor = sessionUser.Username,
                             tlsPort = _dnsWebService.WebServiceTlsPort,
                             certificate = _dnsWebService.WebServiceTlsCertificate.Thumbprint,
-                            records = records.Select(record => new { record.Zone, record.Owner, record.Revision })
+                            records = records.Select(record => new { record.Zone, record.Owner, record.Revision }),
+                            password = ProtectBootstrapSecret(secondary?.Password),
+                            totp = ProtectBootstrapSecret(secondary?.Totp)
                         });
                     }
                     else if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0))

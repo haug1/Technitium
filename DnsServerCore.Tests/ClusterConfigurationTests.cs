@@ -213,6 +213,89 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LiveSecondaryJoinRejectsChangedSecretsAndVerifiesPrimaryDomain()
+        {
+            await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
+            await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true);
+            JsonElement initialized = await primary.CallAsync(
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", primary.AdminToken);
+            LoopbackWebService.AssertOk(initialized);
+            string primaryUrl = Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray())
+                .GetProperty("url").GetString()!;
+            const string secretName = "TECHNITIUM_TEST_LIVE_CLUSTER_JOIN";
+            string? previousSecret = Environment.GetEnvironmentVariable(secretName);
+            try
+            {
+                Environment.SetEnvironmentVariable(secretName, primary.AdminPassword);
+                string manifest = Manifest("cluster.test");
+                string revision = await PreviewAsync(manifest);
+                Environment.SetEnvironmentVariable(secretName, "changed");
+                JsonElement stale = await ApplyAsync(manifest, revision);
+                Assert.Equal("error", stale.GetProperty("status").GetString());
+                Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+
+                Environment.SetEnvironmentVariable(secretName, primary.AdminPassword);
+                string wrongDomain = Manifest("wrong.test");
+                JsonElement rejected = await ApplyAsync(wrongDomain, await PreviewAsync(wrongDomain));
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/cluster/domain", rejected.GetProperty("errorMessage").GetString());
+                JsonElement state = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+                LoopbackWebService.AssertOk(state);
+                Assert.Single(state.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
+
+                LoopbackWebService.AssertOk(await ApplyAsync(manifest, await PreviewAsync(manifest)));
+                string token = await secondary.LoginAsync("admin", primary.AdminPassword);
+                state = await secondary.CallAsync("admin/cluster/state", token);
+                LoopbackWebService.AssertOk(state);
+                Assert.Contains(state.GetProperty("response").GetProperty("clusterNodes").EnumerateArray(), node =>
+                    node.GetProperty("state").ValueEquals("Self") && node.GetProperty("type").ValueEquals("Secondary"));
+                Assert.Contains(state.GetProperty("response").GetProperty("managedOptionPaths").EnumerateArray(),
+                    path => path.ValueEquals("/cluster/node/addresses"));
+                Environment.SetEnvironmentVariable(secretName, null);
+                using var repeatBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement repeat = await secondary.CallAsync("settings/config/plan", token, repeatBody);
+                LoopbackWebService.AssertOk(repeat);
+                Assert.Empty(repeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(secretName, previousSecret);
+            }
+
+            string Manifest(string domain) => JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                cluster = new
+                {
+                    domain,
+                    bootstrap = new
+                    {
+                        role = "Secondary", primaryUrl, primaryAddress = "127.0.0.1", username = "admin",
+                        password = new { environment = secretName }, ignoreCertificateErrors = true
+                    },
+                    node = new { addresses = new[] { "127.0.0.1" } }
+                }
+            });
+
+            async Task<string> PreviewAsync(string manifest)
+            {
+                using var body = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement preview = await secondary.CallAsync("settings/config/plan", secondary.AdminToken, body);
+                LoopbackWebService.AssertOk(preview);
+                JsonElement plan = preview.GetProperty("response");
+                Assert.Contains(plan.GetProperty("changes").EnumerateArray(), change =>
+                    change.GetProperty("path").ValueEquals("/cluster/bootstrap") && change.GetProperty("kind").ValueEquals("Add"));
+                return plan.GetProperty("revision").GetString()!;
+            }
+
+            async Task<JsonElement> ApplyAsync(string manifest, string revision)
+            {
+                using var body = new StringContent(manifest, Encoding.UTF8, "application/json");
+                return await secondary.CallAsync("settings/config/apply", secondary.AdminToken, body, revision);
+            }
+        }
+
+        [Fact]
         public async Task StartupJoinChecksPrimaryDomainAndKeepsMembershipWithoutTheJoinSecret()
         {
             await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
@@ -353,7 +436,7 @@ namespace DnsServerCore.Tests
                 """;
             JsonElement uninitialized = await PlanAsync(secondary, secondary.AdminToken, secondaryTopology);
             Assert.Equal("error", uninitialized.GetProperty("status").GetString());
-            Assert.Contains("Initialize or join", uninitialized.GetProperty("errorMessage").GetString());
+            Assert.Contains("/cluster/node/addresses", uninitialized.GetProperty("errorMessage").GetString());
 
             using var form = new FormUrlEncodedContent([
                 new("secondaryNodeIpAddresses", "127.0.0.1"),

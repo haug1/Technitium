@@ -540,7 +540,7 @@ namespace DnsServerCore.Cluster
                 throw new DnsServerException("Failed to initialize Cluster: specify between 1 and 255 Primary node IP addresses.");
 
             string clusterDomain = ConfigurationManifest.CanonicalDnsName(domain, "/cluster/domain", allowRoot: false);
-            _dnsWebService.DnsServer.CheckManifestServerDomain(GetPrimaryNodeName(clusterDomain));
+            _dnsWebService.DnsServer.CheckManifestServerDomain(GetBootstrapNodeName(clusterDomain));
             string catalogDomain = ConfigurationManifest.CanonicalDnsName("cluster-catalog." + clusterDomain, "/cluster/domain", allowRoot: false);
             var zones = _dnsWebService.DnsServer.AuthZoneManager;
             CheckZone(clusterDomain, AuthZoneType.Primary);
@@ -557,7 +557,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private string GetPrimaryNodeName(string clusterDomain)
+        private string GetBootstrapNodeName(string clusterDomain)
         {
             string serverDomain = _dnsWebService.DnsServer.ServerDomain;
             if (serverDomain.EndsWith("." + clusterDomain, StringComparison.OrdinalIgnoreCase))
@@ -573,7 +573,7 @@ namespace DnsServerCore.Cluster
                 throw new InvalidOperationException();
 
             //create self node
-            string serverDomain = GetPrimaryNodeName(clusterDomain);
+            string serverDomain = GetBootstrapNodeName(clusterDomain);
             Uri primaryNodeUrl = new Uri($"https://{serverDomain}:{_dnsWebService.WebServiceTlsPort}/");
 
             ClusterNode selfPrimaryNode = new ClusterNode(this, RandomNumberGenerator.GetInt32(int.MaxValue), primaryNodeUrl, primaryNodeIpAddresses, ClusterNodeType.Primary, ClusterNodeState.Self);
@@ -1640,6 +1640,15 @@ namespace DnsServerCore.Cluster
         #endregion
 
         #region secondary node
+
+        internal void CheckSecondaryBootstrap(string domain)
+        {
+            var dns = _dnsWebService.DnsServer;
+            dns.CheckManifestServerDomain(GetBootstrapNodeName(domain));
+            if (dns.AuthZoneManager.GetAuthZoneInfo(domain) is not null ||
+                dns.AuthZoneManager.GetAuthZoneInfo("cluster-catalog." + domain) is not null)
+                throw new InvalidDataException("/cluster/domain: The cluster or catalog zone already exists on this node.");
+        }
 
         public async Task InitializeAndJoinClusterAsync(IReadOnlyList<IPAddress> secondaryNodeIpAddresses, Uri primaryNodeUrl, string primaryNodeUsername, string primaryNodePassword, string primaryNodeTotp = null, IReadOnlyList<IPAddress> primaryNodeIpAddresses = null, bool ignoreCertificateErrors = false, CancellationToken cancellationToken = default, string expectedDomain = null)
         {
