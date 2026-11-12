@@ -5068,14 +5068,22 @@ namespace DnsServerCore.Tests
             do
             {
                 member = await replica.CallAsync("zones/options/get?zone=relay-member.test", replica.AdminToken);
-                if (member.GetProperty("status").ValueEquals("ok"))
+                if (member.GetProperty("status").ValueEquals("ok") &&
+                    member.GetProperty("response").GetProperty("overrideCatalogPrimaryNameServers").GetBoolean())
                     break;
                 await Task.Delay(250);
             }
             while (DateTime.UtcNow < deadline);
             LoopbackWebService.AssertOk(member);
-            Assert.Equal(upstream.EndPoint.ToString(), Assert.Single(member.GetProperty("response")
-                .GetProperty("primaryNameServerAddresses").EnumerateArray()).GetString());
+            JsonElement options = member.GetProperty("response");
+            Assert.True(options.GetProperty("overrideCatalogPrimaryNameServers").GetBoolean());
+            Assert.Equal(upstream.EndPoint.ToString(), Assert.Single(options.GetProperty("primaryNameServerAddresses").EnumerateArray()).GetString());
+
+            JsonElement replicaExport = await replica.CallAsync("settings/config/export", replica.AdminToken);
+            LoopbackWebService.AssertOk(replicaExport);
+            JsonElement replicaZones = replicaExport.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            Assert.True(replicaZones.TryGetProperty("relay-catalog.test", out _));
+            Assert.False(replicaZones.TryGetProperty("relay-member.test", out _));
         }
 
         [Fact]
