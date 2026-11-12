@@ -723,14 +723,14 @@ namespace DnsServerCore.Cluster
             _managedOptionNames = bootstrap.Ownership;
         }
 
-        internal AddressRecordChange[] PrepareLivePrimaryBootstrap(ConfigurationClusterOptions.PrimaryBootstrap bootstrap)
+        internal ClusterRecordChange[] PrepareLivePrimaryBootstrap(ConfigurationClusterOptions.PrimaryBootstrap bootstrap)
         {
             var zones = _dnsWebService.DnsServer.AuthZoneManager;
             if (zones.GetAuthZoneInfo(bootstrap.Domain) is not null ||
                 zones.GetAuthZoneInfo("cluster-catalog." + bootstrap.Domain) is not null)
                 throw new InvalidDataException("/cluster/bootstrap: Use startup bootstrap to adopt existing cluster zones.");
 
-            var reverseRecords = new List<AddressRecordChange>();
+            var reverseRecords = new List<ClusterRecordChange>();
             foreach (IPAddress address in bootstrap.Addresses)
             {
                 string owner = Zone.GetReverseZone(address, address.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
@@ -739,7 +739,7 @@ namespace DnsServerCore.Cluster
                     continue;
 
                 zones.CheckManifestZoneRecords(reverse.Name);
-                reverseRecords.Add(new AddressRecordChange(reverse.Name, owner, DnsResourceRecordType.PTR,
+                reverseRecords.Add(new ClusterRecordChange(reverse.Name, owner, DnsResourceRecordType.PTR,
                     zones.GetRecords(reverse.Name, owner, DnsResourceRecordType.PTR).ToArray(), [], reverse.LastModified));
             }
 
@@ -747,7 +747,7 @@ namespace DnsServerCore.Cluster
         }
 
         internal void InitializeLivePrimaryFromManifest(ConfigurationClusterOptions.PrimaryBootstrap bootstrap, User actor,
-            AddressRecordChange[] reverseRecords)
+            ClusterRecordChange[] reverseRecords)
         {
             var dns = _dnsWebService.DnsServer;
             var zones = dns.AuthZoneManager;
@@ -794,7 +794,7 @@ namespace DnsServerCore.Cluster
                     }
                     zones.DeleteZone(bootstrap.Domain);
                     zones.DeleteZone(catalog);
-                    foreach (AddressRecordChange record in reverseRecords)
+                    foreach (ClusterRecordChange record in reverseRecords)
                     {
                         if (record.Previous.Count == 0)
                             zones.DeleteRecords(record.Zone, record.Owner, record.Type);
@@ -1159,20 +1159,53 @@ namespace DnsServerCore.Cluster
 
         }
 
-        internal sealed record AddressRecordChange(string Zone, string Owner, DnsResourceRecordType Type,
+        internal sealed record ClusterRecordChange(string Zone, string Owner, DnsResourceRecordType Type,
             IReadOnlyList<DnsResourceRecord> Previous, IReadOnlyList<DnsResourceRecord> Desired, DateTime Revision);
 
-        internal AddressRecordChange[] PreparePrimaryAddressRecords(ClusterNode self, IReadOnlyList<IPAddress> desired)
+        internal ClusterRecordChange[] PreparePrimaryNodeRecords(ClusterNode self, IReadOnlyList<IPAddress> desired, Uri endpoint)
         {
+            bool addressesChanged = !ConfigurationClusterOptions.SameAddresses(self.IPAddresses, desired);
+            bool portChanged = self.Url.Port != endpoint.Port;
+            if (!addressesChanged && !portChanged)
+                return [];
+
             var zones = _dnsWebService.DnsServer.AuthZoneManager;
             AuthZoneInfo zone = zones.GetAuthZoneInfo(_clusterDomain);
             if (zone?.Type != AuthZoneType.Primary || zones.GetRecords(zone.Name, self.Name, DnsResourceRecordType.CNAME).Count != 0)
-                throw new InvalidDataException("/cluster/node/addresses: The Primary zone must contain an addressable node name.");
+                throw new InvalidDataException("/cluster: The Primary zone must contain an addressable node name.");
 
             FindExistingRecordTtlValues(out _, out uint ttl);
-            var changes = new List<AddressRecordChange>();
-            AddForwardRecords(AddressFamily.InterNetwork, DnsResourceRecordType.A);
-            AddForwardRecords(AddressFamily.InterNetworkV6, DnsResourceRecordType.AAAA);
+            var changes = new List<ClusterRecordChange>();
+            if (addressesChanged)
+            {
+                AddForwardRecords(AddressFamily.InterNetwork, DnsResourceRecordType.A);
+                AddForwardRecords(AddressFamily.InterNetworkV6, DnsResourceRecordType.AAAA);
+            }
+
+            if (portChanged)
+            {
+                X509Certificate2 certificate = _dnsWebService.WebServiceTlsCertificate;
+                if (certificate is null)
+                    throw new InvalidDataException("/web/tlsPort: Cluster HTTPS requires a certificate.");
+
+                var association = new DnsTLSARecordData(DnsTLSACertificateUsage.DANE_EE, DnsTLSASelector.SPKI,
+                    DnsTLSAMatchingType.SHA2_256, certificate);
+                SetEndpointRecord(self.Url.Port, false);
+                SetEndpointRecord(endpoint.Port, true);
+
+                void SetEndpointRecord(int port, bool wanted)
+                {
+                    string owner = $"_{port}._tcp.{self.Name}";
+                    IReadOnlyList<DnsResourceRecord> current = zones.GetRecords(zone.Name, owner, DnsResourceRecordType.TLSA);
+                    if (wanted == current.Any(record => record.RDATA.Equals(association)))
+                        return;
+
+                    IReadOnlyList<DnsResourceRecord> next = wanted
+                        ? [.. current, CreateRecord(owner, DnsResourceRecordType.TLSA, current.FirstOrDefault()?.TTL ?? ttl, association)]
+                        : current.Where(record => !record.RDATA.Equals(association)).ToArray();
+                    changes.Add(new ClusterRecordChange(zone.Name, owner, DnsResourceRecordType.TLSA, current.ToArray(), next, zone.LastModified));
+                }
+            }
 
             foreach (IPAddress address in self.IPAddresses.Except(desired).Concat(desired.Except(self.IPAddresses)))
             {
@@ -1191,7 +1224,7 @@ namespace DnsServerCore.Cluster
                 IReadOnlyList<DnsResourceRecord> next = wanted
                     ? [.. current, CreateRecord(owner, DnsResourceRecordType.PTR, current.FirstOrDefault()?.TTL ?? ttl, ptr)]
                     : current.Where(record => !record.RDATA.Equals(ptr)).ToArray();
-                changes.Add(new AddressRecordChange(reverse.Name, owner, DnsResourceRecordType.PTR, current.ToArray(), next, reverse.LastModified));
+                changes.Add(new ClusterRecordChange(reverse.Name, owner, DnsResourceRecordType.PTR, current.ToArray(), next, reverse.LastModified));
             }
 
             return changes.ToArray();
@@ -1203,7 +1236,7 @@ namespace DnsServerCore.Cluster
                     .Select(address => CreateRecord(self.Name, type, ttl,
                         family == AddressFamily.InterNetwork ? new DnsARecordData(address) : new DnsAAAARecordData(address))).ToArray();
                 if (!current.Select(record => record.RDATA).ToHashSet().SetEquals(next.Select(record => record.RDATA)))
-                    changes.Add(new AddressRecordChange(zone.Name, self.Name, type, current.ToArray(), next, zone.LastModified));
+                    changes.Add(new ClusterRecordChange(zone.Name, self.Name, type, current.ToArray(), next, zone.LastModified));
             }
 
             static DnsResourceRecord CreateRecord(string owner, DnsResourceRecordType type, uint ttl, DnsResourceRecordData data)
@@ -1244,7 +1277,7 @@ namespace DnsServerCore.Cluster
                     throw new InvalidDataException("/cluster: Cluster options changed during apply. Create a new preview.");
 
                 var zones = _dnsWebService.DnsServer.AuthZoneManager;
-                string[] recordZones = change.AddressRecords.Select(record => record.Zone).Distinct().ToArray();
+                string[] recordZones = change.ZoneRecords.Select(record => record.Zone).Distinct().ToArray();
                 int appliedRecords = 0;
                 try
                 {
@@ -1253,12 +1286,12 @@ namespace DnsServerCore.Cluster
                         if (change.ValuesChanged && !CheckDeclarativeIntervalPeers().SequenceEqual(change.IntervalPeers))
                             throw new InvalidDataException("/cluster: Cluster membership changed during apply. Create a new preview.");
 
-                        foreach (AddressRecordChange record in change.AddressRecords)
+                        foreach (ClusterRecordChange record in change.ZoneRecords)
                         {
                             if (zones.GetAuthZoneInfo(record.Zone)?.LastModified != record.Revision)
-                                throw new InvalidDataException("/cluster/node/addresses: An affected zone changed during apply. Create a new preview.");
+                                throw new InvalidDataException("/cluster: An affected zone changed during apply. Create a new preview.");
                         }
-                        foreach (AddressRecordChange record in change.AddressRecords)
+                        foreach (ClusterRecordChange record in change.ZoneRecords)
                         {
                             appliedRecords++;
                             ReplaceRecords(record, record.Desired);
@@ -1276,14 +1309,14 @@ namespace DnsServerCore.Cluster
                 {
                     for (int index = appliedRecords - 1; index >= 0; index--)
                     {
-                        AddressRecordChange record = change.AddressRecords[index];
+                        ClusterRecordChange record = change.ZoneRecords[index];
                         ReplaceRecords(record, record.Previous);
                         zones.SaveZoneFile(record.Zone);
                     }
                     throw;
                 }
 
-                void ReplaceRecords(AddressRecordChange record, IReadOnlyList<DnsResourceRecord> values)
+                void ReplaceRecords(ClusterRecordChange record, IReadOnlyList<DnsResourceRecord> values)
                 {
                     if (values.Count == 0)
                         zones.DeleteRecords(record.Zone, record.Owner, record.Type);
@@ -1302,7 +1335,7 @@ namespace DnsServerCore.Cluster
 
             if (change.ValuesChanged)
                 UpdateHeartbeatTimerForAllClusterNodes();
-            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged || change.OwnershipChanged))
+            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged || change.EndpointChanged || change.OwnershipChanged))
                 TriggerNotifyAllSecondaryNodes();
             else if (change.AddressesChanged || change.EndpointChanged)
                 TriggerClusterUpdateForSecondaryNodeChanges();
@@ -2007,6 +2040,7 @@ namespace DnsServerCore.Cluster
                 throw new DnsServerException($"Failed to update Primary node: the Cluster Secondary Catalog zone '{clusterCatalogDomain}' does not exists.");
 
             //update primary node
+            bool httpsPortChanged = primaryNode.Url.Port != primaryNodeUrl.Port;
             primaryNode.UpdateNode(primaryNodeUrl, primaryNodeIpAddresses);
 
             //update cluster catalog zone's primary name server
@@ -2032,6 +2066,10 @@ namespace DnsServerCore.Cluster
             //save all changes
             _dnsWebService.DnsServer.AuthZoneManager.SaveZoneFile(clusterSecondaryCatalogZoneInfo.Name);
             SaveConfigFile();
+
+            // A new HTTPS port needs its TLSA record before the next authenticated sync.
+            if (httpsPortChanged && _dnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(_clusterDomain) is { Type: AuthZoneType.Secondary } clusterZone)
+                clusterZone.TriggerResync();
 
             //trigger config and zone refresh
             _ = InitializeConfigRefreshAsync(CONFIG_REFRESH_TIMER_INTERVAL);

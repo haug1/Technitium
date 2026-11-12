@@ -246,6 +246,32 @@ def verify_propagation(primary, secondary, graceful):
         return state["configRefreshIntervalSeconds"] == 120 and state["configRetryIntervalSeconds"] == 30
 
     wait_for(secondary_interval_updated, "the Secondary to receive the 120-second interval")
+    new_primary_tls_port = allocate_ports()[0]
+    primary_certificate = ssl.get_server_certificate(("127.0.0.1", primary.tls_port), timeout=5)
+    primary_move = {"schemaVersion": 1, "web": {"tlsPort": new_primary_tls_port},
+                    "cluster": {"configRefreshSeconds": 125, "configRetrySeconds": 30}}
+    plan = ok(primary.call("settings/config/plan", manifest=primary_move))
+    operation = ok(primary.call("settings/config/apply", manifest=primary_move, revision=plan["revision"]))["operationId"]
+
+    def primary_rebound():
+        try:
+            status = ok(primary.call(f"settings/config/status?operationId={operation}"))
+        except (urllib.error.URLError, TimeoutError):
+            return False
+        if status["state"] == "failed":
+            raise RuntimeError(status)
+        return status["state"] == "applied"
+
+    wait_for(primary_rebound, "the Primary HTTPS listener to rebind")
+    assert ssl.get_server_certificate(("127.0.0.1", new_primary_tls_port), timeout=5) == primary_certificate
+
+    def secondary_reconnected():
+        state = ok(secondary.call("admin/cluster/state"))
+        node, = (node for node in state["clusterNodes"] if node["type"] == "Primary")
+        return urllib.parse.urlsplit(node["url"]).port == new_primary_tls_port and state["configRefreshIntervalSeconds"] == 125
+
+    wait_for(secondary_reconnected, "the Secondary to authenticate and sync from the new Primary HTTPS port")
+
     def publication_failures():
         return sum(log.read_text(encoding="utf-8").count(
             "DNS Server failed to update this Secondary node's details on the Primary node.")
@@ -290,7 +316,7 @@ def verify_propagation(primary, secondary, graceful):
 
 
 def assert_promoted_policy(state):
-    assert state["configRefreshIntervalSeconds"] == 120, state
+    assert state["configRefreshIntervalSeconds"] == 125, state
     assert state["configRetryIntervalSeconds"] == 30, state
     assert set(state["managedOptionPaths"]) == {
         "/cluster/configRefreshSeconds", "/cluster/configRetrySeconds", "/cluster/node/addresses",

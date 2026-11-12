@@ -16,7 +16,7 @@ namespace DnsServerCore.Configuration
         internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.AddressRecordChange[] AddressRecords, int[] IntervalPeers, Uri CurrentUrl, Uri DesiredUrl)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.ClusterRecordChange[] ZoneRecords, int[] IntervalPeers, Uri CurrentUrl, Uri DesiredUrl)
         {
             internal bool ValuesChanged => Current != Desired;
             internal bool EndpointChanged => CurrentUrl != DesiredUrl;
@@ -140,13 +140,13 @@ namespace DnsServerCore.Configuration
         private static string[] GetDeclaredIntervals(JsonElement section) => section.ValueKind == JsonValueKind.Object
             ? section.EnumerateObject().Select(field => field.Name).Where(IsInterval).Order(StringComparer.Ordinal).ToArray() : [];
 
-        internal static bool ChangesSecondaryWebEndpoint(ConfigurationManifest manifest, ClusterManager cluster) =>
+        internal static bool ChangesWebEndpoint(ConfigurationManifest manifest, ClusterManager cluster) =>
             cluster.ClusterInitialized && ConfigurationPlan.GetWebListeners(manifest).TlsPort is int port &&
-            cluster.GetSelfNode() is { Type: ClusterNodeType.Secondary } node && node.Url.Port != port;
+            cluster.GetSelfNode().Url.Port != port;
 
         internal static Candidate? Prepare(ConfigurationManifest manifest, ClusterManager cluster)
         {
-            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0 && !ChangesSecondaryWebEndpoint(manifest, cluster)))
+            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0 && !ChangesWebEndpoint(manifest, cluster)))
                 return null;
 
             bool declared = manifest.Settings.TryGetProperty("cluster", out JsonElement section);
@@ -188,13 +188,13 @@ namespace DnsServerCore.Configuration
 
             string[] ownership = addresses is not null ? [.. intervals, AddressName] : intervals;
             Settings current = cluster.GetManifestOptions();
-            var records = addresses is not null && self.Type == ClusterNodeType.Primary && !SameAddresses(currentAddresses, addresses)
-                ? cluster.PreparePrimaryAddressRecords(self, addresses) : [];
             Settings desired = ReadOptions(section, current);
             int[] peers = current != desired ? cluster.CheckDeclarativeIntervalPeers() : [];
             Uri endpoint = self.Url;
-            if (ChangesSecondaryWebEndpoint(manifest, cluster))
+            if (ChangesWebEndpoint(manifest, cluster))
                 endpoint = ClusterNode.ValidateSelfNodeUrl(new UriBuilder(self.Url) { Port = ConfigurationPlan.GetWebListeners(manifest).TlsPort.Value }.Uri);
+            var records = self.Type == ClusterNodeType.Primary
+                ? cluster.PreparePrimaryNodeRecords(self, addresses ?? currentAddresses, endpoint) : [];
             return new Candidate(current, desired, self.Id, self.Type, currentOwnership, ownership,
                 currentAddresses, addresses ?? currentAddresses, records, peers, self.Url, endpoint);
         }
@@ -277,8 +277,8 @@ namespace DnsServerCore.Configuration
             writer.WritePropertyName("currentAddresses");
             JsonSerializer.Serialize(writer, candidate.CurrentAddresses.Select(address => address.ToString()).Order(StringComparer.Ordinal));
             writer.WriteBoolean("addressesChanged", candidate.AddressesChanged);
-            writer.WritePropertyName("addressRecordRevisions");
-            JsonSerializer.Serialize(writer, candidate.AddressRecords.Select(record => new { record.Zone, record.Owner, record.Type, record.Revision }));
+            writer.WritePropertyName("zoneRecordRevisions");
+            JsonSerializer.Serialize(writer, candidate.ZoneRecords.Select(record => new { record.Zone, record.Owner, record.Type, record.Revision }));
             writer.WritePropertyName("intervalPeers");
             JsonSerializer.Serialize(writer, candidate.IntervalPeers);
             writer.WritePropertyName("currentOwnership");
