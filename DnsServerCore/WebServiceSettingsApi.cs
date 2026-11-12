@@ -1028,16 +1028,14 @@ namespace DnsServerCore
 
                         if (request.TryQueryOrFormArray("webServiceLocalAddresses", IPAddress.Parse, out IPAddress[] webServiceLocalAddresses))
                         {
-                            if (webServiceLocalAddresses.Length == 0)
-                                webServiceLocalAddresses = [IPAddress.Any, IPAddress.IPv6Any];
-
-                            if (!_dnsWebService._webServiceLocalAddresses.HasSameItems(webServiceLocalAddresses))
+                            IReadOnlyList<IPAddress> normalizedAddresses = NormalizeWebLocalAddresses(webServiceLocalAddresses);
+                            if (!_dnsWebService._webServiceLocalAddresses.HasSameItems(normalizedAddresses))
                             {
                                 webServiceLocalAddressesChanged = true;
                                 restartWebService = true;
                             }
 
-                            _dnsWebService._webServiceLocalAddresses = WebUtilities.GetValidKestrelLocalAddresses(webServiceLocalAddresses);
+                            _dnsWebService._webServiceLocalAddresses = normalizedAddresses;
                         }
 
                         if (request.TryGetQueryOrForm("webServiceHttpPort", int.Parse, out int webServiceHttpPort))

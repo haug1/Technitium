@@ -29,6 +29,7 @@ namespace DnsServerCore.Configuration
             Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false, bool CanApply = false);
 
         private const string DnsEndpointsPath = "/dns/localEndpoints";
+        private const string WebAddressesPath = "/web/localAddresses";
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
@@ -44,6 +45,7 @@ namespace DnsServerCore.Configuration
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232),
+            [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true),
             ["/logging/destination"] = Field("loggingType", "File", canApply: true),
@@ -176,6 +178,9 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 JsonElement value = GetCurrentSetting(currentSettings, path, setting);
+                if (path == WebAddressesPath)
+                    value = JsonSerializer.SerializeToElement(ReadWebAddresses(value).Select(address => address.ToString()).ToArray());
+
                 string[] components = path[1..].Split('/');
                 JsonObject section = manifest;
                 for (int i = 0; i < components.Length - 1; i++)
@@ -223,11 +228,20 @@ namespace DnsServerCore.Configuration
                         candidate = JsonSerializer.SerializeToElement(GetManifestLogFolder(desired, log));
                         current = JsonSerializer.SerializeToElement(log.NormalizeLogFolder(current.GetString()));
                     }
+                    else if (path == WebAddressesPath)
+                    {
+                        IReadOnlyList<IPAddress> addresses = DnsWebService.NormalizeWebLocalAddresses(ReadWebAddresses(desired));
+                        if (addresses.Count == 0)
+                            throw new InvalidDataException("/web/localAddresses: No declared address family is available on this server.");
+
+                        candidate = SortAddresses(addresses.Select(address => address.ToString()));
+                        current = SortAddresses(ReadWebAddresses(current).Select(address => address.ToString()));
+                    }
                     else if (path == DnsEndpointsPath)
                     {
                         var endpoints = ConfigurationManifest.ReadDnsLocalEndPoints(desired);
-                        candidate = SortEndpoints(endpoints.Select(endpoint => endpoint.ToString()));
-                        current = SortEndpoints(current.EnumerateArray().Select(endpoint => endpoint.GetString()));
+                        candidate = SortAddresses(endpoints.Select(endpoint => endpoint.ToString()));
+                        current = SortAddresses(current.EnumerateArray().Select(endpoint => endpoint.GetString()));
                     }
                     else
                     {
@@ -260,7 +274,14 @@ namespace DnsServerCore.Configuration
             throw new InvalidDataException($"{JsonEncodedText.Encode(path)}: Planning for this setting is not implemented.");
         }
 
-        private static JsonElement SortEndpoints(IEnumerable<string> endpoints)
+        private static IPAddress[] ReadWebAddresses(JsonElement value)
+        {
+            return value.ValueKind == JsonValueKind.Null
+                ? Array.Empty<IPAddress>()
+                : value.EnumerateArray().Select(item => IPAddress.Parse(item.GetString())).ToArray();
+        }
+
+        private static JsonElement SortAddresses(IEnumerable<string> endpoints)
         {
             return JsonSerializer.SerializeToElement(endpoints.OrderBy(endpoint => endpoint, StringComparer.Ordinal).ToArray());
         }

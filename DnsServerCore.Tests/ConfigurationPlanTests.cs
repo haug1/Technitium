@@ -64,6 +64,23 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task WebAddressPreviewUsesEffectiveBindingsAndReportsRestarts()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string equivalent = """{"schemaVersion":1,"web":{"localAddresses":["0.0.0.0","127.0.0.1","127.0.0.1"]}}""";
+            Assert.Empty((await PreviewAsync(server, equivalent)).GetProperty("changes").EnumerateArray());
+
+            const string defaults = """{"schemaVersion":1,"web":{"localAddresses":null}}""";
+            JsonElement change = Assert.Single((await PreviewAsync(server, defaults)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("/web/localAddresses", change.GetProperty("path").GetString());
+            Assert.True(change.GetProperty("restartWebService").GetBoolean());
+            Assert.False(change.GetProperty("restartDnsService").GetBoolean());
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal("127.0.0.1", Assert.Single(settings.GetProperty("webServiceLocalAddresses").EnumerateArray()).GetString());
+        }
+
+        [Fact]
         public void DnsListenerValidationUsesSettingsDefaultsAndRejectsInvalidEndpoints()
         {
             using var snapshot = JsonDocument.Parse("""{"dnsServerLocalEndPoints":["0.0.0.0:53","[::]:53"]}""");
@@ -449,6 +466,11 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain("fixture-secret", exported);
             Assert.False(JsonNode.Parse(exported)!["blocklists"]!.AsObject().ContainsKey("sources"));
             Assert.Empty(ConfigurationPlan.Create(Load(exported), current));
+
+            snapshot["webServiceLocalAddresses"] = new JsonArray("[::1]");
+            string ipv6Export = ConfigurationPlan.Export(JsonSerializer.SerializeToElement(snapshot)).ToJsonString();
+            ConfigurationManifest ipv6Manifest = Load(ipv6Export);
+            Assert.Equal("::1", ipv6Manifest.Settings.GetProperty("web").GetProperty("localAddresses")[0].GetString());
         }
 
         [Fact]

@@ -1655,6 +1655,11 @@ namespace DnsServerCore
 
         #region web service
 
+        internal static IReadOnlyList<IPAddress> NormalizeWebLocalAddresses(IReadOnlyList<IPAddress> addresses)
+        {
+            return WebUtilities.GetValidKestrelLocalAddresses(addresses.Count == 0 ? [IPAddress.Any, IPAddress.IPv6Any] : addresses);
+        }
+
         private async Task TryStartWebServiceAsync(IReadOnlyList<IPAddress> oldWebServiceLocalAddresses, int oldWebServiceHttpPort, int oldWebServiceTlsPort)
         {
             try
