@@ -1263,10 +1263,10 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(_catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
 
-                    bW.Write((byte)_queryAccess);
-                    WriteNetworkACLTo(_queryAccessNetworkACL, bW);
+                    bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
+                    WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);
 
-                    WriteNameServerAddressesTo(_primaryNameServerAddresses, bW);
+                    WriteNameServerAddressesTo(primary.Servers ?? _primaryNameServerAddresses, bW);
 
                     bW.BaseStream.WriteDateTime(_expiry);
                     break;
@@ -1297,15 +1297,15 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(_catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
 
-                    bW.Write((byte)_queryAccess);
-                    WriteNetworkACLTo(_queryAccessNetworkACL, bW);
+                    bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
+                    WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);
 
-                    bW.Write((byte)_update);
-                    WriteNetworkACLTo(_updateNetworkACL, bW);
+                    bW.Write((byte)(policies.Update ?? _update));
+                    WriteNetworkACLTo(policies.UpdateAcl ?? _updateNetworkACL, bW);
 
-                    WriteNameServerAddressesTo(_primaryNameServerAddresses, bW);
-                    bW.Write((byte)_primaryZoneTransferProtocol);
-                    bW.Write(_primaryZoneTransferTsigKeyName ?? "");
+                    WriteNameServerAddressesTo(primary.Servers ?? _primaryNameServerAddresses, bW);
+                    bW.Write((byte)(primary.Protocol ?? _primaryZoneTransferProtocol));
+                    bW.Write(primary.TsigKey ?? _primaryZoneTransferTsigKeyName ?? "");
 
                     bW.BaseStream.WriteDateTime(_expiry);
                     break;

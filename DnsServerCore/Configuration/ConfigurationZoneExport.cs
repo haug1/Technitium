@@ -28,7 +28,7 @@ namespace DnsServerCore.Configuration
                 string path = ConfigurationPlan.AppendPath("/zones", name);
                 if (isClusterInfrastructure(zone.Name) ||
                     (zone.ApexZone is not (PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } or ForwarderZone) &&
-                        zone.Type != AuthZoneType.Secondary) ||
+                        !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
                     zone.CatalogZoneName is not null)
                 {
                     missingInputs.Add(path);
@@ -55,15 +55,23 @@ namespace DnsServerCore.Configuration
                     declaration["transfer"].AsObject().Remove("tsigKeys");
                     missingInputs.Add(path + "/transfer/tsigKeys");
                 }
-                if (zone.Type == AuthZoneType.Secondary)
+                if (ConfigurationZonePrimary.IsReplicated(zone.Type))
                 {
                     var primary = ConfigurationZonePrimary.Export(zone);
-                    if (zone.PrimaryZoneTransferTsigKeyName is { Length: > 0 } key && dns.TsigKeys?.ContainsKey(key) != true)
+                    if (zone.Type != AuthZoneType.Stub && zone.PrimaryZoneTransferTsigKeyName is { Length: > 0 } key &&
+                        dns.TsigKeys?.ContainsKey(key) != true)
                     {
                         primary.Remove("tsigKey");
                         missingInputs.Add(path + "/primary/tsigKey");
                     }
                     declaration["primary"] = primary;
+                    if (zone.Type is AuthZoneType.Stub or AuthZoneType.SecondaryForwarder)
+                    {
+                        declaration.Remove("transfer");
+                        declaration.Remove("notify");
+                    }
+                    if (zone.Type == AuthZoneType.Stub)
+                        declaration.Remove("updates");
                 }
                 else if (zone.UpdateSecurityPolicies?.Keys.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                     missingInputs.Add(path + "/updates/securityPolicies");
@@ -73,7 +81,7 @@ namespace DnsServerCore.Configuration
                 if (getPermission?.Invoke(zone.Name) is Permission permission)
                     declaration["permissions"] = ConfigurationPermissions.ExportGrants(permission);
 
-                if (zone.Type != AuthZoneType.Secondary)
+                if (!ConfigurationZonePrimary.IsReplicated(zone.Type))
                 {
                     var records = new List<DnsResourceRecord>();
                     dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);

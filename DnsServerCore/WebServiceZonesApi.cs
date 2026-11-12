@@ -3420,7 +3420,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 AuthZoneManager manager = _dnsWebService._dnsServer.AuthZoneManager;
-                if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Secondary)
+                if (zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder || ConfigurationZonePrimary.IsReplicated(zoneInfo.Type))
                 {
                     CheckMode("queryAccess", "query/mode", zoneInfo.QueryAccess);
                     CheckList("queryAccessNetworkACL", "query/networkAcl", zoneInfo.QueryAccessNetworkACL, NetworkAccessControl.Parse);
@@ -3432,14 +3432,17 @@ namespace DnsServerCore
                     CheckList("updateNetworkACL", "updates/networkAcl", zoneInfo.UpdateNetworkACL, NetworkAccessControl.Parse);
                 }
 
-                if (zoneInfo.Type == AuthZoneType.Secondary)
+                if (ConfigurationZonePrimary.IsReplicated(zoneInfo.Type))
                 {
-                    CheckMode("primaryZoneTransferProtocol", "primary/transferProtocol", zoneInfo.PrimaryZoneTransferProtocol);
-                    DnsTransportProtocol protocol = request.TryGetQueryOrFormEnum("primaryZoneTransferProtocol", out DnsTransportProtocol requested)
-                        ? requested : zoneInfo.PrimaryZoneTransferProtocol;
+                    bool stub = zoneInfo.Type == AuthZoneType.Stub;
+                    DnsTransportProtocol previous = stub ? DnsTransportProtocol.Udp : zoneInfo.PrimaryZoneTransferProtocol;
+                    if (!stub)
+                        CheckMode("primaryZoneTransferProtocol", "primary/transferProtocol", previous);
+                    DnsTransportProtocol protocol = !stub && request.TryGetQueryOrFormEnum("primaryZoneTransferProtocol", out DnsTransportProtocol requested)
+                        ? requested : previous;
                     if (Owns("primary/servers"))
                     {
-                        if (protocol != zoneInfo.PrimaryZoneTransferProtocol)
+                        if (protocol != previous)
                             Reject("primary/servers");
                         CheckList("primaryNameServerAddresses", "primary/servers", zoneInfo.PrimaryNameServerAddresses,
                             address => ConfigurationZonePrimary.ParseAddress(address, protocol, AuthZoneManager.GetManifestZonePath(zoneInfo.Name) + "/primary/servers"));

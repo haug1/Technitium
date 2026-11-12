@@ -5,6 +5,7 @@ using DnsServerCore.Dns.Zones;
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -4402,6 +4403,79 @@ namespace DnsServerCore.Tests
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.Contains("/zones/records.test/records", rejected.GetProperty("errorMessage").GetString());
             Assert.DoesNotContain("192.0.2.", rejected.GetRawText());
+        }
+
+        [Fact]
+        public async Task StubAndSecondaryForwarderExportsPreserveTheirUpstreamSettings()
+        {
+            await using var upstream = new LoopbackDnsServer();
+            upstream.AddPrimaryZone("relay.test", "www.relay.test", IPAddress.Parse("192.0.2.42"));
+            await upstream.StartAsync();
+            await using var primary = await LoopbackWebService.StartAsync();
+            string source = $$$$$"""
+                {"schemaVersion":1,"zones":{"relay.test":{"type":"Forwarder","transfer":{"mode":"Allow"},"records":[
+                  {"owner":"@","type":"FWD","data":{"forwarder":{"address":"{{{{{upstream.EndPoint}}}}}","proxy":{"type":"NoProxy"}}}}
+                ]}}}
+                """;
+            await ReconcileAsync(primary, source);
+
+            await using var secondary = await LoopbackWebService.StartAsync();
+            string manifest = $$$$$"""
+                {"schemaVersion":1,"zones":{
+                  "relay.test":{"type":"SecondaryForwarder","enabled":false,"primary":{"servers":[{"address":"127.0.0.1:{{{{{primary.DnsPort}}}}}"}]}},
+                  "stub.test":{"type":"Stub","enabled":false,"primary":{"servers":[{"address":"192.0.2.53"}]},"query":{"mode":"Deny"}}
+                }}
+                """;
+            await ReconcileAsync(secondary, manifest);
+            await secondary.RestartAsync();
+            Assert.Empty((await PreviewAsync(secondary, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement export = await secondary.CallAsync("settings/config/export", secondary.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zones = export.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            JsonElement stub = zones.GetProperty("stub.test");
+            Assert.Equal("192.0.2.53", Assert.Single(stub.GetProperty("primary").GetProperty("servers").EnumerateArray()).GetProperty("address").GetString());
+            Assert.False(stub.GetProperty("primary").TryGetProperty("transferProtocol", out _));
+            JsonElement relay = zones.GetProperty("relay.test");
+            Assert.False(relay.TryGetProperty("records", out _));
+            Assert.Equal($"127.0.0.1:{primary.DnsPort}",
+                Assert.Single(relay.GetProperty("primary").GetProperty("servers").EnumerateArray()).GetProperty("address").GetString());
+            Assert.Equal("Tcp", relay.GetProperty("primary").GetProperty("transferProtocol").GetString());
+            Assert.False(relay.GetProperty("enabled").GetBoolean());
+
+            await using var destination = await LoopbackWebService.StartAsync();
+            string exported = $$"""{"schemaVersion":1,"zones":{{zones.GetRawText()}} }""";
+            await ReconcileAsync(destination, exported);
+            Assert.Empty((await PreviewAsync(destination, exported)).GetProperty("changes").EnumerateArray());
+            var enabled = JsonNode.Parse(exported)!;
+            enabled["zones"]!["relay.test"]!["enabled"] = true;
+            await ReconcileAsync(destination, enabled.ToJsonString());
+            await WaitForAnswerAsync(destination);
+            Assert.Empty((await PreviewAsync(destination, enabled.ToJsonString())).GetProperty("changes").EnumerateArray());
+
+            static async Task ReconcileAsync(LoopbackWebService server, string manifest)
+            {
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            }
+
+            static async Task WaitForAnswerAsync(LoopbackWebService server)
+            {
+                DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+                DnsDatagram result;
+                do
+                {
+                    result = await server.QueryAsync("www.relay.test", DnsResourceRecordType.A);
+                    if (result.Answer.Count != 0)
+                        break;
+                    await Task.Delay(250);
+                }
+                while (DateTime.UtcNow < deadline);
+                Assert.True(result.Answer.Count > 0, string.Join("\n",
+                    Directory.GetFiles(Path.Combine(server.ConfigurationDirectory, "logs"), "*.log")
+                        .SelectMany(File.ReadAllLines).Where(line => line.Contains("relay.test", StringComparison.Ordinal))));
+                Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(Assert.Single(result.Answer).RDATA).Address);
+            }
         }
 
         [Fact]

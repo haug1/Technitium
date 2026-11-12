@@ -82,6 +82,21 @@ namespace DnsServerCore.Dns.Zones
 
         #region static
 
+        internal static StubZone CreateUnrefreshed(DnsServer dnsServer, string name)
+        {
+            var zone = new StubZone(dnsServer, name, null);
+            zone.InitializeUnrefreshedSoa();
+            return zone;
+        }
+
+        private void InitializeUnrefreshedSoa()
+        {
+            var soa = new DnsSOARecordData(_dnsServer.ServerDomain, "invalid", 0, 300, 60, 604800, 900);
+            var record = new DnsResourceRecord(_name, DnsResourceRecordType.SOA, DnsClass.IN, 0, soa);
+            record.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
+            _entries[DnsResourceRecordType.SOA] = [record];
+        }
+
         public static async Task<StubZone> CreateAsync(DnsServer dnsServer, string name, IReadOnlyList<NameServerAddress> primaryNameServerAddresses = null, bool ignoreSoaFailure = false)
         {
             StubZone stubZone = new StubZone(dnsServer, name, primaryNameServerAddresses);
@@ -134,11 +149,7 @@ namespace DnsServerCore.Dns.Zones
                     throw;
 
                 //continue with dummy SOA
-                DnsSOARecordData soa = new DnsSOARecordData(stubZone._dnsServer.ServerDomain, "invalid", 0, 300, 60, 604800, 900);
-                DnsResourceRecord soaRecord = new DnsResourceRecord(stubZone._name, DnsResourceRecordType.SOA, DnsClass.IN, 0, soa);
-                soaRecord.GetAuthGenericRecordInfo().LastModified = DateTime.UtcNow;
-
-                stubZone._entries[DnsResourceRecordType.SOA] = [soaRecord];
+                stubZone.InitializeUnrefreshedSoa();
             }
 
             return stubZone;

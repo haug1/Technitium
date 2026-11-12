@@ -854,8 +854,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
                     ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
-                    if (zone is not null && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Secondary) || zone.CatalogZoneName is not null))
-                        throw new InvalidDataException($"{path}: Apply requires a primary, forwarder, or secondary zone outside catalogs.");
+                    if (zone is not null && ((zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) && !ConfigurationZonePrimary.IsReplicated(zone.Type)) || zone.CatalogZoneName is not null))
+                        throw new InvalidDataException($"{path}: Apply requires a supported zone outside catalogs.");
 
                     if (declaration.Value.ValueKind == JsonValueKind.Null)
                     {
@@ -962,6 +962,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                             {
                                 AuthZoneType.Forwarder => new ForwarderZone(_dnsServer, name, initializeTimers: false),
                                 AuthZoneType.Secondary => SecondaryZone.CreateUnrefreshed(_dnsServer, name),
+                                AuthZoneType.SecondaryForwarder => new SecondaryForwarderZone(_dnsServer, name, primary.Servers,
+                                    primary.Protocol ?? DnsTransportProtocol.Tcp, primary.TsigKey),
+                                AuthZoneType.Stub => StubZone.CreateUnrefreshed(_dnsServer, name),
                                 _ => new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme, initializeExpiryTimer: false)
                             };
                             created.Add(name, zone);
@@ -1102,9 +1105,18 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     live.StartRecordExpiryTimer(minExpiryTtl);
                                 live.TriggerNotify();
                             }
-                            if (!remove && (current is null || primary != default) &&
-                                (current?.ApexZone ?? created.GetValueOrDefault(name)) is SecondaryZone { Disabled: false } secondary)
-                                secondary.TriggerRefresh(0);
+                            if (!remove && (current is null || primary != default))
+                            {
+                                switch (current?.ApexZone ?? created.GetValueOrDefault(name))
+                                {
+                                    case SecondaryZone { Disabled: false } secondary:
+                                        secondary.TriggerRefresh(0);
+                                        break;
+                                    case StubZone { Disabled: false } stub:
+                                        stub.TriggerRefresh(0);
+                                        break;
+                                }
+                            }
 
                             _dnsServer.CacheZoneManager.DeleteZone(name);
                         }
