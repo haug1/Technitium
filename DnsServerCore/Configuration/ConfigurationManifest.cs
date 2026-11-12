@@ -108,6 +108,13 @@ namespace DnsServerCore.Configuration
                     if (sourceNetworks.TryGetProperty("ipv6", out JsonElement ipv6))
                         ReadNetworks(ipv6, "/dns/sourceNetworks/ipv6", AddressFamily.InterNetworkV6);
                 }
+                if (dns.TryGetProperty("listeners", out JsonElement listeners))
+                {
+                    if (listeners.TryGetProperty("reverseProxyAcl", out JsonElement acl))
+                        ReadNetworkAcl(acl, "/dns/listeners/reverseProxyAcl");
+                    if (listeners.TryGetProperty("http", out JsonElement http) && http.TryGetProperty("realIpHeader", out JsonElement header))
+                        ReadDnsRealIpHeader(header);
+                }
                 if (dns.TryGetProperty("clientSubnet", out JsonElement clientSubnet))
                 {
                     if (clientSubnet.TryGetProperty("ipv4Override", out JsonElement ipv4Override))
@@ -246,6 +253,18 @@ namespace DnsServerCore.Configuration
                 return DnsWebService.CreateDefaultReverseProxyAcl();
 
             return ReadNetworkAcl(value, "/web/reverseProxyAcl");
+        }
+
+        internal static string ReadDnsRealIpHeader(JsonElement value)
+        {
+            try
+            {
+                return DnsServer.NormalizeDnsRealIpHeader(value.GetString());
+            }
+            catch (ArgumentException)
+            {
+                throw new InvalidDataException("/dns/listeners/http/realIpHeader: Invalid HTTP header name.");
+            }
         }
 
         internal static NetworkAccessControl[] ReadNetworkAcl(JsonElement value, string path)

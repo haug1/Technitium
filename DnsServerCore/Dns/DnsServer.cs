@@ -212,7 +212,49 @@ namespace DnsServerCore.Dns
             TuningListenBacklog = 1UL << 10,
             TuningUdpSendBufferSizeKB = 1UL << 11,
             TuningUdpReceiveBufferSizeKB = 1UL << 12,
-            TuningMaxConcurrentResolutionsPerCore = 1UL << 13
+            TuningMaxConcurrentResolutionsPerCore = 1UL << 13,
+            // Bits 14–19 store the outbound proxy fields.
+            ListenerClientSubnetSource = 1UL << 20,
+            ListenerHelpRedirect = 1UL << 21,
+            ListenerRealIpHeader = 1UL << 22,
+            ListenerReverseProxyAcl = 1UL << 23
+        }
+
+        internal readonly record struct DnsListenerPolicy(bool? ClientSubnetSource, bool? HelpRedirect,
+            string RealIpHeader, IReadOnlyCollection<NetworkAccessControl> ReverseProxyAcl);
+
+        private const ManagedDnsSettingsExtension ListenerPolicyOwnership = ManagedDnsSettingsExtension.ListenerClientSubnetSource |
+            ManagedDnsSettingsExtension.ListenerHelpRedirect | ManagedDnsSettingsExtension.ListenerRealIpHeader |
+            ManagedDnsSettingsExtension.ListenerReverseProxyAcl;
+
+        internal bool HasManagedDnsListenerPolicy => (_managedDnsSettingsExtension & ListenerPolicyOwnership) != 0;
+
+        internal DnsListenerPolicy CheckManifestDnsListenerPolicy(DnsListenerPolicy policy)
+        {
+            return new DnsListenerPolicy(
+                Check(ManagedDnsSettingsExtension.ListenerClientSubnetSource, policy.ClientSubnetSource.HasValue && policy.ClientSubnetSource != _enableEDnsClientSubnetSourceAddress, "useClientSubnetAsSource") ? policy.ClientSubnetSource : null,
+                Check(ManagedDnsSettingsExtension.ListenerHelpRedirect, policy.HelpRedirect.HasValue && policy.HelpRedirect != _enableDnsOverHttpHelpRedirect, "http/helpRedirect") ? policy.HelpRedirect : null,
+                Check(ManagedDnsSettingsExtension.ListenerRealIpHeader, policy.RealIpHeader is not null && !string.Equals(policy.RealIpHeader, _dnsOverHttpRealIpHeader, StringComparison.OrdinalIgnoreCase), "http/realIpHeader") ? policy.RealIpHeader : null,
+                Check(ManagedDnsSettingsExtension.ListenerReverseProxyAcl, policy.ReverseProxyAcl is not null && !policy.ReverseProxyAcl.SequenceEqual(_dnsReverseProxyNetworkACL ?? []), "reverseProxyAcl") ? policy.ReverseProxyAcl : null);
+
+            bool Check(ManagedDnsSettingsExtension flag, bool differs, string field)
+            {
+                if (!_managedDnsSettingsExtension.HasFlag(flag))
+                    return true;
+                if (differs)
+                    throw new InvalidDataException($"/dns/listeners/{field}: Setting is managed by the configuration manifest.");
+                return false;
+            }
+        }
+
+        internal void SetDnsListenerPolicy(DnsListenerPolicy policy)
+        {
+            _enableEDnsClientSubnetSourceAddress = policy.ClientSubnetSource ?? _enableEDnsClientSubnetSourceAddress;
+            _enableDnsOverHttpHelpRedirect = policy.HelpRedirect ?? _enableDnsOverHttpHelpRedirect;
+            if (policy.RealIpHeader is not null)
+                _dnsOverHttpRealIpHeader = policy.RealIpHeader;
+            if (policy.ReverseProxyAcl is not null)
+                DnsReverseProxyNetworkACL = policy.ReverseProxyAcl;
         }
 
         internal readonly record struct DnsTuning(
@@ -767,14 +809,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, ConfigurationProxy.Candidate proxy = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, proxy);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -995,6 +1037,14 @@ namespace DnsServerCore.Dns
                 yield return "/dns/forwarding/timeoutMs";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrency))
                 yield return "/dns/forwarding/concurrency";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.ListenerClientSubnetSource))
+                yield return "/dns/listeners/useClientSubnetAsSource";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.ListenerHelpRedirect))
+                yield return "/dns/listeners/http/helpRedirect";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.ListenerRealIpHeader))
+                yield return "/dns/listeners/http/realIpHeader";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.ListenerReverseProxyAcl))
+                yield return "/dns/listeners/reverseProxyAcl";
             foreach (string path in ConfigurationProxy.Paths(ManagedProxyFields))
                 yield return path;
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
@@ -2052,16 +2102,7 @@ namespace DnsServerCore.Dns
             }
 
             //optional protocols
-            if (version >= 3)
-            {
-                bool enableEDnsClientSubnetSourceAddress = bR.ReadBoolean();
-                if (apply && !isConfigTransfer)
-                    _enableEDnsClientSubnetSourceAddress = enableEDnsClientSubnetSourceAddress;
-            }
-            else if (apply)
-            {
-                _enableEDnsClientSubnetSourceAddress = false;
-            }
+            bool enableEDnsClientSubnetSourceAddress = version >= 3 && bR.ReadBoolean();
 
             bool enableDnsOverUdpProxy = bR.ReadBoolean();
             if (apply && !isConfigTransfer)
@@ -2113,17 +2154,7 @@ namespace DnsServerCore.Dns
             if (apply && !isConfigTransfer)
                 _enableDnsOverQuic = enableDnsOverQuic;
 
-            if (version >= 4)
-            {
-                bool enableDnsOverHttpHelpRedirect = bR.ReadBoolean();
-                if (apply && !isConfigTransfer)
-                    _enableDnsOverHttpHelpRedirect = enableDnsOverHttpHelpRedirect;
-            }
-            else
-            {
-                if (apply && !isConfigTransfer)
-                    _enableDnsOverHttpHelpRedirect = true;
-            }
+            bool enableDnsOverHttpHelpRedirect = version < 4 || bR.ReadBoolean();
 
             int dnsOverUdpProxyPort = bR.ReadInt32();
             if (apply && !isConfigTransfer)
@@ -2174,8 +2205,6 @@ namespace DnsServerCore.Dns
                 _dnsOverQuicPort = dnsOverQuicPort;
 
             NetworkAccessControl[] dnsReverseProxyNetworkACL = AuthZoneInfo.ReadNetworkACLFrom(bR);
-            if (apply && !isConfigTransfer)
-                _dnsReverseProxyNetworkACL = dnsReverseProxyNetworkACL;
 
             string dnsTlsCertificatePath = s.ReadShortString();
             string dnsTlsCertificatePassword = s.ReadShortString();
@@ -2210,8 +2239,15 @@ namespace DnsServerCore.Dns
             }
 
             string dnsOverHttpRealIpHeader = s.ReadShortString();
-            if (apply && !isConfigTransfer)
-                _dnsOverHttpRealIpHeader = dnsOverHttpRealIpHeader;
+            if (!isConfigTransfer)
+            {
+                var policy = new DnsListenerPolicy(enableEDnsClientSubnetSourceAddress, enableDnsOverHttpHelpRedirect,
+                    dnsOverHttpRealIpHeader, dnsReverseProxyNetworkACL ?? []);
+                if (!readOwnership)
+                    policy = CheckManifestDnsListenerPolicy(policy);
+                if (apply)
+                    SetDnsListenerPolicy(policy);
+            }
 
             //tsig
             {
@@ -2485,7 +2521,7 @@ namespace DnsServerCore.Dns
             return ownership;
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, ConfigurationProxy.Candidate proxy)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2570,7 +2606,7 @@ namespace DnsServerCore.Dns
             bW.Write(tuning.MaxConcurrentResolutionsPerCore ?? MaxConcurrentResolutionsPerCore);
 
             //optional protocols
-            bW.Write(_enableEDnsClientSubnetSourceAddress);
+            bW.Write(listenerPolicy.ClientSubnetSource ?? _enableEDnsClientSubnetSourceAddress);
             bW.Write(_enableDnsOverUdpProxy);
             bW.Write(_enableDnsOverTcpProxy);
             bW.Write(_enableDnsOverHttp);
@@ -2581,7 +2617,7 @@ namespace DnsServerCore.Dns
             bW.Write(_enableDnsOverHttp3);
             bW.Write(_enableDnsOverQuic);
 
-            bW.Write(_enableDnsOverHttpHelpRedirect);
+            bW.Write(listenerPolicy.HelpRedirect ?? _enableDnsOverHttpHelpRedirect);
 
             bW.Write(_dnsOverUdpProxyPort);
             bW.Write(_dnsOverTcpProxyPort);
@@ -2592,7 +2628,7 @@ namespace DnsServerCore.Dns
             bW.Write(_dnsOverHttpsPort);
             bW.Write(_dnsOverQuicPort);
 
-            AuthZoneInfo.WriteNetworkACLTo(_dnsReverseProxyNetworkACL, bW);
+            AuthZoneInfo.WriteNetworkACLTo(listenerPolicy.ReverseProxyAcl ?? _dnsReverseProxyNetworkACL, bW);
 
             if (_dnsTlsCertificatePath == null)
                 s.WriteShortString(string.Empty);
@@ -2604,7 +2640,7 @@ namespace DnsServerCore.Dns
             else
                 s.WriteShortString(_dnsTlsCertificatePassword);
 
-            s.WriteShortString(_dnsOverHttpRealIpHeader);
+            s.WriteShortString(listenerPolicy.RealIpHeader ?? _dnsOverHttpRealIpHeader);
 
             //tsig
             if (_tsigKeys is null)
@@ -8220,7 +8256,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8242,6 +8278,24 @@ namespace DnsServerCore.Dns
                 {
                     ManagedDnsSettingsExtension previousExtendedOwnership = _managedDnsSettingsExtension;
                     ManagedDnsSettingsExtension extendedOwnership = (ManagedDnsSettingsExtension)proxy.Managed;
+                    if (listenerPolicy.ClientSubnetSource.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.ListenerClientSubnetSource;
+                    if (listenerPolicy.HelpRedirect.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.ListenerHelpRedirect;
+                    if (listenerPolicy.RealIpHeader is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.ListenerRealIpHeader;
+                    if (listenerPolicy.ReverseProxyAcl is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.ListenerReverseProxyAcl;
+
+                    if (string.Equals(listenerPolicy.RealIpHeader, _dnsOverHttpRealIpHeader, StringComparison.OrdinalIgnoreCase))
+                        listenerPolicy = listenerPolicy with { RealIpHeader = _dnsOverHttpRealIpHeader };
+
+                    bool listenerPolicyChanged =
+                        (listenerPolicy.ClientSubnetSource.HasValue && listenerPolicy.ClientSubnetSource != _enableEDnsClientSubnetSourceAddress) ||
+                        (listenerPolicy.HelpRedirect.HasValue && listenerPolicy.HelpRedirect != _enableDnsOverHttpHelpRedirect) ||
+                        (listenerPolicy.RealIpHeader is not null && listenerPolicy.RealIpHeader != _dnsOverHttpRealIpHeader) ||
+                        (listenerPolicy.ReverseProxyAcl is not null && !listenerPolicy.ReverseProxyAcl.SequenceEqual(_dnsReverseProxyNetworkACL ?? []));
+
                     if (rateLimits.Ipv4 is not null)
                         extendedOwnership |= ManagedDnsSettingsExtension.RateLimitIpv4;
                     if (rateLimits.Ipv6 is not null)
@@ -8488,7 +8542,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8503,7 +8557,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, proxy));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy));
                         _pendingSave = false;
                     }
                     catch
@@ -8524,6 +8578,8 @@ namespace DnsServerCore.Dns
                     SetBlockingPolicy(blocking, cancelPause: false);
                     if (proxyChanged)
                         _proxy = proxy.Proxy;
+                    if (listenerPolicyChanged)
+                        SetDnsListenerPolicy(listenerPolicy);
                     SetForwardingPolicy(forwarding);
                     SetRateLimitPolicy(rateLimits);
                     SetDnsTuning(tuning);
@@ -9250,17 +9306,12 @@ namespace DnsServerCore.Dns
         public string DnsOverHttpRealIpHeader
         {
             get { return _dnsOverHttpRealIpHeader; }
-            set
-            {
-                if (string.IsNullOrEmpty(value))
-                    _dnsOverHttpRealIpHeader = "X-Real-IP";
-                else if (value.Length > 255)
-                    throw new ArgumentException("DNS-over-HTTP Real IP header name cannot exceed 255 characters.", nameof(DnsOverHttpRealIpHeader));
-                else if (value.Contains(' '))
-                    throw new ArgumentException("DNS-over-HTTP Real IP header name cannot contain invalid characters.", nameof(DnsOverHttpRealIpHeader));
-                else
-                    _dnsOverHttpRealIpHeader = value;
-            }
+            set { _dnsOverHttpRealIpHeader = NormalizeDnsRealIpHeader(value); }
+        }
+
+        internal static string NormalizeDnsRealIpHeader(string value)
+        {
+            return DnsWebService.NormalizeWebHeader(value, realIp: true);
         }
 
         public IReadOnlyDictionary<string, TsigKey> TsigKeys

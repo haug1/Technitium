@@ -1088,6 +1088,17 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("blockingAnswerTtl", ZoneFile.ParseTtl, out uint blockingAnswerTtl) ? blockingAnswerTtl : null,
                     blockingAddresses));
 
+                if (!request.TryQueryOrFormArray("dnsReverseProxyNetworkACL", NetworkAccessControl.Parse, out NetworkAccessControl[] dnsProxyAcl))
+                    request.TryQueryOrFormArray("reverseProxyNetworkACL", NetworkAccessControl.Parse, out dnsProxyAcl);
+                if (dnsProxyAcl?.Length > byte.MaxValue)
+                    throw new ArgumentOutOfRangeException("dnsReverseProxyNetworkACL", "The DNS reverse proxy ACL cannot have more than 255 entries.");
+
+                var dnsListenerPolicy = _dnsWebService._dnsServer.CheckManifestDnsListenerPolicy(new DnsServer.DnsListenerPolicy(
+                    request.TryGetQueryOrForm("enableEDnsClientSubnetSourceAddress", bool.Parse, out bool subnetAsSource) ? subnetAsSource : null,
+                    request.TryGetQueryOrForm("enableDnsOverHttpHelpRedirect", bool.Parse, out bool helpRedirect) ? helpRedirect : null,
+                    request.TryGetQueryOrForm("dnsOverHttpRealIpHeader", out string dnsRealIpHeader) ? DnsServer.NormalizeDnsRealIpHeader(dnsRealIpHeader) : null,
+                    dnsProxyAcl));
+
                 bool hasProxyType = request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType);
                 NetProxy requestedProxy = null;
                 bool hasProxyBypass = false;
@@ -1434,8 +1445,7 @@ namespace DnsServerCore
 
                         #region optional protocols
 
-                        if (request.TryGetQueryOrForm("enableEDnsClientSubnetSourceAddress", bool.Parse, out bool enableEDnsClientSubnetSourceAddress))
-                            _dnsWebService._dnsServer.EnableEDnsClientSubnetSourceAddress = enableEDnsClientSubnetSourceAddress;
+                        _dnsWebService._dnsServer.SetDnsListenerPolicy(dnsListenerPolicy);
 
                         if (request.TryGetQueryOrForm("enableDnsOverUdpProxy", bool.Parse, out bool enableDnsOverUdpProxy))
                         {
@@ -1518,9 +1528,6 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverHttpHelpRedirect", bool.Parse, out bool enableDnsOverHttpHelpRedirect))
-                            _dnsWebService._dnsServer.EnableDnsOverHttpHelpRedirect = enableDnsOverHttpHelpRedirect;
-
                         if (request.TryGetQueryOrForm("dnsOverUdpProxyPort", int.Parse, out int dnsOverUdpProxyPort))
                         {
                             if (_dnsWebService._dnsServer.DnsOverUdpProxyPort != dnsOverUdpProxyPort)
@@ -1599,13 +1606,6 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryQueryOrFormArray("dnsReverseProxyNetworkACL", NetworkAccessControl.Parse, out NetworkAccessControl[] dnsReverseProxyNetworkACL))
-                            _dnsWebService._dnsServer.DnsReverseProxyNetworkACL = dnsReverseProxyNetworkACL;
-                        else if (request.TryQueryOrFormArray("reverseProxyNetworkACL", NetworkAccessControl.Parse, out dnsReverseProxyNetworkACL))
-                            _dnsWebService._dnsServer.DnsReverseProxyNetworkACL = dnsReverseProxyNetworkACL;
-
-                        if (request.TryQueryOrForm("dnsOverHttpRealIpHeader", out string dnsOverHttpRealIpHeader))
-                            _dnsWebService._dnsServer.DnsOverHttpRealIpHeader = dnsOverHttpRealIpHeader;
 
                         string dnsTlsCertificatePath = request.QueryOrForm("dnsTlsCertificatePath");
                         if (dnsTlsCertificatePath is not null)

@@ -126,6 +126,10 @@ namespace DnsServerCore.Configuration
             ["/web/httpUnixSocket/path"] = Field<string>("webServiceHttpUnixSocket", null, restartWebService: true, canApply: true),
             ["/web/tlsUnixSocket/enabled"] = Field("webServiceEnableTlsUnixSocket", false, restartWebService: true, canApply: true),
             ["/web/tlsUnixSocket/path"] = Field<string>("webServiceTlsUnixSocket", null, restartWebService: true, canApply: true),
+            ["/dns/listeners/useClientSubnetAsSource"] = Field("enableEDnsClientSubnetSourceAddress", false, canApply: true),
+            ["/dns/listeners/http/helpRedirect"] = Field("enableDnsOverHttpHelpRedirect", true, canApply: true),
+            ["/dns/listeners/http/realIpHeader"] = Field("dnsOverHttpRealIpHeader", "X-Real-IP", canApply: true),
+            ["/dns/listeners/reverseProxyAcl"] = Field("dnsReverseProxyNetworkACL", Array.Empty<string>(), canApply: true),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
@@ -244,7 +248,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), proxy, alreadyActive, listenerTuningStaged, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), proxy, alreadyActive, listenerTuningStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -253,6 +257,19 @@ namespace DnsServerCore.Configuration
                 localTime?.GetBoolean(),
                 folder,
                 writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig))));
+        }
+
+        private static DnsServer.DnsListenerPolicy GetDnsListenerPolicy(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("listeners", out JsonElement listeners))
+                return default;
+
+            listeners.TryGetProperty("http", out JsonElement http);
+            return new DnsServer.DnsListenerPolicy(
+                listeners.TryGetProperty("useClientSubnetAsSource", out JsonElement source) ? source.ValueKind == JsonValueKind.True : null,
+                http.ValueKind == JsonValueKind.Object && http.TryGetProperty("helpRedirect", out JsonElement help) ? help.ValueKind != JsonValueKind.False : null,
+                http.ValueKind == JsonValueKind.Object && http.TryGetProperty("realIpHeader", out JsonElement header) ? ConfigurationManifest.ReadDnsRealIpHeader(header) : null,
+                listeners.TryGetProperty("reverseProxyAcl", out JsonElement acl) ? ConfigurationManifest.ReadNetworkAcl(acl, "/dns/listeners/reverseProxyAcl") : null);
         }
 
         private static DnsWebService.WebLiveSettings GetWebLiveSettings(ConfigurationManifest manifest)
@@ -1050,7 +1067,7 @@ namespace DnsServerCore.Configuration
                     {
                         candidate = JsonSerializer.SerializeToElement(ReadBlockingAddresses(desired).Select(address => address.ToString()));
                     }
-                    else if (path == "/dns/recursion/networkAcl")
+                    else if (path is "/dns/recursion/networkAcl" or "/dns/listeners/reverseProxyAcl")
                     {
                         var rules = ConfigurationManifest.ReadNetworkAcl(desired, path);
                         candidate = JsonSerializer.SerializeToElement(rules.Select(rule => rule.ToString()).ToArray());
@@ -1059,6 +1076,11 @@ namespace DnsServerCore.Configuration
                     {
                         var rules = ConfigurationManifest.ReadWebReverseProxyAcl(desired);
                         candidate = JsonSerializer.SerializeToElement(rules.Select(rule => rule.ToString()).ToArray());
+                    }
+                    else if (path == "/dns/listeners/http/realIpHeader")
+                    {
+                        string header = ConfigurationManifest.ReadDnsRealIpHeader(desired);
+                        candidate = JsonSerializer.SerializeToElement(string.Equals(header, current.GetString(), StringComparison.OrdinalIgnoreCase) ? current.GetString() : header);
                     }
                     else if (path is "/web/realIpHeader" or "/web/frameAncestors")
                     {

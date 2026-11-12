@@ -466,6 +466,62 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DnsListenerPolicyAppliesLiveAndRejectsConflictingWriters()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"listeners":{"useClientSubnetAsSource":true,
+                  "http":{"helpRedirect":false,"realIpHeader":"X-Resolver-Client"},
+                  "reverseProxyAcl":["!192.0.2.8","192.0.2.0/24"]}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            JsonElement changes = preview.GetProperty("changes");
+            Assert.Equal(4, changes.GetArrayLength());
+            Assert.All(changes.EnumerateArray(), change => Assert.False(change.GetProperty("restartDnsService").GetBoolean()));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.True(settings.GetProperty("enableEDnsClientSubnetSourceAddress").GetBoolean());
+            Assert.False(settings.GetProperty("enableDnsOverHttpHelpRedirect").GetBoolean());
+            Assert.Equal("X-Resolver-Client", settings.GetProperty("dnsOverHttpRealIpHeader").GetString());
+            Assert.Collection(settings.GetProperty("dnsReverseProxyNetworkACL").EnumerateArray(),
+                rule => Assert.Equal("!192.0.2.8", rule.GetString()),
+                rule => Assert.Equal("192.0.2.0/24", rule.GetString()));
+            JsonNode? exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]?["listeners"];
+            Assert.Equal("X-Resolver-Client", exported?["http"]?["realIpHeader"]?.GetValue<string>());
+            Assert.Equal(2, exported?["reverseProxyAcl"]?.AsArray().Count);
+            Assert.Equal(4, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement rejected = await server.CallAsync(
+                "settings/set?reverseProxyNetworkACL=198.51.100.0%2F24&maxLogFileDays=22", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/listeners/reverseProxyAcl", rejected.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?dnsOverHttpRealIpHeader=x-resolver-client", server.AdminToken));
+
+            using var restore = new MultipartFormDataContent();
+            restore.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, restore);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/listeners/", restored.GetProperty("errorMessage").GetString());
+
+            const string reset = """
+                {"schemaVersion":1,"dns":{"listeners":{"useClientSubnetAsSource":null,"reverseProxyAcl":null,
+                  "http":{"helpRedirect":null,"realIpHeader":null}}}}
+                """;
+            JsonElement resetPreview = await PreviewAsync(server, reset);
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, resetPreview.GetProperty("revision").GetString()!));
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task ProxyApplyRejectsRotatedPreviewAndPersistsTheNewPassword()
         {
             await using var server = await LoopbackWebService.StartAsync();

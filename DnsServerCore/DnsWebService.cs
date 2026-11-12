@@ -942,7 +942,7 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                if (isConfigTransfer && dnsSettings && _dnsServer.HasManagedClusterDnsSettings &&
+                if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy) &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                 {
                     bool checkDnsBody;
