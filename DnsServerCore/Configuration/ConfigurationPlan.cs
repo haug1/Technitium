@@ -894,14 +894,27 @@ namespace DnsServerCore.Configuration
             CheckClusterAppRole(manifest, cluster);
             CheckClusterSsoRole(manifest, cluster);
             CheckClusterLdapRole(manifest, cluster);
-            if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
-                throw new InvalidDataException("/zones: Applying zones to a cluster is not implemented.");
+            if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+            {
+                foreach (JsonProperty zone in zones.EnumerateObject())
+                {
+                    string path = AppendPath("/zones", zone.Name);
+                    string name = ConfigurationManifest.CanonicalDnsName(zone.Name, path, allowRoot: true);
+                    CheckClusterZoneTarget(cluster, name, path);
+                }
+            }
             CheckClusterDomainListSupport(manifest, cluster);
             CheckClusterDnsPolicySupport(manifest, cluster);
             CheckClusterWebListenerSupport(manifest, cluster);
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        internal static void CheckClusterZoneTarget(ClusterManager cluster, string name, string path)
+        {
+            if (cluster.ClusterInitialized && (cluster.IsClusterPrimaryZone(name) || cluster.IsClusterCatalogZone(name)))
+                throw new InvalidDataException($"{path}: Cluster infrastructure zones are managed by the cluster.");
         }
 
         private static void CheckClusterAppRole(ConfigurationManifest manifest, ClusterManager cluster)
@@ -1404,11 +1417,7 @@ namespace DnsServerCore.Configuration
                 if (declaration.Value.ValueKind == JsonValueKind.Null)
                 {
                     if (exists)
-                    {
-                        if (current.GetProperty("clusterProtected").GetBoolean())
-                            throw new InvalidDataException($"{path}: A cluster infrastructure zone cannot be deleted.");
                         changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Remove, false));
-                    }
                     continue;
                 }
 
@@ -1458,8 +1467,6 @@ namespace DnsServerCore.Configuration
                 if (declaration.Value.TryGetProperty("enabled", out JsonElement enabled))
                 {
                     bool effectiveEnabled = enabled.ValueKind == JsonValueKind.Null || enabled.GetBoolean();
-                    if (!effectiveEnabled && current.GetProperty("clusterProtected").GetBoolean())
-                        throw new InvalidDataException($"{path}/enabled: A cluster infrastructure zone cannot be disabled.");
                     if (effectiveEnabled != current.GetProperty("enabled").GetBoolean())
                         changes.Add(new ConfigurationChange(path + "/enabled", ConfigurationChangeKind.Update, false));
                 }

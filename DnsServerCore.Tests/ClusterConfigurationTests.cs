@@ -630,6 +630,11 @@ namespace DnsServerCore.Tests
             Assert.Equal(180, settings.GetProperty("defaultRecordTtl").GetInt32());
             Assert.Equal(secondary.Client.BaseAddress!.Port, settings.GetProperty("webServiceHttpPort").GetInt32());
 
+            const string protectedZone = """{"schemaVersion":1,"zones":{"cluster.test":null}}""";
+            JsonElement rejectedZone = await PlanAsync(primary, primary.AdminToken, protectedZone);
+            Assert.Equal("error", rejectedZone.GetProperty("status").GetString());
+            Assert.Contains("/zones/cluster.test", rejectedZone.GetProperty("errorMessage").GetString());
+
             JsonElement topologyPreview = await PlanAsync(secondary, syncedAdmin, secondaryTopology);
             LoopbackWebService.AssertOk(topologyPreview);
             JsonElement topologyPlan = topologyPreview.GetProperty("response");
@@ -637,6 +642,21 @@ namespace DnsServerCore.Tests
             using var topologyBody = new StringContent(secondaryTopology, Encoding.UTF8, "application/json");
             LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, topologyBody,
                 topologyPlan.GetProperty("revision").GetString()));
+
+            const string localZone = """
+                {"schemaVersion":1,"zones":{"local.test":{"type":"Primary","records":[
+                  {"owner":"www.local.test","type":"A","data":{"zoneFile":"192.0.2.42"}}
+                ]}}}
+                """;
+            JsonElement localPreview = await PlanAsync(secondary, syncedAdmin, localZone);
+            LoopbackWebService.AssertOk(localPreview);
+            using var localBody = new StringContent(localZone, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, localBody,
+                localPreview.GetProperty("response").GetProperty("revision").GetString()));
+            var localAnswer = Assert.Single((await secondary.QueryAsync("www.local.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.42"), Assert.IsType<DnsARecordData>(localAnswer.RDATA).Address);
+            JsonElement primaryZone = await primary.CallAsync("zones/options/get?zone=local.test", primary.AdminToken);
+            Assert.Equal("error", primaryZone.GetProperty("status").GetString());
 
             const string wrongTopology = """
                 {"schemaVersion":1,"cluster":{"domain":"other.test","bootstrap":{"role":"Primary"},"configRefreshSeconds":300}}
@@ -732,9 +752,11 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(secondaryExport);
             Assert.Contains(secondaryExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")
                 .GetProperty("node").GetProperty("addresses").EnumerateArray(), value => value.ValueEquals("127.0.0.2"));
+            Assert.True(secondaryExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").TryGetProperty("local.test", out _));
 
             await secondary.RestartAsync();
             syncedAdmin = secondary.AdminToken;
+            Assert.Single((await secondary.QueryAsync("www.local.test", DnsResourceRecordType.A)).Answer);
             JsonElement persisted = await secondary.CallAsync("admin/cluster/state", syncedAdmin);
             LoopbackWebService.AssertOk(persisted);
             Assert.Contains(persisted.GetProperty("response").GetProperty("managedOptionPaths").EnumerateArray(),

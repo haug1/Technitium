@@ -585,7 +585,9 @@ namespace DnsServerCore
 
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
                 {
-                    var zones = ConfigurationZoneExport.Export(dns, _dnsWebService._clusterManager.ClusterInitialized,
+                    var cluster = _dnsWebService._clusterManager;
+                    var zones = ConfigurationZoneExport.Export(dns,
+                        name => cluster.ClusterInitialized && (cluster.IsClusterPrimaryZone(name) || cluster.IsClusterCatalogZone(name)),
                         name => _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, name, sessionUser, PermissionFlag.View),
                         _dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.Modify)
                             ? name => _dnsWebService._authManager.GetPermission(PermissionSection.Zones, name) : null, missingInputs);
@@ -1355,21 +1357,22 @@ namespace DnsServerCore
                 writer.WriteStartObject("manifestZones");
                 foreach (JsonProperty declaration in zones.EnumerateObject())
                 {
-                    string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
+                    string zonePath = ConfigurationPlan.AppendPath("/zones", declaration.Name);
+                    string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, zonePath, allowRoot: true);
                     AuthZoneInfo zone = _dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(name);
                     if (zone is not null && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zone.Name, sessionUser, PermissionFlag.View))
                         throw new DnsWebServiceException("Access was denied.");
 
+                    ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
+                    if (zone is not null && (zone.Type != AuthZoneType.Primary || zone.CatalogZoneName is not null))
+                        throw new InvalidDataException($"{zonePath}: Apply requires a primary zone outside catalogs.");
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
-                        ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, ConfigurationPlan.AppendPath("/zones", declaration.Name), zone, keys);
+                        ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, zonePath, zone, keys);
                     writer.WriteStartObject(name);
-                    bool clusterProtected = _dnsWebService._clusterManager.ClusterInitialized &&
-                        (_dnsWebService._clusterManager.IsClusterPrimaryZone(name) || _dnsWebService._clusterManager.IsClusterCatalogZone(name));
                     if (zone is not null)
                     {
                         writer.WriteString("type", zone.Type.ToString());
                         writer.WriteBoolean("enabled", !zone.Disabled);
-                        writer.WriteBoolean("clusterProtected", clusterProtected);
                         if (declaration.Value.ValueKind == JsonValueKind.Object)
                             ConfigurationZonePolicies.WriteSnapshot(writer, declaration.Value, zone);
                     }
@@ -1377,10 +1380,6 @@ namespace DnsServerCore
                     if (declaration.Value.ValueKind == JsonValueKind.Object &&
                         declaration.Value.TryGetProperty("records", out JsonElement records))
                     {
-                        string path = ConfigurationPlan.AppendPath("/zones", declaration.Name) + "/records";
-                        if (clusterProtected || (zone is not null && zone.Type != AuthZoneType.Primary))
-                            throw new InvalidDataException($"{path}: Record preview requires a primary zone outside the cluster infrastructure.");
-
                         var currentRecords = new List<DnsResourceRecord>();
                         if (zone is not null)
                         {

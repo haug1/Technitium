@@ -15,7 +15,8 @@ namespace DnsServerCore.Configuration
 {
     internal static class ConfigurationZoneExport
     {
-        internal static JsonObject Export(DnsServer dns, bool clustered, Func<string, bool> canView, Func<string, Permission> getPermission, ISet<string> missingInputs)
+        internal static JsonObject Export(DnsServer dns, Func<string, bool> isClusterInfrastructure, Func<string, bool> canView,
+            Func<string, Permission> getPermission, ISet<string> missingInputs)
         {
             var result = new JsonObject();
             foreach (AuthZoneInfo zone in dns.AuthZoneManager.GetAllZones().OrderBy(zone => zone.Name, StringComparer.Ordinal))
@@ -25,7 +26,7 @@ namespace DnsServerCore.Configuration
 
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
-                if (clustered || zone.ApexZone is not PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } || zone.CatalogZoneName is not null)
+                if (isClusterInfrastructure(zone.Name) || zone.ApexZone is not PrimaryZone { DnssecStatus: AuthZoneDnssecStatus.Unsigned } || zone.CatalogZoneName is not null)
                 {
                     missingInputs.Add(path);
                     continue;

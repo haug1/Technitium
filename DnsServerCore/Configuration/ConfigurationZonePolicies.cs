@@ -241,7 +241,7 @@ namespace DnsServerCore.Configuration
                 {
                     JsonElement policies = current.GetProperty("policies");
                     if (!current.GetProperty("type").ValueEquals(nameof(AuthZoneType.Primary)) ||
-                        current.GetProperty("clusterProtected").GetBoolean() || policies.GetProperty("catalogMember").GetBoolean())
+                        policies.GetProperty("catalogMember").GetBoolean())
                         throw new InvalidDataException($"{path}: Policy preview requires a primary zone outside a catalog and the cluster infrastructure.");
                     currentPolicy = policies.GetProperty(policy.Name);
                 }
