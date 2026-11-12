@@ -15,6 +15,9 @@
     <Reference Include="TechnitiumLibrary.Net">
       <HintPath>../../TechnitiumLibrary/bin/TechnitiumLibrary.Net.dll</HintPath>
     </Reference>
+    <Reference Include="TechnitiumLibrary.Security.OTP">
+      <HintPath>../../TechnitiumLibrary/bin/TechnitiumLibrary.Security.OTP.dll</HintPath>
+    </Reference>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />

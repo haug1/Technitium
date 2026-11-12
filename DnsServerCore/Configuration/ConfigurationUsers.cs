@@ -7,6 +7,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DnsServerCore.Auth;
+using TechnitiumLibrary;
+using TechnitiumLibrary.Security.OTP;
 
 namespace DnsServerCore.Configuration
 {
@@ -31,7 +33,17 @@ namespace DnsServerCore.Configuration
                 if (entry.Value.ValueKind == JsonValueKind.Object)
                 {
                     foreach (JsonProperty field in entry.Value.EnumerateObject())
-                        paths.Add(path + "/" + field.Name);
+                    {
+                        if (field.NameEquals("totp"))
+                        {
+                            foreach (JsonProperty setting in field.Value.EnumerateObject())
+                                paths.Add(path + "/totp/" + setting.Name);
+                        }
+                        else
+                        {
+                            paths.Add(path + "/" + field.Name);
+                        }
+                    }
                 }
             }
             return paths.ToArray();
@@ -95,11 +107,47 @@ namespace DnsServerCore.Configuration
                 CheckField(paths, current, "groups", !SameGroups(current, restored.MemberOfGroups.Select(group => group.Name.ToLowerInvariant())));
                 CheckField(paths, current, "passwordIterations", current.PasswordIterations != restored.PasswordIterations);
                 CheckField(paths, current, "password", !current.HasSamePasswordState(restored));
+                CheckField(paths, current, "totp/enabled", current.TOTPEnabled != restored.TOTPEnabled);
+                CheckField(paths, current, "totp/enrollment", !SameEnrollment(current.TOTPKeyUri, restored.TOTPKeyUri));
+            }
+        }
+
+        internal static bool SameEnrollment(AuthenticatorKeyUri current, AuthenticatorKeyUri desired) =>
+            current?.ToString() == desired?.ToString();
+
+        internal static bool CheckTotpDisable(IReadOnlyList<string> paths, User user)
+        {
+            CheckField(paths, user, "totp/enabled", user.TOTPEnabled);
+            CheckField(paths, user, "totp/enrollment", user.TOTPEnabled && user.TOTPKeyUri is not null);
+            return user.TOTPEnabled ||
+                (!OwnsField(paths, user, "totp/enabled") && !OwnsField(paths, user, "totp/enrollment"));
+        }
+
+        private static AuthenticatorKeyUri ParseEnrollment(ConfigurationManifest manifest, JsonElement reference, string path)
+        {
+            string value = manifest.ResolveReference(reference, path);
+            try
+            {
+                AuthenticatorKeyUri key = AuthenticatorKeyUri.Parse(value.Trim());
+                byte[] decoded = Base32.FromBase32String(key.Secret);
+                if (key.Period is < 1 or > int.MaxValue / 10 ||
+                    string.IsNullOrWhiteSpace(key.AccountName) || string.IsNullOrWhiteSpace(key.Issuer) ||
+                    decoded.Length == 0 || !Base32.ToBase32String(decoded, skipPadding: true)
+                        .Equals(key.Secret.TrimEnd('='), StringComparison.OrdinalIgnoreCase))
+                    throw new FormatException();
+
+                // Exercise the same algorithm and key parsing used at sign-in.
+                _ = new Authenticator(key).GetTOTP();
+                return key;
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException or IndexOutOfRangeException or NotSupportedException or OverflowException or CryptographicException)
+            {
+                throw new InvalidDataException($"{path}: The reference must contain a valid otpauth TOTP enrollment URI.");
             }
         }
 
         internal sealed record Change(User Current, string Name, string DisplayName, bool Disabled, int Timeout,
-            string[] Groups, string Password, int Iterations, string[] Fields, bool Remove = false)
+            string[] Groups, string Password, int Iterations, string[] Fields, bool Remove = false, bool TotpEnabled = false, AuthenticatorKeyUri Enrollment = null)
         {
             internal User Stage(AuthManager auth, IReadOnlyDictionary<string, Group> groupChanges)
             {
@@ -111,6 +159,8 @@ namespace DnsServerCore.Configuration
                 foreach (string name in Groups)
                     groups.Add(name, auth.GetGroup(name) ?? groupChanges[name]);
                 user.SyncGroups(groups);
+                if (Current is null || Fields.Contains("totp/enabled") || Fields.Contains("totp/enrollment"))
+                    user.SetManifestTotp(TotpEnabled, Enrollment);
                 if (Current is not null && Fields.Contains("password"))
                     user.ChangePassword(Password, Iterations);
                 return user;
@@ -163,8 +213,17 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{path}/type: Only local accounts can be reconciled.");
                 if (declaration.TryGetProperty("externalIdentifier", out _))
                     throw new InvalidDataException($"{path}/externalIdentifier: Local users have no external identifier.");
-                if (declaration.TryGetProperty("totp", out _))
-                    throw new InvalidDataException($"{path}/totp: Reconciling enrollment is not implemented.");
+                bool totpEnabled = current?.TOTPEnabled ?? false;
+                AuthenticatorKeyUri enrollment = current?.TOTPKeyUri;
+                if (declaration.TryGetProperty("totp", out JsonElement totp))
+                {
+                    if (totp.TryGetProperty("enabled", out JsonElement enabled))
+                        totpEnabled = enabled.ValueKind == JsonValueKind.True;
+                    if (totp.TryGetProperty("enrollment", out JsonElement enrollmentRef))
+                        enrollment = enrollmentRef.ValueKind == JsonValueKind.Null ? null : ParseEnrollment(manifest, enrollmentRef, path + "/totp/enrollment");
+                    if (totpEnabled && enrollment is null)
+                        throw new InvalidDataException($"{path}/totp/enrollment: Enabling TOTP requires valid enrollment material.");
+                }
 
                 string password = null;
                 if (declaration.TryGetProperty("password", out JsonElement reference))
@@ -246,9 +305,13 @@ namespace DnsServerCore.Configuration
                         fields.Add("groups");
                     if (password is not null && (current.PasswordIterations != iterations || current.GetPasswordHashFor(password) != current.PasswordHash))
                         fields.Add("password");
+                    if (current.TOTPEnabled != totpEnabled)
+                        fields.Add("totp/enabled");
+                    if (!SameEnrollment(current.TOTPKeyUri, enrollment))
+                        fields.Add("totp/enrollment");
                 }
                 if (current is null || fields.Count > 0 || includeUnchanged)
-                    changes.Add(name, new Change(current, name, displayName, disabled, timeout, groups.Keys.ToArray(), password, iterations, fields.ToArray()));
+                    changes.Add(name, new Change(current, name, displayName, disabled, timeout, groups.Keys.ToArray(), password, iterations, fields.ToArray(), TotpEnabled: totpEnabled, Enrollment: enrollment));
             }
             if (auth.Users.Count + additions - changes.Values.Count(change => change.Remove) > byte.MaxValue)
                 throw new InvalidDataException($"{Path}: At most 255 users can be stored.");
@@ -297,8 +360,11 @@ namespace DnsServerCore.Configuration
                     profile["passwordIterations"] = user.PasswordIterations;
                 users.Add(user.Username, profile);
                 missingInputs.Add(path + "/password");
-                if (user.TOTPEnabled || user.TOTPKeyUri is not null)
+                if (user.TOTPKeyUri is not null)
+                {
+                    profile["totp"] = new JsonObject { ["enabled"] = user.TOTPEnabled };
                     missingInputs.Add(path + "/totp/enrollment");
+                }
             }
             return users;
         }
@@ -316,7 +382,12 @@ namespace DnsServerCore.Configuration
                     Profile(current).WriteTo(writer);
                     writer.WriteNumber("iterations", current.PasswordIterations);
                     writer.WriteString("passwordRevision", Fingerprint(current.PasswordHash));
+                    writer.WriteBoolean("totpEnabled", current.TOTPEnabled);
+                    if (current.TOTPKeyUri is not null)
+                        writer.WriteString("totpEnrollmentRevision", Fingerprint(current.TOTPKeyUri.ToString()));
                 }
+                if (change.Enrollment is not null)
+                    writer.WriteString("desiredTotpEnrollmentRevision", Fingerprint(change.Enrollment.ToString()));
                 if (change.Password is not null)
                     writer.WriteString("desiredPasswordRevision", Fingerprint(change.Password));
                 writer.WriteEndObject();

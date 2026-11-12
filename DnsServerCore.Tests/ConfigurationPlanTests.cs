@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
+using TechnitiumLibrary.Security.OTP;
 using Xunit;
 
 namespace DnsServerCore.Tests
@@ -3334,6 +3335,98 @@ namespace DnsServerCore.Tests
                 LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
                 await server.RestartAsync();
                 LoopbackWebService.AssertOk(await server.CallAsync("admin/ldap/set?ldapServer=other.test", server.AdminToken));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
+        public async Task ManifestTotpEnrollmentSurvivesRestartAndRequiresTheConfiguredCode()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string password = "fixture-totp-account-password";
+            using var createUser = new FormUrlEncodedContent([new("user", "enrolled"), new("pass", password)]);
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/create", server.AdminToken, createUser));
+            await server.RestartAsync();
+
+            using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+            backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+            backup.EnsureSuccessStatusCode();
+            byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
+            const string variable = "TECHNITIUM_TEST_TOTP_ENROLLMENT";
+            const string malformed = "malformed-fixture-enrollment";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            AuthenticatorKeyUri enrollment = AuthenticatorKeyUri.Generate("fixture", "enrolled");
+            const string manifest = """
+                {"schemaVersion":1,"auth":{"users":{"enrolled":{"totp":{"enabled":true,
+                    "enrollment":{"environment":"TECHNITIUM_TEST_TOTP_ENROLLMENT"}}}}}}
+                """;
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, malformed);
+                using (var content = new StringContent(manifest, Encoding.UTF8, "application/json"))
+                {
+                    JsonElement invalid = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                    Assert.Equal("error", invalid.GetProperty("status").GetString());
+                    Assert.Contains("/auth/users/enrolled/totp/enrollment", invalid.GetProperty("errorMessage").GetString());
+                    Assert.DoesNotContain(malformed, invalid.GetRawText());
+                }
+                await server.LoginAsync("enrolled", password);
+
+                Environment.SetEnvironmentVariable(variable, enrollment.ToString());
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                    change.GetProperty("path").ValueEquals("/auth/users/enrolled/totp/enrollment"));
+                Assert.DoesNotContain(enrollment.Secret, preview.GetRawText());
+                string revision = preview.GetProperty("revision").GetString()!;
+
+                Environment.SetEnvironmentVariable(variable, AuthenticatorKeyUri.Generate("fixture", "enrolled").ToString());
+                Assert.Equal("error", (await ApplyAsync(server, manifest, revision)).GetProperty("status").GetString());
+                Environment.SetEnvironmentVariable(variable, enrollment.ToString());
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                using var noCode = new FormUrlEncodedContent([new("user", "enrolled"), new("pass", password)]);
+                Assert.Equal("2fa-required", (await server.CallAsync("user/login", content: noCode)).GetProperty("status").GetString());
+                using var withCode = new FormUrlEncodedContent([
+                    new("user", "enrolled"), new("pass", password), new("totp", new Authenticator(enrollment).GetTOTP())
+                ]);
+                JsonElement signedIn = await server.CallAsync("user/login", content: withCode);
+                LoopbackWebService.AssertOk(signedIn);
+                string token = signedIn.GetProperty("token").GetString()!;
+                JsonElement deniedDisable = await server.CallAsync("user/2fa/disable", token);
+                Assert.Equal("error", deniedDisable.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/enrolled/totp/enabled", deniedDisable.GetProperty("errorMessage").GetString());
+
+                using var restoreForm = new MultipartFormDataContent();
+                restoreForm.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+                JsonElement deniedRestore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, restoreForm);
+                Assert.Equal("error", deniedRestore.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/enrolled/totp/", deniedRestore.GetProperty("errorMessage").GetString());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement response = export.GetProperty("response");
+                JsonElement totp = response.GetProperty("manifest").GetProperty("auth").GetProperty("users")
+                    .GetProperty("enrolled").GetProperty("totp");
+                Assert.True(totp.GetProperty("enabled").GetBoolean());
+                Assert.False(totp.TryGetProperty("enrollment", out _));
+                Assert.DoesNotContain(enrollment.Secret, export.GetRawText());
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/auth/users/enrolled/totp/enrollment"));
+
+                const string clear = """{"schemaVersion":1,"auth":{"users":{"enrolled":{"totp":{"enabled":false,"enrollment":null}}}}}""";
+                revision = (await PreviewAsync(server, clear)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, clear, revision));
+                await server.RestartAsync();
+                token = await server.LoginAsync("enrolled", password);
+                JsonElement deniedInit = await server.CallAsync("user/2fa/init", token);
+                Assert.Equal("error", deniedInit.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/enrolled/totp/enrollment", deniedInit.GetProperty("errorMessage").GetString());
             }
             finally
             {

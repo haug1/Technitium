@@ -893,6 +893,7 @@ namespace DnsServerCore
                 }
                 else
                 {
+                    ConfigurationUsers.CheckField(_dnsWebService._authManager.ManagedUserPaths, sessionUser, "totp/enrollment", changes: true);
                     AuthenticatorKeyUri totpKeyUri = sessionUser.InitializedTOTP(_dnsWebService._dnsServer.ServerDomain);
 
                     jsonWriter.WriteBoolean("totpEnabled", false);
@@ -912,6 +913,7 @@ namespace DnsServerCore
 
                 string totp = request.GetQueryOrForm("totp");
 
+                ConfigurationUsers.CheckField(_dnsWebService._authManager.ManagedUserPaths, sessionUser, "totp/enabled", !sessionUser.TOTPEnabled);
                 sessionUser.EnableTOTP(totp);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Two-factor Authentication (2FA) using Time-based one-time password (TOTP) was enabled successfully.");
@@ -927,6 +929,8 @@ namespace DnsServerCore
             {
                 User sessionUser = _dnsWebService.GetSessionUser(context, true);
 
+                if (!ConfigurationUsers.CheckTotpDisable(_dnsWebService._authManager.ManagedUserPaths, sessionUser))
+                    return;
                 sessionUser.DisableTOTP();
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Two-factor Authentication (2FA) using Time-based one-time password (TOTP) was disabled successfully.");
@@ -1213,6 +1217,15 @@ namespace DnsServerCore
                 if (request.TryGetQueryOrForm("disabled", bool.Parse, out bool requestedDisabled))
                     ConfigurationUsers.CheckField(paths, user, "disabled", user.Disabled != requestedDisabled);
 
+                bool disableTotp = false;
+                if (request.TryGetQueryOrForm("totpEnabled", bool.Parse, out bool totpEnabled))
+                {
+                    if (totpEnabled)
+                        throw new DnsWebServiceException("Time-based one-time password (TOTP) can be enabled only by the user themselves.");
+
+                    disableTotp = ConfigurationUsers.CheckTotpDisable(paths, user);
+                }
+
                 string newPassword = request.QueryOrForm("newPass");
                 int iterations = User.DEFAULT_ITERATIONS;
                 bool changePassword = !string.IsNullOrWhiteSpace(newPassword);
@@ -1318,13 +1331,8 @@ namespace DnsServerCore
                         user.DisplayName = displayName;
                     }
 
-                    if (request.TryGetQueryOrForm("totpEnabled", bool.Parse, out bool totpEnabled))
-                    {
-                        if (totpEnabled)
-                            throw new DnsWebServiceException("Time-based one-time password (TOTP) can be enabled only by the user themselves.");
-
+                    if (disableTotp)
                         user.DisableTOTP();
-                    }
 
                     if (changePassword)
                         user.ChangePassword(newPassword, iterations);

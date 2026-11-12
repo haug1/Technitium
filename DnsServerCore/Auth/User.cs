@@ -273,12 +273,20 @@ namespace DnsServerCore.Auth
             return copy;
         }
 
-        internal void PublishManifest(User staged, bool changePassword)
+        internal void SetManifestTotp(bool enabled, AuthenticatorKeyUri enrollment)
+        {
+            _totpKeyUri = enrollment;
+            _totpEnabled = enabled;
+        }
+
+        internal void PublishManifest(User staged, bool changePassword, bool changeTotp)
         {
             _displayName = staged._displayName;
             _disabled = staged._disabled;
             _sessionTimeoutSeconds = staged._sessionTimeoutSeconds;
             _memberOfGroups = staged._memberOfGroups;
+            if (changeTotp)
+                SetManifestTotp(staged._totpEnabled, staged._totpKeyUri);
             if (changePassword)
             {
                 _passwordHashType = staged._passwordHashType;

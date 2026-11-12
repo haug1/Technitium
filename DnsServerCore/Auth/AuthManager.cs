@@ -613,7 +613,8 @@ namespace DnsServerCore.Auth
                         else if (change.Current is null)
                             _users.TryAdd(name, user);
                         else
-                            change.Current.PublishManifest(user, change.Fields.Contains("password"));
+                            change.Current.PublishManifest(user, change.Fields.Contains("password"),
+                                change.Fields.Contains("totp/enabled") || change.Fields.Contains("totp/enrollment"));
                     }
                     foreach (var (token, session) in _sessions)
                     {
@@ -1354,12 +1355,22 @@ namespace DnsServerCore.Auth
                     break;
             }
 
-            if (user.TOTPEnabled)
+            bool totpEnabled;
+            AuthenticatorKeyUri enrollment;
+            lock (_saveLock)
+            {
+                totpEnabled = user.TOTPEnabled;
+                enrollment = user.TOTPKeyUri;
+            }
+            if (totpEnabled)
             {
                 if (string.IsNullOrEmpty(totp))
                     throw new TwoFactorAuthRequiredWebServiceException("A time-based one-time password (TOTP) is required for user: " + username);
 
-                Authenticator authenticator = new Authenticator(user.TOTPKeyUri);
+                if (enrollment is null)
+                    throw new DnsWebServiceException("The account's TOTP enrollment is unavailable.");
+
+                Authenticator authenticator = new Authenticator(enrollment);
 
                 if (!authenticator.IsTOTPValid(totp))
                     await ThrowAuthFailedExceptionAsync("Invalid time-based one-time password (TOTP) was attempted for user: " + username);

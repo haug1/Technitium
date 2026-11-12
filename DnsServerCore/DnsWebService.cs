@@ -2213,9 +2213,9 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/user/session/get", _authApi.GetCurrentSessionDetails);
             _webService.MapGetAndPost("/api/user/session/delete", delegate (HttpContext context) { _authApi.DeleteSession(context, false); });
             _webService.MapGetAndPost("/api/user/changePassword", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.ChangePasswordAsync));
-            _webService.MapGetAndPost("/api/user/2fa/init", _authApi.Initialize2FA);
-            _webService.MapGetAndPost("/api/user/2fa/enable", _authApi.Enable2FA);
-            _webService.MapGetAndPost("/api/user/2fa/disable", _authApi.Disable2FA);
+            _webService.MapGetAndPost("/api/user/2fa/init", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.Initialize2FA));
+            _webService.MapGetAndPost("/api/user/2fa/enable", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.Enable2FA));
+            _webService.MapGetAndPost("/api/user/2fa/disable", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.Disable2FA));
             _webService.MapGetAndPost("/api/user/profile/get", _authApi.GetProfile);
             _webService.MapGetAndPost("/api/user/profile/set", context => _settingsApi.WithConfigurationLockAsync(context, _authApi.SetProfile));
             _webService.MapGetAndPost("/api/user/checkForUpdate", _api.CheckForUpdateAsync);
