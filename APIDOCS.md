@@ -5327,7 +5327,7 @@ Explicit `allowZones` and `blockZones` replace the corresponding normalized doma
 
 DHCP scope apply requires DHCP Server Modify permission and Delete permission when removing scopes. Enabled scopes must bind before the server commits changes. Scope files share the configuration rollback journal with the other changed settings. Active leases remain part of the scope when its settings change.
 
-Inspection export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. A scope whose reservations require a client identifier outside the manifest format is listed in `missingInputs`.
+Configuration export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. A scope whose reservations require a client identifier outside the manifest format is listed in `missingInputs`.
 
 DNS listener policy can be applied live. It covers ECS client source selection, the ordered DNS reverse-proxy ACL, and the DNS-over-HTTP real-IP header and help redirect. These settings are node-local. The server rejects conflicting edits and backup restores while the fields are managed by a manifest.
 

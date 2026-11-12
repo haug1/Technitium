@@ -781,7 +781,10 @@ namespace DnsServerCore.Tests
             JsonObject expectedExport = ConfigurationPlan.Export(legacy, includePreviewOnly: false);
             expectedExport["allowZones"] = new JsonArray();
             expectedExport["blockZones"] = new JsonArray();
-            Assert.True(JsonNode.DeepEquals(expectedExport, JsonNode.Parse(manifest.GetRawText())));
+            JsonObject actualExport = JsonNode.Parse(manifest.GetRawText())!.AsObject();
+            Assert.NotNull(actualExport["dhcp"]?["scopes"]?["Default"]);
+            actualExport.Remove("dhcp");
+            Assert.True(JsonNode.DeepEquals(expectedExport, actualExport));
             Assert.Equal("Http", manifest.GetProperty("dns").GetProperty("proxy").GetProperty("type").GetString());
 
             JsonElement inspection = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
@@ -801,6 +804,16 @@ namespace DnsServerCore.Tests
             JsonElement rejected = await server.CallAsync("settings/config/export", token);
             Assert.Equal("error", rejected.GetProperty("status").GetString());
             Assert.False(rejected.TryGetProperty("response", out JsonElement denied) && denied.TryGetProperty("manifest", out _));
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "admin/permissions/set?section=Settings&userPermissions=export-viewer%7Ctrue%7Cfalse%7Cfalse", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "admin/permissions/set?section=DhcpServer&groupPermissions=Administrators%7Ctrue%7Ctrue%7Ctrue", server.AdminToken));
+            JsonElement restricted = await server.CallAsync("settings/config/export", token);
+            LoopbackWebService.AssertOk(restricted);
+            Assert.False(restricted.GetProperty("response").GetProperty("manifest").TryGetProperty("dhcp", out _));
+            Assert.DoesNotContain(restricted.GetProperty("response").GetProperty("missingInputs").EnumerateArray(),
+                entry => entry.GetString()!.StartsWith("/dhcp", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -2518,7 +2531,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task DhcpInspectionExportAndExclusionPreviewUseConfiguredScopeValues()
+        public async Task DhcpExportReproducesConfiguredScopeValuesAndExclusions()
         {
             await using var server = await LoopbackWebService.StartAsync();
             LoopbackWebService.AssertOk(await server.CallAsync(
@@ -2527,7 +2540,7 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-0A&ipAddress=192.0.2.30&hostName=reserved", server.AdminToken));
 
-            JsonElement response = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
+            JsonElement response = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(response);
             JsonElement export = response.GetProperty("response").GetProperty("manifest");
             _ = Load(export.GetRawText());
@@ -2537,6 +2550,18 @@ namespace DnsServerCore.Tests
             Assert.Equal("reserved", scope.GetProperty("reservations").GetProperty("02-00-00-00-00-0A").GetProperty("hostName").GetString());
             Assert.False(scope.TryGetProperty("activeLeases", out _));
             Assert.Equal("192.0.2.45", Assert.Single(scope.GetProperty("exclusions").EnumerateArray()).GetProperty("startingAddress").GetString());
+
+            await using var destination = await LoopbackWebService.StartAsync();
+            string dhcpManifest = "{\"schemaVersion\":1,\"dhcp\":" + export.GetProperty("dhcp").GetRawText() + "}";
+            string revision = (await PreviewAsync(destination, dhcpManifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, dhcpManifest, revision));
+            await destination.RestartAsync();
+            Assert.Empty((await PreviewAsync(destination, dhcpManifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement destinationExport = await destination.CallAsync("settings/config/export", destination.AdminToken);
+            LoopbackWebService.AssertOk(destinationExport);
+            Assert.Equal(export.GetProperty("dhcp").GetRawText(),
+                destinationExport.GetProperty("response").GetProperty("manifest").GetProperty("dhcp").GetRawText());
 
             const string resize = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}""";
             using var invalid = new StringContent(resize, Encoding.UTF8, "application/json");
