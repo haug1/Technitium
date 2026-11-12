@@ -1208,7 +1208,7 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
                     bW.Write(_overrideCatalogZoneTransfer);
-                    bW.Write(_overrideCatalogNotify);
+                    bW.Write(policies.OverrideCatalogNotify ?? _overrideCatalogNotify);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
                     WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);
@@ -1275,7 +1275,7 @@ namespace DnsServerCore.Dns.Zones
                     bW.Write(catalog ?? _catalogZoneName ?? "");
                     bW.Write(_overrideCatalogQueryAccess);
                     bW.Write(_overrideCatalogZoneTransfer);
-                    bW.Write(_overrideCatalogNotify);
+                    bW.Write(policies.OverrideCatalogNotify ?? _overrideCatalogNotify);
 
                     bW.Write((byte)(policies.QueryAccess ?? _queryAccess));
                     WriteNetworkACLTo(policies.QueryAcl ?? _queryAccessNetworkACL, bW);

@@ -828,13 +828,14 @@ namespace DnsServerCore.Dns.ZoneManagers
                 return null;
             }
             if (type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
-                !catalog.TryGetProperty("name", out JsonElement value) || catalog.EnumerateObject().Count() != 1)
-                throw new InvalidDataException($"{path}/catalog: Membership currently accepts a catalog name for a primary or forwarder zone.");
+                !catalog.TryGetProperty("name", out JsonElement value) ||
+                catalog.EnumerateObject().Any(field => field.Name is not ("name" or "overrideNotify")))
+                throw new InvalidDataException($"{path}/catalog: Specify a catalog name and optional notification override for a primary or forwarder zone.");
             string before = member?.CatalogZoneName;
             if (before is not null && GetAuthZoneInfo(before)?.Type != AuthZoneType.Catalog)
                 throw new InvalidDataException($"{path}/catalog/name: This membership is maintained by a secondary catalog.");
-            if (member is not null && (member.OverrideCatalogQueryAccess || member.OverrideCatalogZoneTransfer || member.OverrideCatalogNotify))
-                throw new InvalidDataException($"{path}/catalog: Catalog overrides must be cleared before managing membership.");
+            if (member is not null && (member.OverrideCatalogQueryAccess || member.OverrideCatalogZoneTransfer))
+                throw new InvalidDataException($"{path}/catalog: Clear query and transfer overrides before managing membership.");
 
             string after = value.ValueKind == JsonValueKind.Null ? "" :
                 ConfigurationManifest.CanonicalDnsName(value.GetString(), path + "/catalog/name", allowRoot: false);
@@ -933,9 +934,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                     bool? disabled = declaration.Value.TryGetProperty("enabled", out JsonElement enabled)
                         ? enabled.ValueKind == JsonValueKind.False : null;
                     ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, path, zone, tsigKeys);
-                    ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, name, path, zone);
                     var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, tsigKeys, path);
                     string catalog = PrepareManifestCatalogMembership(zones, declaration.Value, zone, type, path);
+                    ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, name, path, zone);
                     if (catalog is not null)
                     {
                         string before = zone?.CatalogZoneName ?? "";
@@ -1327,7 +1328,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 if (field.Name is "enabled" or "records")
                     fields.Add(field.Name);
                 else if (field.Name == "catalog")
-                    fields.Add("catalog/name");
+                    fields.AddRange(field.Value.EnumerateObject().Select(option => "catalog/" + option.Name));
                 else if (field.Name == "primary")
                     fields.AddRange(field.Value.EnumerateObject().Select(option => "primary/" + option.Name));
                 else if (ConfigurationZonePolicies.IsPolicy(field.Name))

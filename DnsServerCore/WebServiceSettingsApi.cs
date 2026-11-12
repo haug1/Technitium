@@ -1404,6 +1404,8 @@ namespace DnsServerCore
                             }
                             writer.WriteString("currentCatalog", before);
                             writer.WriteBoolean("catalogChanged", before != catalog);
+                            if (ConfigurationZonePolicies.ReadCatalogNotifyOverride(declaration.Value).HasValue)
+                                writer.WriteBoolean("currentCatalogNotifyOverride", zone?.OverrideCatalogNotify ?? false);
                         }
                         if (type == AuthZoneType.Catalog)
                             ConfigurationZonePolicies.Prepare(declaration.Value, name, zonePath, zone);

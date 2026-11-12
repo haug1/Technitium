@@ -16,7 +16,8 @@ namespace DnsServerCore.Configuration
             AuthZoneQueryAccess? QueryAccess, NetworkAccessControl[] QueryAcl,
             AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl, IReadOnlySet<string> TransferKeys,
             AuthZoneNotify? Notify, IPAddress[] NotifyServers,
-            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl, PolicyMap UpdatePolicies, IPAddress[] NotifySecondaryServers)
+            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl, PolicyMap UpdatePolicies, IPAddress[] NotifySecondaryServers,
+            bool? OverrideCatalogNotify)
         {
             internal void Apply(AuthZoneInfo zone)
             {
@@ -36,6 +37,8 @@ namespace DnsServerCore.Configuration
                     zone.NotifySecondaryCatalogNameServers = NotifySecondaryServers;
                 if (Notify.HasValue)
                     zone.Notify = Notify.Value;
+                if (OverrideCatalogNotify.HasValue)
+                    zone.OverrideCatalogNotify = OverrideCatalogNotify.Value;
                 if (UpdateAcl is not null)
                     zone.UpdateNetworkACL = UpdateAcl;
                 if (Update.HasValue)
@@ -89,11 +92,14 @@ namespace DnsServerCore.Configuration
             if (ConfigurationZoneUpdatePolicies.Same(policies, current?.UpdateSecurityPolicies))
                 policies = null;
 
+            bool? overrideNotify = ReadCatalogNotifyOverride(declaration);
+            if (overrideNotify.HasValue && overrideNotify.Value == (current?.OverrideCatalogNotify ?? false))
+                overrideNotify = null;
             return new Changes(
                 ReadMode(query, "query", current?.QueryAccess), ReadAcl(query, "query", current?.QueryAccessNetworkACL),
                 ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL), transferKeys,
                 notifyMode, notifyServers,
-                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies, notifySecondaryServers);
+                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies, notifySecondaryServers, overrideNotify);
 
             T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
             {
@@ -115,6 +121,10 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal static bool? ReadCatalogNotifyOverride(JsonElement declaration) =>
+            declaration.TryGetProperty("catalog", out JsonElement catalog) && catalog.TryGetProperty("overrideNotify", out JsonElement value)
+                ? value.ValueKind == JsonValueKind.True : null;
+
         internal static void CheckRestoreOwnership(string path, IEnumerable<string> fields, AuthZoneInfo current, AuthZoneInfo candidate)
         {
             foreach (string field in fields)
@@ -130,6 +140,7 @@ namespace DnsServerCore.Configuration
                     "notify/mode" => current.Notify != candidate.Notify,
                     "notify/nameServers" => !Equal(current.NotifyNameServers, candidate.NotifyNameServers),
                     "notify/secondaryCatalogNameServers" => !Equal(current.NotifySecondaryCatalogNameServers, candidate.NotifySecondaryCatalogNameServers),
+                    "catalog/overrideNotify" => current.OverrideCatalogNotify != candidate.OverrideCatalogNotify,
                     "updates/mode" => current.Update != candidate.Update,
                     "updates/networkAcl" => !Equal(current.UpdateNetworkACL, candidate.UpdateNetworkACL),
                     _ => ConfigurationZoneUpdatePolicies.OwnedValueChanged(field, current.UpdateSecurityPolicies, candidate.UpdateSecurityPolicies)

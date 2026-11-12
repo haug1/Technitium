@@ -31,7 +31,7 @@ namespace DnsServerCore.Configuration
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
                     (zone.CatalogZoneName is string catalog && (zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder) ||
                         isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog ||
-                        zone.OverrideCatalogQueryAccess || zone.OverrideCatalogZoneTransfer || zone.OverrideCatalogNotify)))
+                        zone.OverrideCatalogQueryAccess || zone.OverrideCatalogZoneTransfer)))
                 {
                     missingInputs.Add(path);
                     continue;
@@ -52,8 +52,9 @@ namespace DnsServerCore.Configuration
                     updates = new { mode = zone.Update.ToString(), networkAcl = zone.UpdateNetworkACL?.Select(rule => rule.ToString()) ?? [] }
                 }).AsObject();
 
-                if (zone.CatalogZoneName is string catalogName)
-                    declaration["catalog"] = new JsonObject { ["name"] = catalogName };
+                if (zone.Type is AuthZoneType.Primary or AuthZoneType.Forwarder &&
+                    (zone.CatalogZoneName is not null || zone.OverrideCatalogNotify))
+                    declaration["catalog"] = new JsonObject { ["name"] = zone.CatalogZoneName, ["overrideNotify"] = zone.OverrideCatalogNotify };
                 if (zone.ZoneTransferTsigKeyNames?.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                 {
                     declaration["transfer"].AsObject().Remove("tsigKeys");

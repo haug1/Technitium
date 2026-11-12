@@ -4412,7 +4412,7 @@ namespace DnsServerCore.Tests
             const string source = """
                 {"schemaVersion":1,"zones":{"catalog.test":{"type":"Catalog","transfer":{"mode":"Allow"},
                   "notify":{"mode":"None","secondaryCatalogNameServers":["127.0.0.1"]}
-                },"member.test":{"type":"Primary","catalog":{"name":"catalog.test"}}}}
+                },"member.test":{"type":"Primary","catalog":{"name":"catalog.test","overrideNotify":false}}}}
                 """;
             string revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
             string blockedWrite = Path.Combine(primary.ConfigurationDirectory, "zones", "member.test.tmp");
@@ -4423,10 +4423,13 @@ namespace DnsServerCore.Tests
             Directory.Delete(blockedWrite);
             revision = (await PreviewAsync(primary, source)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(primary, source, revision));
-            string updatedSource = source.Replace("\"mode\":\"Allow\"", "\"mode\":\"UseSpecifiedNetworkACL\",\"networkAcl\":[\"127.0.0.1/32\"]", StringComparison.Ordinal);
+            string updatedSource = source.Replace("\"mode\":\"Allow\"", "\"mode\":\"UseSpecifiedNetworkACL\",\"networkAcl\":[\"127.0.0.1/32\"]", StringComparison.Ordinal)
+                .Replace("\"overrideNotify\":false", "\"overrideNotify\":true", StringComparison.Ordinal);
             JsonElement sourcePlan = await PreviewAsync(primary, updatedSource);
             Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
                 change => change.GetProperty("path").ValueEquals("/zones/catalog.test/transfer/mode"));
+            Assert.Contains(sourcePlan.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/zones/member.test/catalog/overrideNotify"));
             LoopbackWebService.AssertOk(await ApplyAsync(primary, updatedSource, sourcePlan.GetProperty("revision").GetString()!));
             await primary.RestartAsync();
             Assert.Empty((await PreviewAsync(primary, updatedSource)).GetProperty("changes").EnumerateArray());
@@ -4441,6 +4444,10 @@ namespace DnsServerCore.Tests
             Assert.Equal("127.0.0.1", Assert.Single(sourceZone.GetProperty("notify").GetProperty("secondaryCatalogNameServers").EnumerateArray()).GetString());
             JsonElement memberExport = sourceExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
             Assert.Equal("catalog.test", memberExport.GetProperty("catalog").GetProperty("name").GetString());
+            Assert.True(memberExport.GetProperty("catalog").GetProperty("overrideNotify").GetBoolean());
+            JsonElement overrideDenied = await primary.CallAsync("zones/options/set?zone=member.test&overrideCatalogNotify=false", primary.AdminToken);
+            Assert.Equal("error", overrideDenied.GetProperty("status").GetString());
+            Assert.Contains("/zones/member.test/catalog/overrideNotify", overrideDenied.GetProperty("errorMessage").GetString());
             using var detach = new FormUrlEncodedContent([new("zone", "member.test"), new("catalog", "")]);
             JsonElement blocked = await primary.CallAsync("zones/options/set", primary.AdminToken, detach);
             Assert.Equal("error", blocked.GetProperty("status").GetString());
