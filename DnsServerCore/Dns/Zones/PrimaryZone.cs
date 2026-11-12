@@ -62,6 +62,11 @@ namespace DnsServerCore.Dns.Zones
         #region constructor
 
         public PrimaryZone(DnsServer dnsServer, AuthZoneInfo zoneInfo)
+            : this(dnsServer, zoneInfo, initializeTimers: true)
+        {
+        }
+
+        internal PrimaryZone(DnsServer dnsServer, AuthZoneInfo zoneInfo, bool initializeTimers)
             : base(dnsServer, zoneInfo)
         {
             IReadOnlyCollection<DnssecPrivateKey> dnssecPrivateKeys = zoneInfo.DnssecPrivateKeys;
@@ -73,8 +78,11 @@ namespace DnsServerCore.Dns.Zones
                     _dnssecPrivateKeys.Add(dnssecPrivateKey.KeyTag, dnssecPrivateKey);
             }
 
-            InitNotify();
-            InitRecordExpiry();
+            if (initializeTimers)
+            {
+                InitNotify();
+                InitRecordExpiry();
+            }
         }
 
         public PrimaryZone(DnsServer dnsServer, string name, bool useSoaSerialDateScheme)

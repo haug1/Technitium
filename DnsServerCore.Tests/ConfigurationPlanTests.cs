@@ -3136,7 +3136,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task ZoneRecordPreviewTracksRecordChangesWithoutMutatingDns()
+        public async Task ZoneRecordPreviewLeavesDnsUnchangedUntilApply()
         {
             await using var server = await LoopbackWebService.StartAsync();
             LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=records.test&type=Primary", server.AdminToken));
@@ -3167,11 +3167,24 @@ namespace DnsServerCore.Tests
             Assert.Equal(preview.GetProperty("revision").GetString(),
                 (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
 
-            LoopbackWebService.AssertOk(await server.CallAsync(
-                "zones/records/add?zone=records.test&domain=new.records.test&type=A&ipAddress=192.0.2.11", server.AdminToken));
-            JsonElement after = await PreviewAsync(server, manifest);
-            Assert.NotEqual(preview.GetProperty("revision").GetString(), after.GetProperty("revision").GetString());
-            Assert.Equal("Update", Assert.Single(after.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+            string revision = preview.GetProperty("revision").GetString()!;
+            string staging = Directory.CreateDirectory(Path.Combine(server.ConfigurationDirectory, "zones", "records.test.tmp")).FullName;
+            try
+            {
+                Assert.Equal("error", (await ApplyAsync(server, manifest, revision)).GetProperty("status").GetString());
+                Assert.Equal(300u, Assert.Single((await server.QueryAsync("www.records.test", DnsResourceRecordType.A)).Answer).OriginalTtlValue);
+            }
+            finally
+            {
+                Directory.Delete(staging);
+            }
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            Assert.Equal(600u, Assert.Single((await server.QueryAsync("www.records.test", DnsResourceRecordType.A)).Answer).OriginalTtlValue);
+            DnsResourceRecord added = Assert.Single((await server.QueryAsync("new.records.test", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.11"), Assert.IsType<DnsARecordData>(added.RDATA).Address);
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            Assert.Equal(600u, Assert.Single((await server.QueryAsync("www.records.test", DnsResourceRecordType.A)).Answer).OriginalTtlValue);
 
             const string emptyRecords = """{"schemaVersion":1,"zones":{"records.test":{"records":[]}}}""";
             using var content = new StringContent(emptyRecords, Encoding.UTF8, "application/json");
@@ -3192,6 +3205,17 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=records.test&type=Primary", server.AdminToken));
             Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
             Assert.Single((await server.QueryAsync("records.test", DnsResourceRecordType.SOA)).Answer);
+
+            const string create = """
+                {"schemaVersion":1,"zones":{"fresh.test":{"type":"Primary","records":[
+                    {"owner":"www.fresh.test","type":"A","data":{"rawHex":"c000020b"}}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, create)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, create, revision));
+            Assert.Single((await server.QueryAsync("www.fresh.test", DnsResourceRecordType.A)).Answer);
+            Assert.Single((await server.QueryAsync("fresh.test", DnsResourceRecordType.SOA)).Answer);
+            Assert.Empty((await PreviewAsync(server, create)).GetProperty("changes").EnumerateArray());
             Assert.Single((await server.QueryAsync("records.test", DnsResourceRecordType.NS)).Answer);
 
             LoopbackWebService.AssertOk(await server.CallAsync(

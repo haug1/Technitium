@@ -828,6 +828,18 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
+        internal void SetManifestStagingDisabled(bool disabled) => base.Disabled = disabled;
+
+        internal void ApplyManifestRecordHistory(ApexZone staged)
+        {
+            lock (_zoneHistory)
+            {
+                _zoneHistory.Clear();
+                _zoneHistory.AddRange(staged.GetZoneHistory());
+                _lastModified = staged.LastModified;
+            }
+        }
+
         public IReadOnlyList<DnsResourceRecord> GetZoneHistory()
         {
             lock (_zoneHistory)

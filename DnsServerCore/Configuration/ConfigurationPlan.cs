@@ -881,7 +881,7 @@ namespace DnsServerCore.Configuration
                             }
                             continue;
                         }
-                        if (field.Name == "enabled" ||
+                        if (field.Name is "enabled" or "records" ||
                             (field.Name == "type" && field.Value.ValueEquals("Primary")))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
@@ -1113,14 +1113,21 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal sealed record ZoneRecordEdit(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data,
+            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, ConfigurationChangeKind? Kind);
+
         internal static ConfigurationChangeKind?[] CompareZoneRecords(string zoneName, string declarationName, string serverDomain,
+            JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords) =>
+            PrepareZoneRecordEdits(zoneName, declarationName, serverDomain, records, currentRecords).Select(edit => edit.Kind).ToArray();
+
+        internal static ZoneRecordEdit[] PrepareZoneRecordEdits(string zoneName, string declarationName, string serverDomain,
             JsonElement records, IReadOnlyList<DnsResourceRecord> currentRecords)
         {
             string path = AppendPath("/zones", declarationName) + "/records";
             if (records.ValueKind == JsonValueKind.Null)
                 throw new InvalidDataException($"{path}: Planning a record collection reset is not implemented.");
 
-            var changes = new ConfigurationChangeKind?[records.GetArrayLength()];
+            var changes = new ZoneRecordEdit[records.GetArrayLength()];
             var current = currentRecords.ToLookup(record => (record.Name.ToLowerInvariant(), record.Type));
             var matched = new HashSet<DnsResourceRecord>(ReferenceEqualityComparer.Instance);
             var declared = new HashSet<(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data)>();
@@ -1157,11 +1164,15 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{recordPath}: Duplicate record.");
 
                 DnsResourceRecord existing = current[(owner, type)].FirstOrDefault(candidate => candidate.Class == DnsClass.IN && candidate.RDATA.Equals(rdata));
+                uint? ttl = record.TryGetProperty("ttl", out JsonElement ttlValue) ? decimal.ToUInt32(ttlValue.GetDecimal()) : null;
+                bool? disabled = record.TryGetProperty("disabled", out JsonElement disabledValue) ? disabledValue.GetBoolean() : null;
+                string comments = record.TryGetProperty("comments", out JsonElement commentsValue) ? commentsValue.GetString() : null;
+                ConfigurationChangeKind? kind = null;
                 if (existing is null)
                 {
                     if (current[(owner, type)].Any(IsLeaseRecord))
                         throw new InvalidDataException($"{recordPath}: This record conflicts with a DHCP-maintained record.");
-                    changes[index] = ConfigurationChangeKind.Add;
+                    kind = ConfigurationChangeKind.Add;
                 }
                 else
                 {
@@ -1169,11 +1180,12 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{recordPath}: This record is maintained by DHCP.");
                     matched.Add(existing);
                     var metadata = existing.Tag as GenericRecordInfo;
-                    if ((record.TryGetProperty("ttl", out JsonElement ttl) && ttl.GetDecimal() != existing.OriginalTtlValue) ||
-                        (record.TryGetProperty("disabled", out JsonElement disabled) && disabled.GetBoolean() != (metadata?.Disabled ?? false)) ||
-                        (record.TryGetProperty("comments", out JsonElement comments) && comments.GetString() != (metadata?.Comments ?? string.Empty)))
-                        changes[index] = ConfigurationChangeKind.Update;
+                    if ((ttl.HasValue && ttl.Value != existing.OriginalTtlValue) ||
+                        (disabled.HasValue && disabled.Value != (metadata?.Disabled ?? false)) ||
+                        (comments is not null && comments != (metadata?.Comments ?? string.Empty)))
+                        kind = ConfigurationChangeKind.Update;
                 }
+                changes[index] = new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, kind);
                 index++;
             }
 

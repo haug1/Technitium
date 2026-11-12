@@ -621,8 +621,10 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZones(ConfigurationManifest manifest, AuthManager auth, User creator)
         {
-            var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies)>();
+            var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
+            var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            string serverDomain = _dnsServer.ServerDomain;
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
             {
                 foreach (JsonProperty declaration in zones.EnumerateObject())
@@ -637,7 +639,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         if (zone is not null)
                         {
-                            changed.Add((name, zone, true, null, default));
+                            changed.Add((name, zone, true, null, default, default));
                             membership.Add(name, false);
                         }
                         continue;
@@ -646,17 +648,30 @@ namespace DnsServerCore.Dns.ZoneManagers
                     bool? disabled = declaration.Value.TryGetProperty("enabled", out JsonElement enabled)
                         ? enabled.ValueKind == JsonValueKind.False : null;
                     ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, path, zone);
+                    bool editRecords = declaration.Value.TryGetProperty("records", out JsonElement records);
+                    if (editRecords && zone is not null)
+                    {
+                        DateTime revision = zone.LastModified;
+                        var currentRecords = new List<DnsResourceRecord>();
+                        ListAllZoneRecords(name, currentRecords);
+                        editRecords = ConfigurationPlan.PrepareZoneRecordEdits(name, name, serverDomain, records, currentRecords)
+                            .Any(edit => edit.Kind.HasValue);
+                        if (editRecords)
+                            recordRevisions.Add(name, revision);
+                    }
+                    if (!editRecords)
+                        records = default;
                     if (zone is null)
                     {
                         if (!declaration.Value.TryGetProperty("type", out _))
                             throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
                         ValidateZoneName(name);
-                        changed.Add((name, null, false, disabled ?? false, policies));
+                        changed.Add((name, null, false, disabled ?? false, policies, records));
                         membership.Add(name, true);
                     }
-                    else if ((disabled.HasValue && zone.Disabled != disabled.Value) || policies != default)
+                    else if ((disabled.HasValue && zone.Disabled != disabled.Value) || policies != default || editRecords)
                     {
-                        changed.Add((name, zone, false, disabled, policies));
+                        changed.Add((name, zone, false, disabled, policies, records));
                     }
                 }
             }
@@ -668,35 +683,55 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (membership.Count > 0)
                 files.Add("auth.config");
             var created = new Dictionary<string, PrimaryZone>(StringComparer.Ordinal);
+            var stagedRecords = new Dictionary<string, (PrimaryZone Zone, List<DnsResourceRecord> Records,
+                HashSet<(string Owner, DnsResourceRecordType Type)> ChangedSets)>(StringComparer.Ordinal);
             Action writeAuth = null;
             return (Commit, Write, files.ToArray());
 
             void Write()
             {
-                foreach (var (name, current, remove, disabled, policies) in changed)
+                foreach (var (name, current, remove, disabled, policies, records) in changed)
                 {
                     string path = Path.Combine(_dnsServer.ConfigFolder, "zones", name + ".zone");
                     if (remove)
                     {
                         File.Delete(path);
                     }
-                    else if (current is not null)
+                    else if (current is not null && records.ValueKind == JsonValueKind.Undefined)
                     {
                         SaveZoneFileInternal(name, disabled, policies);
                     }
                     else
                     {
-                        var zone = new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme);
-                        created.Add(name, zone);
-                        zone.Disabled = disabled.Value;
-                        var zoneInfo = new AuthZoneInfo(zone, loadHistory: true);
-                        policies.Apply(zoneInfo);
-                        var records = new List<DnsResourceRecord>();
-                        zone.ListAllRecords(records);
+                        PrimaryZone zone;
+                        var allRecords = new List<DnsResourceRecord>();
+                        if (current is null)
+                        {
+                            zone = new PrimaryZone(_dnsServer, name, _useSoaSerialDateScheme);
+                            created.Add(name, zone);
+                            zone.Disabled = disabled.Value;
+                            policies.Apply(new AuthZoneInfo(zone));
+                            zone.ListAllRecords(allRecords);
+                        }
+                        else
+                        {
+                            if (((PrimaryZone)current.ApexZone).DnssecStatus != AuthZoneDnssecStatus.Unsigned)
+                                throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}/records: Applying records requires an unsigned primary zone.");
+                            zone = new PrimaryZone(_dnsServer, GetAuthZoneInfo(name, loadHistory: true), initializeTimers: false);
+                            stagedRecords.Add(name, (zone, allRecords, null));
+                            ListAllZoneRecords(name, allRecords);
+                        }
+
+                        if (records.ValueKind != JsonValueKind.Undefined)
+                        {
+                            var changedSets = StageManifestRecords(zone, records, allRecords, membership, current is null ? _dnsServer.ServerDomain : serverDomain);
+                            stagedRecords[name] = (zone, allRecords, changedSets);
+                        }
+
                         string temporary = Path.ChangeExtension(path, ".tmp");
                         using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write))
                         {
-                            WriteZoneTo(new AuthZoneInfo(zone, loadHistory: true), records, output, disabled);
+                            WriteZoneTo(new AuthZoneInfo(zone, loadHistory: true), allRecords, output, disabled, policies);
                             output.Flush(flushToDisk: true);
                         }
                         File.Move(temporary, path, true);
@@ -713,10 +748,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     lock (_saveLock)
                     {
-                        foreach (var (name, current, _, _, _) in changed)
+                        foreach (var (name, current, _, _, _, _) in changed)
                         {
                             AuthZoneInfo live = GetAuthZoneInfo(name);
-                            if (!ReferenceEquals(live?.ApexZone, current?.ApexZone) || live?.CatalogZoneName is not null)
+                            if (!ReferenceEquals(live?.ApexZone, current?.ApexZone) || live?.CatalogZoneName is not null ||
+                                (recordRevisions.TryGetValue(name, out DateTime revision) && live?.LastModified != revision))
                                 throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/zones", name)}: The zone changed during apply.");
                         }
 
@@ -732,10 +768,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             foreach (PrimaryZone zone in created.Values)
                                 zone.Dispose();
+                            foreach (var (name, stage) in stagedRecords)
+                            {
+                                if (!created.ContainsKey(name))
+                                    stage.Zone.Dispose();
+                            }
                             throw;
                         }
 
-                        foreach (var (name, current, remove, disabled, policies) in changed)
+                        foreach (var (name, current, remove, disabled, policies, records) in changed)
                         {
                             if (remove)
                             {
@@ -756,6 +797,27 @@ namespace DnsServerCore.Dns.ZoneManagers
                                 _zoneIndex.Add(new AuthZoneInfo(zone));
                             }
 
+                            if (stagedRecords.TryGetValue(name, out var stage))
+                            {
+                                ApexZone live = current?.ApexZone ?? stage.Zone;
+                                List<DnsResourceRecord> recordsToPublish = current is null ? stage.Records : stage.Records
+                                    .Where(record => stage.ChangedSets.Contains((record.Name.ToLowerInvariant(), record.Type))).ToList();
+                                foreach (var owner in DnsResourceRecord.GroupRecords(recordsToPublish))
+                                {
+                                    AuthZone node = owner.Key.Equals(name, StringComparison.OrdinalIgnoreCase)
+                                        ? live : GetOrAddSubDomainZone(name, owner.Key);
+                                    foreach (var rrset in owner.Value)
+                                        node.LoadRecords(rrset.Key, rrset.Value);
+                                    if (node is SubDomainZone subdomain)
+                                        subdomain.AutoUpdateState();
+                                }
+                                if (current is not null)
+                                {
+                                    live.ApplyManifestRecordHistory(stage.Zone);
+                                    stage.Zone.Dispose();
+                                }
+                                live.TriggerNotify();
+                            }
                             _dnsServer.CacheZoneManager.DeleteZone(name);
                         }
                         _zoneIndex.Sort();
@@ -766,6 +828,118 @@ namespace DnsServerCore.Dns.ZoneManagers
                     _zoneIndexLock.ExitWriteLock();
                 }
             }
+        }
+
+        private HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestRecords(PrimaryZone zone, JsonElement declaration, List<DnsResourceRecord> records,
+            IReadOnlyDictionary<string, bool> membership, string serverDomain)
+        {
+            string path = ConfigurationPlan.AppendPath("/zones", zone.Name) + "/records";
+            var edits = ConfigurationPlan.PrepareZoneRecordEdits(zone.Name, zone.Name, serverDomain, declaration, records);
+            var owners = DnsResourceRecord.GroupRecords(records);
+            var changed = new HashSet<(string Owner, DnsResourceRecordType Type)>();
+            // The staging zone uses the normal record setters and SOA history, with notifications disabled.
+            bool disabled = zone.Disabled;
+            zone.Disabled = true;
+            DnsResourceRecord soa = owners[zone.Name][DnsResourceRecordType.SOA][0];
+            zone.LoadRecords(DnsResourceRecordType.SOA, [CopyRecord(soa, soa.OriginalTtlValue)]);
+            foreach (var group in edits.GroupBy(edit => edit.Owner, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!group.Any(edit => edit.Kind.HasValue))
+                    continue;
+
+                bool apex = group.Key.Equals(zone.Name, StringComparison.OrdinalIgnoreCase);
+                if (!apex)
+                {
+                    string relative = zone.Name.Length == 0 ? group.Key : group.Key[..^(zone.Name.Length + 1)];
+                    AuthZoneInfo closest = FindAuthZoneInfo(group.Key);
+                    bool delegated = closest is not null && closest.Name != zone.Name &&
+                        closest.Name.Length > zone.Name.Length && !membership.TryGetValue(closest.Name, out _);
+                    bool newDelegation = membership.Any(entry => entry.Value && entry.Key != zone.Name &&
+                        (group.Key == entry.Key || group.Key.EndsWith("." + entry.Key, StringComparison.Ordinal)));
+                    if (relative.Contains('.') && (delegated || newDelegation))
+                        throw new InvalidDataException($"{path}: A record belongs to a child zone.");
+                }
+
+                AuthZone node = apex ? zone : new PrimarySubDomainZone(zone, group.Key);
+                if (!owners.TryGetValue(group.Key, out var rrsets))
+                    owners.Add(group.Key, rrsets = new Dictionary<DnsResourceRecordType, List<DnsResourceRecord>>());
+                foreach (var (type, existing) in rrsets)
+                {
+                    if (!apex || type != DnsResourceRecordType.SOA)
+                        node.LoadRecords(type, existing);
+                }
+
+                foreach (var rrset in group.GroupBy(edit => edit.Type))
+                {
+                    if (!rrset.Any(edit => edit.Kind.HasValue))
+                        continue;
+                    rrsets.TryGetValue(rrset.Key, out List<DnsResourceRecord> previous);
+                    uint[] explicitTtls = rrset.Where(edit => edit.Ttl.HasValue).Select(edit => edit.Ttl.Value).Distinct().ToArray();
+                    if (explicitTtls.Length > 1)
+                        throw new InvalidDataException($"{path}: Records in an RRset must have the same TTL.");
+                    uint ttl = explicitTtls.Length == 1 ? explicitTtls[0] :
+                        previous?.FirstOrDefault()?.OriginalTtlValue ?? DefaultRecordTtl;
+                    var replacement = new List<DnsResourceRecord>();
+                    foreach (DnsResourceRecord record in previous ?? [])
+                    {
+                        if (!rrset.Any(edit => ReferenceEquals(edit.Existing, record)))
+                        {
+                            if (record.OriginalTtlValue != ttl)
+                                throw new InvalidDataException($"{path}: The TTL would change a server-maintained record.");
+                            replacement.Add(record);
+                        }
+                    }
+                    foreach (var edit in rrset)
+                    {
+                        DnsResourceRecord record = edit.Existing is null
+                            ? new DnsResourceRecord(edit.Owner, edit.Type, DnsClass.IN, ttl, edit.Data)
+                            : CopyRecord(edit.Existing, ttl);
+                        GenericRecordInfo info = record.GetAuthGenericRecordInfo();
+                        if (edit.Disabled.HasValue)
+                            info.Disabled = edit.Disabled.Value;
+                        if (edit.Comments is not null)
+                            info.Comments = edit.Comments;
+                        info.LastModified = DateTime.UtcNow;
+                        replacement.Add(record);
+                    }
+                    if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count != 1)
+                        throw new InvalidDataException($"{path}: This record type requires a single record at the owner name.");
+
+                    try
+                    {
+                        node.SetRecords(rrset.Key, replacement);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or DnsServerException)
+                    {
+                        throw new InvalidDataException($"{path}: The record set is invalid for this primary zone.");
+                    }
+                    rrsets[rrset.Key] = replacement;
+                    changed.Add((group.Key.ToLowerInvariant(), rrset.Key));
+                }
+            }
+
+            owners[zone.Name][DnsResourceRecordType.SOA] = zone.GetRecords(DnsResourceRecordType.SOA).ToList();
+            records.Clear();
+            foreach (var owner in owners.Values)
+                foreach (var rrset in owner.Values)
+                    records.AddRange(rrset);
+            // New zones are still detached here. Existing zones use a staging instance without timers.
+            zone.SetManifestStagingDisabled(disabled);
+            if (changed.Count > 0)
+                changed.Add((zone.Name, DnsResourceRecordType.SOA));
+            return changed;
+        }
+
+        private static DnsResourceRecord CopyRecord(DnsResourceRecord record, uint ttl)
+        {
+            using var data = new MemoryStream();
+            var writer = new BinaryWriter(data);
+            record.GetAuthGenericRecordInfo().WriteTo(writer);
+            data.Position = 0;
+            return new DnsResourceRecord(record.Name, record.Type, record.Class, ttl, record.RDATA)
+            {
+                Tag = AuthRecordInfo.ReadGenericRecordInfoFrom(new BinaryReader(data), record.Type)
+            };
         }
 
         internal void TriggerUpdateServerDomain(bool useBlockingAnswerTtl = false)
