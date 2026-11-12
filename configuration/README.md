@@ -60,6 +60,8 @@ The DNS listener policy applies live. Use `dns.listeners.reverseProxyAcl` for or
 
 Web console certificate settings can be previewed with Settings modify permission. Preview checks `web.certificate.path` and its optional password reference against the candidate HTTPS settings. Standalone servers can apply the certificate at startup or through the API. Export includes the certificate path and `web.useSelfSignedCertificate` and reports a configured password as a missing input. Declare `web.useSelfSignedCertificate: true` and `web.certificate: null` to replace a configured certificate with a generated one.
 
+Set `web.rootPath` in a local startup manifest to serve a different web assets directory. Relative paths resolve from the configuration directory, and the directory must exist. A null value selects the installed web root. The last applied override persists across restarts. The settings API can preview the change and report the effective path, while installation and migration of a custom web root require local filesystem access. Inspection export includes the path.
+
 ## Previewing changes
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config plan path/to/technitium.json https://dns.example.test` against a running instance. Set `TECHNITIUM_CONFIG_API_TOKEN` to a token with Settings view permission. The command accepts HTTP for loopback development instances.

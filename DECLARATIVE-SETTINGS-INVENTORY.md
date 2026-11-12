@@ -4,7 +4,7 @@ This inventory maps existing configuration inputs to proposed manifest paths. De
 
 ## Web service
 
-These settings are node-local. The settings API reads and writes them through `settings/get` and `settings/set`. `webservice.config` stores them except for the web root, which is read from the environment on each web service start. The reader supplies the default proxy ACL for versions before 2, disables missing Unix socket settings, and supplies the default frame policy before version 3. [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L182) · [Web service persistence](DnsServerCore/DnsWebService.cs#L472) · [Web root](DnsServerCore/DnsWebService.cs#L1817)
+These settings are node-local. The settings API reads and writes them through `settings/get` and `settings/set`. `webservice.config` stores them. Without a persisted web root override, the server reads the web root from the environment at each web service start. The reader supplies the default proxy ACL for versions before 2, disables missing Unix socket settings, and supplies the default frame policy before version 3. [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L182) · [Web service persistence](DnsServerCore/DnsWebService.cs#L472) · [Web root](DnsServerCore/DnsWebService.cs#L1817)
 
 The environment aliases in this table start with `DNS_SERVER_WEB_SERVICE_`. Persisted settings use the environment aliases on initial creation when no legacy configuration was loaded.
 
@@ -26,7 +26,7 @@ The environment aliases in this table start with `DNS_SERVER_WEB_SERVICE_`. Pers
 | `web.frameAncestors` | `webServiceCspFrameAncestorsHeader` | | String, `'none'` | Blank selects the default. API rejects values longer than 255 characters. Applies live. |
 | `web.certificate.path` | `webServiceTlsCertificatePath` | `TLS_CERTIFICATE_PATH` | Optional path, unset | Up to 255 characters. Resolves relative to the config directory. Empty removes the certificate. The loader validates the certificate and updates the TLS context. |
 | `web.certificate.password` | `webServiceTlsCertificatePassword` | `TLS_CERTIFICATE_PASSWORD` | Optional secret reference, unset | Resolved password is limited to 255 characters and used with the certificate path. The API's masked placeholder means retain the current password. Export a reference or a missing-input marker. |
-| `web.rootPath` | | `WWW_FOLDER_PATH` | Directory path, installation `www` directory | A missing directory falls back to the installed web root. Takes effect on web service start. |
+| `web.rootPath` | `webServiceRootPath` (read only) | `WWW_FOLDER_PATH` | Directory path, installation `www` directory | Set with a local startup manifest. A nonexistent declared directory fails startup. A missing environment directory uses the installed web root. |
 
 Default reverse proxy ACL order is `127.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, deny `2000::/3`, allow `::/0`. Certificate timestamps, the generated certificate, and the loaded TLS context are derived or local state. The legacy disabled-zone list is handled during startup migration and belongs to zone enabled state. [Web defaults](DnsServerCore/DnsWebService.cs#L105) · [Legacy migration](DnsServerCore/DnsWebServiceLegacy.cs#L46) · [TLS activation](DnsServerCore/DnsWebService.cs#L2760)
 

@@ -148,6 +148,7 @@ namespace DnsServerCore.Configuration
             ["/dns/listeners/http/helpRedirect"] = Field("enableDnsOverHttpHelpRedirect", true, canApply: true),
             ["/dns/listeners/http/realIpHeader"] = Field("dnsOverHttpRealIpHeader", "X-Real-IP", canApply: true),
             ["/dns/listeners/reverseProxyAcl"] = Field("dnsReverseProxyNetworkACL", Array.Empty<string>(), canApply: true),
+            ["/web/rootPath"] = Field<string>("webServiceRootPath", null, restartWebService: true),
             ["/web/useSelfSignedCertificate"] = Field("webServiceUseSelfSignedTlsCertificate", false, restartWebService: true, canApply: true),
             [ConfigurationWebCertificate.Path + "/path"] = Field<string>("webServiceTlsCertificatePath", null, canApply: true),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
@@ -802,8 +803,39 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }
 
+        internal static string ReadWebRoot(ConfigurationManifest manifest, LogManager log = null)
+        {
+            if (manifest is null || !manifest.Settings.TryGetProperty("web", out JsonElement web) ||
+                !web.TryGetProperty("rootPath", out JsonElement value))
+                return null;
+
+            return NormalizeWebRoot(value, log);
+        }
+
+        private static string NormalizeWebRoot(JsonElement value, LogManager log)
+        {
+            string path = value.GetString();
+            if (string.IsNullOrWhiteSpace(path))
+                return "";
+
+            try
+            {
+                path = log is null ? Path.GetFullPath(path) : log.ConvertToAbsolutePath(path);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
+            {
+                throw new InvalidDataException("/web/rootPath: Invalid directory path.");
+            }
+            if (!Directory.Exists(path))
+                throw new InvalidDataException("/web/rootPath: The directory does not exist on the server.");
+            return Path.TrimEndingDirectorySeparator(path);
+        }
+
         internal static void CheckApplySupport(ConfigurationManifest manifest)
         {
+            if (manifest.FilePath is null && manifest.Settings.TryGetProperty("web", out JsonElement web) && web.TryGetProperty("rootPath", out _))
+                throw new InvalidDataException("/web/rootPath: Changing the served directory requires a local startup manifest.");
+
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
             {
                 if (section.Name is "schemaVersion" or "$schema")
@@ -814,7 +846,7 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (path is "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
@@ -1245,6 +1277,11 @@ namespace DnsServerCore.Configuration
                     {
                         var rules = ConfigurationManifest.ReadWebReverseProxyAcl(desired);
                         candidate = JsonSerializer.SerializeToElement(rules.Select(rule => rule.ToString()).ToArray());
+                    }
+                    else if (path == "/web/rootPath")
+                    {
+                        string directory = NormalizeWebRoot(desired, log);
+                        candidate = JsonSerializer.SerializeToElement(directory.Length == 0 ? null : directory);
                     }
                     else if (path == "/dns/listeners/http/realIpHeader")
                     {

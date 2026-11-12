@@ -220,6 +220,7 @@ namespace DnsServerCore
                 jsonWriter.WriteBoolean("webServiceEnableTls", _dnsWebService._webServiceEnableTls);
                 jsonWriter.WriteBoolean("webServiceEnableHttp3", _dnsWebService._webServiceEnableHttp3);
                 jsonWriter.WriteBoolean("webServiceHttpToTlsRedirect", _dnsWebService._webServiceHttpToTlsRedirect);
+                jsonWriter.WriteString("webServiceRootPath", _dnsWebService._activeWebRoot);
                 jsonWriter.WriteBoolean("webServiceUseSelfSignedTlsCertificate", _dnsWebService._webServiceUseSelfSignedTlsCertificate);
 
                 jsonWriter.WriteNumber("webServiceTlsPort", _dnsWebService._webServiceTlsPort);
@@ -492,6 +493,8 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue("/web/realIpHeader");
                 if (_dnsWebService._manifestOwnsFrameAncestors)
                     jsonWriter.WriteStringValue("/web/frameAncestors");
+                if (_dnsWebService._manifestOwnsWebRoot)
+                    jsonWriter.WriteStringValue("/web/rootPath");
                 if ((_dnsWebService._managedWebListeners & ManagedWebSelfSigned) != 0)
                     jsonWriter.WriteStringValue("/web/useSelfSignedCertificate");
                 if ((_dnsWebService._managedWebListeners & ManagedWebCertificatePath) != 0)
@@ -569,6 +572,8 @@ namespace DnsServerCore
                     missingInputs.Add("/dns/proxy/password");
                 if (!string.IsNullOrEmpty(dns.DnsTlsCertificatePassword))
                     missingInputs.Add("/dns/listeners/certificate/password");
+                if (_dnsWebService._activeWebRoot is not null && !includePreviewOnly)
+                    missingInputs.Add("/web/rootPath");
                 if (!string.IsNullOrEmpty(_dnsWebService._webServiceTlsCertificatePassword))
                     missingInputs.Add("/web/certificate/password");
                 if (dns.TsigKeys is not null)
@@ -600,13 +605,13 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
-                    ConfigurationWebCertificate.Candidate? webCertificate = null;
-                    if (ConfigurationWebCertificate.IsDeclared(manifest))
-                    {
-                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
-                            throw new DnsWebServiceException("Access was denied.");
-                        webCertificate = _dnsWebService.PrepareWebCertificate(manifest, preview: true);
-                    }
+                    bool declaresWebRoot = manifest.Settings.TryGetProperty("web", out JsonElement web) && web.TryGetProperty("rootPath", out _);
+                    bool declaresWebCertificate = ConfigurationWebCertificate.IsDeclared(manifest);
+                    if ((declaresWebRoot || declaresWebCertificate) &&
+                        !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                        throw new DnsWebServiceException("Access was denied.");
+
+                    var webCertificate = declaresWebCertificate ? _dnsWebService.PrepareWebCertificate(manifest, preview: true) : null;
                     _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest), webCertificate?.HasCertificate);
                     CheckDnsCertificatePreviewPermission(manifest, sessionUser);
                     ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer, preview: true);

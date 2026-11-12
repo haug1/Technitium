@@ -726,6 +726,58 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LocalManifestChangesTheServedWebRootAndPersistsIt()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """{"schemaVersion":1,"web":{"rootPath":"console-assets"}}""";
+            const string marker = "configured web root fixture";
+            string root = Path.Combine(server.ConfigurationDirectory, "console-assets");
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(Path.Combine(root, "root-fixture.txt"), marker);
+
+            JsonElement preview = await PreviewAsync(server, manifest);
+            JsonElement change = Assert.Single(preview.GetProperty("changes").EnumerateArray());
+            Assert.Equal("/web/rootPath", change.GetProperty("path").GetString());
+            Assert.True(change.GetProperty("restartWebService").GetBoolean());
+            JsonElement denied = await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!);
+            Assert.Equal("error", denied.GetProperty("status").GetString());
+            Assert.Contains("local startup manifest", denied.GetProperty("errorMessage").GetString());
+
+            string startup = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            await File.WriteAllTextAsync(startup, manifest);
+            await server.RestartAsync();
+            Assert.Equal(marker, await server.Client.GetStringAsync("/root-fixture.txt"));
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(root, settings.GetProperty("webServiceRootPath").GetString());
+            Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), item => item.GetString() == "/web/rootPath");
+            JsonElement exported = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
+            LoopbackWebService.AssertOk(exported);
+            Assert.Equal(root, exported.GetProperty("response").GetProperty("manifest").GetProperty("web").GetProperty("rootPath").GetString());
+
+            JsonElement migration = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(migration);
+            JsonElement migrationResponse = migration.GetProperty("response");
+            Assert.False(migrationResponse.GetProperty("manifest").GetProperty("web").TryGetProperty("rootPath", out _));
+            Assert.Contains(migrationResponse.GetProperty("missingInputs").EnumerateArray(), item => item.GetString() == "/web/rootPath");
+
+            File.Delete(startup);
+            await server.RestartAsync();
+            Assert.Equal(marker, await server.Client.GetStringAsync("/root-fixture.txt"));
+
+            await File.WriteAllTextAsync(startup, """{"schemaVersion":1,"web":{"rootPath":"missing-assets"}}""");
+            await Assert.ThrowsAsync<InvalidDataException>(() => server.RestartAsync());
+            File.Delete(startup);
+            await server.RestartAsync();
+            Assert.Equal(marker, await server.Client.GetStringAsync("/root-fixture.txt"));
+
+            await File.WriteAllTextAsync(startup, """{"schemaVersion":1,"web":{"rootPath":null}}""");
+            await server.RestartAsync();
+            Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("webServiceRootPath").ValueKind);
+            using HttpResponseMessage response = await server.Client.GetAsync("/root-fixture.txt");
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        }
+
+        [Fact]
         public async Task WebCertificateApplyChecksTheRevisionAndRecoversHttps()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -143,6 +143,10 @@ namespace DnsServerCore
         bool _manifestOwnsRealIpHeader;
         bool _manifestOwnsFrameAncestors;
         bool _manifestOwnsReverseProxyAcl;
+        // Null follows the legacy environment setting. An empty override selects the installed root.
+        string _webRootOverride;
+        bool _manifestOwnsWebRoot;
+        string _activeWebRoot;
         ushort _managedWebListeners;
         private const byte ManagedWebAddresses = 8;
         private const byte ManagedWebHttpPort = 16;
@@ -521,7 +525,7 @@ namespace DnsServerCore
             BinaryReader bR = new BinaryReader(s);
 
             int version = bR.ReadByte();
-            if (version > 4)
+            if (version > 5)
                 throw new InvalidDataException("Web Service config version not supported.");
 
             int httpPort = bR.ReadInt32();
@@ -604,12 +608,14 @@ namespace DnsServerCore
 
             if (readOwnership)
             {
-                int ownership = version == 4 ? s.ReadByte() : -1;
+                int ownership = version >= 4 ? s.ReadByte() : -1;
                 _manifestOwnsRealIpHeader = ownership >= 0 && (ownership & 1) != 0;
                 _manifestOwnsFrameAncestors = ownership >= 0 && (ownership & 2) != 0;
                 _manifestOwnsReverseProxyAcl = ownership >= 0 && (ownership & 4) != 0;
                 int extendedOwnership = ownership >= 0 ? s.ReadByte() : -1;
                 _managedWebListeners = (ushort)((Math.Max(0, ownership) | (Math.Max(0, extendedOwnership) << 8)) & ManagedWebListenerMask);
+                _webRootOverride = version >= 5 ? bR.ReadString() : null;
+                _manifestOwnsWebRoot = version >= 5 && bR.ReadBoolean();
             }
             if (readOwnership || !_manifestOwnsRealIpHeader)
                 _webServiceRealIpHeader = headers.RealIp;
@@ -626,7 +632,7 @@ namespace DnsServerCore
             BinaryWriter bW = new BinaryWriter(s);
 
             bW.Write(Encoding.ASCII.GetBytes("WC")); //format
-            bW.Write((byte)4); //version
+            bW.Write((byte)(_webRootOverride is null ? 4 : 5)); //version
 
             bW.Write(_webServiceHttpPort);
             bW.Write(_webServiceTlsPort);
@@ -663,11 +669,16 @@ namespace DnsServerCore
 
             s.WriteShortString(_webServiceRealIpHeader);
             s.WriteShortString(_webServiceCspFrameAncestorsHeader);
-            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors || _manifestOwnsReverseProxyAcl || _managedWebListeners != 0)
+            if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors || _manifestOwnsReverseProxyAcl || _managedWebListeners != 0 || _webRootOverride is not null)
             {
                 bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0) | (_manifestOwnsReverseProxyAcl ? 4 : 0) | _managedWebListeners));
-                if (_managedWebListeners > byte.MaxValue)
+                if (_managedWebListeners > byte.MaxValue || _webRootOverride is not null)
                     bW.Write((byte)(_managedWebListeners >> 8));
+            }
+            if (_webRootOverride is not null)
+            {
+                bW.Write(_webRootOverride);
+                bW.Write(_manifestOwnsWebRoot);
             }
         }
 
@@ -1774,6 +1785,27 @@ namespace DnsServerCore
             await StartWebServiceAsync(true);
         }
 
+        private string ResolveWebRoot(bool logMissingEnvironment = false)
+        {
+            if (_webRootOverride is not null)
+            {
+                if (_webRootOverride.Length == 0)
+                    return null;
+                if (!Directory.Exists(_webRootOverride))
+                    throw new InvalidDataException("/web/rootPath: The configured directory does not exist.");
+                return _webRootOverride;
+            }
+
+            string path = Environment.GetEnvironmentVariable("DNS_SERVER_WEB_SERVICE_WWW_FOLDER_PATH");
+            if (string.IsNullOrEmpty(path))
+                return null;
+            if (Directory.Exists(path))
+                return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            if (logMissingEnvironment)
+                _log.Write("Web Service is falling back to the default web root folder since the folder configured by the DNS_SERVER_WEB_SERVICE_WWW_FOLDER_PATH environment variable does not exist: " + path);
+            return null;
+        }
+
         private async Task StartWebServiceAsync(bool httpOnlyMode, WebListeners manifestListeners = default)
         {
             WebApplicationBuilder builder = WebApplication.CreateBuilder();
@@ -1880,16 +1912,8 @@ namespace DnsServerCore
                 UsePollingFileWatcher = true
             };
 
-            string wwwFolderPath = Environment.GetEnvironmentVariable("DNS_SERVER_WEB_SERVICE_WWW_FOLDER_PATH");
-            if (string.IsNullOrEmpty(wwwFolderPath))
-            {
-                wwwFolderPath = Path.Combine(_appFolder, "www");
-            }
-            else if (!Directory.Exists(wwwFolderPath))
-            {
-                _log.Write("Web Service is falling back to the default web root folder since the folder configured by the DNS_SERVER_WEB_SERVICE_WWW_FOLDER_PATH environment variable does not exist: " + wwwFolderPath);
-                wwwFolderPath = Path.Combine(_appFolder, "www");
-            }
+            string activeWebRoot = ResolveWebRoot(logMissingEnvironment: true);
+            string wwwFolderPath = activeWebRoot ?? Path.Combine(_appFolder, "www");
 
             builder.Environment.WebRootFileProvider = new PhysicalFileProvider(wwwFolderPath)
             {
@@ -2048,6 +2072,7 @@ namespace DnsServerCore
             try
             {
                 await _webService.StartAsync();
+            _activeWebRoot = activeWebRoot;
 
                 foreach (IPAddress webServiceLocalAddress in _webServiceLocalAddresses)
                 {
@@ -3119,7 +3144,7 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/reverseProxyAcl: Setting is managed by the configuration manifest.");
         }
 
-        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, WebListeners listeners, bool listenersChanged, ConfigurationWebCertificate.Candidate? certificate, Action<Action> persist)
+        private void ApplyManifestWebLiveSettings(WebLiveSettings headers, WebListeners listeners, bool listenersChanged, ConfigurationWebCertificate.Candidate? certificate, bool rootChanged, Action<Action> persist)
         {
             lock (_saveLock)
             {
@@ -3144,7 +3169,7 @@ namespace DnsServerCore
                 bool aclChanged = headers.ReverseProxyAcl is not null && !headers.ReverseProxyAcl.SequenceEqual(oldAcl ?? []);
                 string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
                 string ancestors = headers.FrameAncestors ?? oldAncestors;
-                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged && !listenersChanged && certificate is not { Changed: true } && managedListeners == oldManagedListeners &&
+                if (realIp == oldRealIp && ancestors == oldAncestors && !aclChanged && !listenersChanged && !rootChanged && certificate is not { Changed: true } && managedListeners == oldManagedListeners &&
                     (headers.ReverseProxyAcl is not null) == oldAclOwned &&
                     (headers.RealIp is not null) == oldRealIpOwned && (headers.FrameAncestors is not null) == oldAncestorsOwned)
                 {
@@ -3179,7 +3204,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3201,7 +3226,7 @@ namespace DnsServerCore
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate);
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate);
             }
             catch
             {
@@ -3433,6 +3458,11 @@ namespace DnsServerCore
                 ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, dnsBindings, previousDnsBindings, _dnsServer.HasDnsListenerCertificate);
                 bool dnsCertificateStaged = _dnsServer.DnsCertificateChanged(dnsCertificate);
                 bool dnsBindingsStaged = DnsServer.DnsBindingsDiffer(dnsBindings, previousDnsBindings);
+                string declaredWebRoot = ConfigurationPlan.ReadWebRoot(startupManifest, _log);
+                string previousWebRoot = _webRootOverride;
+                bool previousWebRootOwnership = _manifestOwnsWebRoot;
+                bool webRootChanged = startupManifest is not null &&
+                    (declaredWebRoot is not null && declaredWebRoot != previousWebRoot || (declaredWebRoot is not null) != previousWebRootOwnership);
                 ConfigurationWebCertificate.Candidate? webCertificate = PrepareWebCertificate(startupManifest);
                 ConfigurationWebCertificate.State previousWebCertificate = CaptureWebCertificate();
                 DateTime previousWebCertificateTime = _webServiceCertificateLastModifiedOn;
@@ -3442,7 +3472,7 @@ namespace DnsServerCore
                 bool listenerTuningStaged = _dnsServer.DnsTuningRequiresRestart(tuning);
                 WebListeners previousWebListeners = CaptureWebListeners();
                 SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
-                if (webCertificate is { Changed: true })
+                if (webRootChanged || webCertificate is { Changed: true })
                 {
                     lock (_saveLock)
                         _manifestWebRestart = true;
@@ -3452,12 +3482,17 @@ namespace DnsServerCore
                     await _settingsApi.WithConfigurationLockAsync(async () =>
                     {
                         // Start the web service and bind the DNS candidate before committing the manifest.
+                        if (startupManifest is not null)
+                        {
+                            _webRootOverride = declaredWebRoot ?? previousWebRoot;
+                            _manifestOwnsWebRoot = declaredWebRoot is not null;
+                        }
                         ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
                         bool listenersChanged = StageWebListeners(listeners);
                         byte[] generated = webCertificate is { Changed: true } candidate ? StageWebCertificate(candidate, startupManifest.GetServerDomain()) : null;
                         if (webCertificate is not { Changed: true } && previousWebListeners.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                             ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
-                        if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0 || webCertificate is { Changed: true })
+                        if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0 || webRootChanged || _webRootOverride is not null || webCertificate is { Changed: true })
                             await StartWebServiceAsync(false, listeners);
                         else
                             await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
@@ -3475,7 +3510,7 @@ namespace DnsServerCore
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated);
+                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged);
                         }
                     });
                 }
@@ -3490,13 +3525,15 @@ namespace DnsServerCore
                         _dnsServer.FinishManifestDnsCertificate(committed: false);
                     if (listeners.HasValues)
                         StageWebListeners(previousWebListeners);
+                    _webRootOverride = previousWebRoot;
+                    _manifestOwnsWebRoot = previousWebRootOwnership;
                     RestoreWebCertificate(previousWebCertificate, previousTlsOptions, previousWebCertificateTime);
                     throw;
                 }
 
                 finally
                 {
-                    if (webCertificate is { Changed: true })
+                    if (webRootChanged || webCertificate is { Changed: true })
                     {
                         lock (_saveLock)
                         {
