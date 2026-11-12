@@ -5644,7 +5644,7 @@ WHERE:
 - `webServiceSettings` (optional): Set to `true` to restore the web service config file. Default value is `false`.
 - `dnsSettings` (optional): Set to `true` to restore DNS settings and certificate files. Default value is `false`.
 - `logSettings` (optional): Set to `true` to restore log settings file. Default value is `false`.
-- `zones` (optional): Set to `true` to restore DNS zone files. Default value is `false`.
+- `zones` (optional): Set to `true` to restore DNS zone files. Default value is `false`. A conflict with managed zone membership, enabled state, or policy rejects the restore before any selected store changes.
 - `allowedZones` (optional): Set to `true` to restore allowed zones file. Default value is `false`.
 - `blockedZones` (optional): Set to `true` to restore blocked zones file. Default value is `false`.
 - `blockLists` (optional): Set to `true` to restore block lists cache files. Default value is `false`.

@@ -26,6 +26,7 @@ using DnsServerCore.Dns.Zones;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -656,6 +657,102 @@ namespace DnsServerCore.Dns.ZoneManagers
         {
             if (zone.Disabled != disabled && OwnsManifestZoneField(zone.Name, "enabled"))
                 throw new DnsWebServiceException($"{GetManifestZonePath(zone.Name)}/enabled: Zone enabled state is managed by the configuration manifest.");
+        }
+
+        internal static IEnumerable<ZipArchiveEntry> GetZoneBackupEntries(ZipArchive archive) =>
+            archive.Entries.Where(entry => entry.FullName == "zones/" + entry.Name &&
+                entry.Name.EndsWith(".zone", OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) &&
+                entry.Name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0);
+
+        internal void CheckManifestZoneRestore(ZipArchive archive, bool deleteExistingFiles)
+        {
+            var incoming = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ZipArchiveEntry entry in GetZoneBackupEntries(archive))
+            {
+                string name = Path.GetFileNameWithoutExtension(entry.Name).ToLowerInvariant();
+                string path = GetManifestZonePath(name);
+                if (!incoming.Add(name))
+                    throw new InvalidDataException($"{path}: The backup contains duplicate zone files.");
+                if (_manifestOwnedZones.ContainsKey(name) && !entry.Name.Equals(name + ".zone",
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new InvalidDataException($"{path}: The managed zone backup filename must use the canonical zone name.");
+
+                using Stream stream = entry.Open();
+                CheckZoneFile(stream, name);
+            }
+
+            foreach (string name in _manifestOwnedZones.Keys)
+            {
+                if (incoming.Contains(name) || GetAuthZoneInfo(name) is null)
+                    continue;
+
+                string file = Path.Combine(_dnsServer.ConfigFolder, "zones", name + ".zone");
+                if (deleteExistingFiles || !File.Exists(file))
+                    CheckManifestZoneMembership(name);
+
+                using Stream stream = File.OpenRead(file);
+                CheckZoneFile(stream, name);
+            }
+
+            void CheckZoneFile(Stream stream, string name)
+            {
+                string path = GetManifestZonePath(name);
+                var reader = new BinaryReader(stream);
+                if (reader.ReadByte() != 'D' || reader.ReadByte() != 'Z')
+                    throw new InvalidDataException($"{path}: Invalid zone backup file.");
+                byte version = reader.ReadByte();
+                bool owned = _manifestOwnedZones.TryGetValue(name, out string[] fields);
+                if (version is 2 or 3)
+                {
+                    if (owned)
+                        throw new InvalidDataException($"{path}: Managed settings cannot be verified in this legacy zone backup format.");
+                    if (version == 3)
+                        reader.ReadBoolean();
+                    int legacyCount = reader.ReadInt32();
+                    using var legacyRecords = new MemoryStream();
+                    stream.CopyTo(legacyRecords);
+                    legacyRecords.Position = 0;
+                    if (legacyCount < 1 || !new DnsResourceRecord(legacyRecords).Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException($"{path}: The zone backup filename does not match its content.");
+                    return;
+                }
+                if (version != 4)
+                    throw new InvalidDataException($"{path}: Unsupported zone backup format.");
+
+                if (!owned)
+                {
+                    reader.ReadByte(); // Zone information format version.
+                    if (!stream.ReadShortString().Equals(name, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException($"{path}: The zone backup filename does not match its content.");
+                    return;
+                }
+
+                using var records = new MemoryStream();
+                stream.CopyTo(records);
+                records.Position = 0;
+                var recordReader = new BinaryReader(records);
+                var candidate = new AuthZoneInfo(recordReader, DateTime.UnixEpoch);
+                if (!candidate.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"{path}: The zone backup filename does not match its content.");
+
+                AuthZoneInfo current = GetAuthZoneInfo(name);
+                if (current is null || candidate.Type != current.Type || candidate.CatalogZoneName != current.CatalogZoneName)
+                    CheckManifestZoneMembership(name);
+
+                CheckManifestZoneEnabled(current, candidate.Disabled);
+                ConfigurationZonePolicies.CheckRestoreOwnership(path, fields, current, candidate);
+                bool hasSoa = false;
+                int count = recordReader.ReadInt32();
+                for (int index = 0; index < count; index++)
+                {
+                    var record = new DnsResourceRecord(records);
+                    _ = AuthRecordInfo.ReadGenericRecordInfoFrom(recordReader, record.Type);
+                    ValidateIfDomainBelongsToZone(name, record.Name);
+                    hasSoa |= record.Type == DnsResourceRecordType.SOA && record.Name.Equals(name, StringComparison.OrdinalIgnoreCase);
+                }
+                if (!hasSoa)
+                    throw new InvalidDataException($"{path}: The zone backup is missing the apex SOA record.");
+            }
         }
 
         internal bool OwnsManifestZoneField(string name, string field) =>

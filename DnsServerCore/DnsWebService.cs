@@ -25,6 +25,7 @@ using DnsServerCore.Dns;
 using DnsServerCore.Dns.Applications;
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.Zones;
+using DnsServerCore.Dns.ZoneManagers;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.BearerToken;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
@@ -1238,18 +1239,15 @@ namespace DnsServerCore
                             }
 
                             //extract zone files from backup
-                            foreach (ZipArchiveEntry entry in backupZip.Entries)
+                            foreach (ZipArchiveEntry entry in AuthZoneManager.GetZoneBackupEntries(backupZip))
                             {
-                                if (entry.FullName.StartsWith("zones/", StringComparison.Ordinal))
+                                try
                                 {
-                                    try
-                                    {
-                                        await entry.ExtractToFileAsync(Path.Combine(_configFolder, "zones", entry.Name), true);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        _log.Write(ex);
-                                    }
+                                    await entry.ExtractToFileAsync(Path.Combine(_configFolder, "zones", entry.Name), true);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _log.Write(ex);
                                 }
                             }
 

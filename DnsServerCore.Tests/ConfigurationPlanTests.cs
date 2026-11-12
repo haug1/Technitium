@@ -3173,6 +3173,49 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneRestoreRejectsManagedChangesBeforeRestoringLogging()
+        {
+            await using var destination = await LoopbackWebService.StartAsync();
+            await using var source = await LoopbackWebService.StartAsync();
+            const string managed = """
+                {"schemaVersion":1,"zones":{"restore.test":{"type":"Primary","query":{"mode":"Deny"}}}}
+                """;
+            string revision = (await PreviewAsync(destination, managed)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, managed, revision));
+
+            LoopbackWebService.AssertOk(await source.CallAsync("zones/create?zone=restore.test&type=Primary", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync("settings/set?maxLogFileDays=20", source.AdminToken));
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "zones/records/add?zone=restore.test&domain=www.restore.test&type=A&ipAddress=192.0.2.42", source.AdminToken));
+            await source.RestartAsync();
+            JsonElement conflict = await RestoreAsync(includeZones: true, deleteExisting: false);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/zones/restore.test/query/mode", conflict.GetProperty("errorMessage").GetString());
+            conflict = await RestoreAsync(includeZones: false, deleteExisting: true);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/zones/restore.test", conflict.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await destination.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+            revision = (await PreviewAsync(source, managed)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(source, managed, revision));
+            LoopbackWebService.AssertOk(await RestoreAsync(includeZones: true, deleteExisting: true));
+            Assert.Equal(20, (await destination.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            Assert.Single((await destination.QueryAsync("www.restore.test", DnsResourceRecordType.A)).Answer);
+            Assert.Empty((await PreviewAsync(destination, managed)).GetProperty("changes").EnumerateArray());
+
+            async Task<JsonElement> RestoreAsync(bool includeZones, bool deleteExisting)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/settings/backup?logSettings=true&zones={includeZones}");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", source.AdminToken);
+                using HttpResponseMessage response = await source.Client.SendAsync(request);
+                response.EnsureSuccessStatusCode();
+                using var form = new MultipartFormDataContent();
+                form.Add(new ByteArrayContent(await response.Content.ReadAsByteArrayAsync()), "file", "backup.zip");
+                return await destination.CallAsync($"settings/restore?zones=true&logSettings=true&deleteExistingFiles={deleteExisting}", destination.AdminToken, form);
+            }
+        }
+
+        [Fact]
         public async Task ZonePolicyOwnershipRejectsMixedEditsAndAllowsUnmanagedFields()
         {
             await using var server = await LoopbackWebService.StartAsync();

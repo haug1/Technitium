@@ -83,6 +83,30 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal static void CheckRestoreOwnership(string path, IEnumerable<string> fields, AuthZoneInfo current, AuthZoneInfo candidate)
+        {
+            foreach (string field in fields)
+            {
+                bool changed = field switch
+                {
+                    "query/mode" => current.QueryAccess != candidate.QueryAccess,
+                    "query/networkAcl" => !Equal(current.QueryAccessNetworkACL, candidate.QueryAccessNetworkACL),
+                    "transfer/mode" => current.ZoneTransfer != candidate.ZoneTransfer,
+                    "transfer/networkAcl" => !Equal(current.ZoneTransferNetworkACL, candidate.ZoneTransferNetworkACL),
+                    "notify/mode" => current.Notify != candidate.Notify,
+                    "notify/nameServers" => !Equal(current.NotifyNameServers, candidate.NotifyNameServers),
+                    "updates/mode" => current.Update != candidate.Update,
+                    "updates/networkAcl" => !Equal(current.UpdateNetworkACL, candidate.UpdateNetworkACL),
+                    _ => false
+                };
+                if (changed)
+                    throw new InvalidDataException($"{path}/{field}: Zone policy is managed by the configuration manifest.");
+            }
+
+            static bool Equal<T>(IReadOnlyCollection<T> before, IReadOnlyCollection<T> after) =>
+                (before ?? []).Select(value => value.ToString()).SequenceEqual((after ?? []).Select(value => value.ToString()), StringComparer.Ordinal);
+        }
+
         internal static bool IsPolicy(string name)
         {
             return name is "query" or "transfer" or "notify" or "updates";

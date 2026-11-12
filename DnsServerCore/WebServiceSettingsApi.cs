@@ -2239,10 +2239,13 @@ namespace DnsServerCore
                             bool checkDomainLists = allowedZones && _dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList ||
                                 blockedZones && _dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList;
                             bool checkScopes = scopes && _dnsWebService._dhcpServer.ManagedPaths.Count > 0;
-                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes)
+                            bool checkZones = zones && _dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.Count > 0;
+                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes || checkZones)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
+                                    if (checkZones)
+                                        _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRestore(archive, deleteExistingFiles);
                                     if (checkScopes)
                                         _dnsWebService._dhcpServer.CheckManifestScopeRestore(archive, deleteExistingFiles);
                                     if (checkDomainLists)
