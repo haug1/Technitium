@@ -2573,6 +2573,8 @@ namespace DnsServerCore
                             _log.Write(GetRemoteEndPoint(context), ex);
 
                             jsonWriter.WriteString("status", "error");
+                            if (ex is StaleConfigurationPreviewException)
+                                jsonWriter.WriteString("errorCode", "stale-preview");
                             jsonWriter.WriteString("errorMessage", ex.Message);
 
                             if (ex.InnerException is not null)

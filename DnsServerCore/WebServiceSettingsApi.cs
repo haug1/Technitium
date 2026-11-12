@@ -50,6 +50,10 @@ namespace DnsServerCore
 {
     public partial class DnsWebService
     {
+        private sealed class StaleConfigurationPreviewException()
+            : DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.")
+        { }
+
         sealed class WebServiceSettingsApi
         {
             #region variables
@@ -1098,7 +1102,7 @@ namespace DnsServerCore
             {
                 string revision = ConfigurationPlan.GetRevision(manifest, snapshot, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
-                    throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+                    throw new StaleConfigurationPreviewException();
             }
 
             private ConfigurationClusterOptions.Bootstrap PrepareLiveBootstrap(ConfigurationManifest manifest, User user)

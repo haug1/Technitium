@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -101,6 +103,12 @@ namespace DnsServerCore.Tests
             string stale = ReadOutputValue(plan.Output, "Revision ");
             var rejected = await RunAsync(server, 1, "apply", path, origin, stale);
             Assert.Contains("preview is stale", rejected.Error);
+            using (var body = new StringContent(manifest.ToJsonString(), Encoding.UTF8, "application/json"))
+            {
+                var response = await server.CallAsync("settings/config/apply", server.AdminToken, body, stale);
+                Assert.Equal("error", response.GetProperty("status").GetString());
+                Assert.Equal("stale-preview", response.GetProperty("errorCode").GetString());
+            }
             Assert.Equal(7, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
             Assert.Equal(server.Client.BaseAddress.Port, (await server.GetSettingsAsync()).GetProperty("webServiceHttpPort").GetInt32());
 

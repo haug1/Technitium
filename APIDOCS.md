@@ -5337,7 +5337,7 @@ The response contains a versioned `manifest` and a sorted `missingInputs` array 
 
 ### Apply Declarative Configuration
 
-Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header.
+Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header. A stale revision returns `status: error` with `errorCode: stale-preview` before applying any changes.
 
 Optional DNS listener bindings support UDP and TCP PROXY, HTTP, HTTPS, TLS, QUIC, HTTP/3, and HTTP and HTTPS Unix sockets. Preview marks binding changes that require restarting DNS. Apply checks the candidate bindings before committing and restores the previous listeners if binding fails. Secure bindings use the server’s loaded DNS certificate.
 

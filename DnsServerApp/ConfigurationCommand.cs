@@ -244,8 +244,7 @@ namespace DnsServerApp
             const string stalePreviewMessage = "The configuration preview is stale. Create a new preview before applying.";
             if (revision is not null && root.ValueKind == JsonValueKind.Object &&
                 root.TryGetProperty("status", out JsonElement errorStatus) && errorStatus.ValueKind == JsonValueKind.String &&
-                errorStatus.ValueEquals("error") && root.TryGetProperty("errorMessage", out JsonElement error) &&
-                error.ValueKind == JsonValueKind.String && error.ValueEquals(stalePreviewMessage))
+                errorStatus.ValueEquals("error") && IsStalePreview(root))
                 throw new InvalidDataException(stalePreviewMessage);
 
             if ((root.ValueKind != JsonValueKind.Object) || !root.TryGetProperty("status", out JsonElement status)
@@ -254,6 +253,15 @@ namespace DnsServerApp
                 throw new InvalidDataException("The server rejected the request for current settings.");
 
             return current.Clone();
+
+            static bool IsStalePreview(JsonElement response)
+            {
+                if (response.TryGetProperty("errorCode", out JsonElement code))
+                    return code.ValueKind == JsonValueKind.String && code.ValueEquals("stale-preview");
+
+                return response.TryGetProperty("errorMessage", out JsonElement legacyMessage) &&
+                    legacyMessage.ValueKind == JsonValueKind.String && legacyMessage.ValueEquals(stalePreviewMessage);
+            }
         }
     }
 }
