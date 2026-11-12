@@ -72,9 +72,10 @@ namespace DnsServerCore.Tests
             await RestartAsync(null);
         }
 
-        public async Task RestartAsync(int? httpPort)
+        public async Task RestartAsync(int? httpPort, Action? updateConfiguration = null)
         {
             await _service!.DisposeAsync();
+            updateConfiguration?.Invoke();
             if (httpPort.HasValue)
             {
                 Client.Dispose();

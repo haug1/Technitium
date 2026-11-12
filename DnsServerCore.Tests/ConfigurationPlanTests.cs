@@ -1,4 +1,6 @@
 ﻿using DnsServerCore.Configuration;
+using DnsServerCore.Dhcp;
+using DnsServerCore.Dhcp.Options;
 using System;
 using System.IO;
 using System.IO.Compression;
@@ -2579,6 +2581,74 @@ namespace DnsServerCore.Tests
             revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
             LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/set?name=Default&leaseTimeDays=5", server.AdminToken));
+        }
+
+        [Fact]
+        public async Task DhcpManagedReservationsRejectLegacyEditsAndLeaseConversions()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Default":{"reservations":{
+                    "02:00:00:00:00:0a":{"address":"192.168.1.20","hostName":"managed"},
+                    "02:00:00:00:00:0b":null
+                }}}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+
+            string scopesFolder = Path.Combine(server.ConfigurationDirectory, "scopes");
+            string scopeFile = Path.Combine(scopesFolder, "Default.scope");
+            await server.RestartAsync(httpPort: null, updateConfiguration: () =>
+            {
+                using (var output = File.Open(scopeFile, FileMode.Open, FileAccess.ReadWrite))
+                using (var writer = new BinaryWriter(output))
+                {
+                    // Scope files end with the active lease count and lease records.
+                    output.Position = output.Length - sizeof(int);
+                    writer.Write(2);
+                    WriteLease(LeaseType.Reserved, "02000000000A", "192.168.1.20");
+                    WriteLease(LeaseType.Dynamic, "02000000000B", "192.168.1.21");
+
+                    void WriteLease(LeaseType type, string mac, string address)
+                    {
+                        byte[] bytes = Convert.FromHexString(mac);
+                        DateTimeOffset now = DateTimeOffset.UtcNow;
+                        writer.Write((byte)2); // Lease file format version.
+                        writer.Write((byte)type);
+                        new ClientIdentifierOption(1, bytes).WriteTo(output);
+                        writer.Write((byte)0); // Empty hostname.
+                        writer.Write((byte)bytes.Length);
+                        writer.Write(bytes);
+                        IPAddress.Parse(address).WriteTo(writer);
+                        writer.Write((byte)0); // Empty comments.
+                        writer.Write(now.ToUnixTimeMilliseconds());
+                        writer.Write(now.AddHours(1).ToUnixTimeMilliseconds());
+                    }
+                }
+            });
+
+            await RejectAsync("dhcp/scopes/set?name=Default&leaseTimeDays=3&reservedLeases=changed%7C02-00-00-00-00-0A%7C192.168.1.20%7C", "0A/hostName");
+            await RejectAsync("dhcp/scopes/removeReservedLease?name=Default&hardwareAddress=02-00-00-00-00-0A", "0A");
+            await RejectAsync("dhcp/scopes/addReservedLease?name=Default&hardwareAddress=02-00-00-00-00-0B&ipAddress=192.168.1.21", "0B");
+            await RejectAsync("dhcp/leases/convertToDynamic?name=Default&hardwareAddress=02-00-00-00-00-0A", "0A");
+            await RejectAsync("dhcp/leases/remove?name=Default&hardwareAddress=02-00-00-00-00-0A", "0A");
+            await RejectAsync("dhcp/leases/convertToReserved?name=Default&hardwareAddress=02-00-00-00-00-0B", "0B");
+
+            JsonElement scopeResponse = await server.CallAsync("dhcp/scopes/get?name=Default", server.AdminToken);
+            LoopbackWebService.AssertOk(scopeResponse);
+            Assert.Equal(1, scopeResponse.GetProperty("response").GetProperty("leaseTimeDays").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Default&reservedLeases=managed%7C02-00-00-00-00-0A%7C192.168.1.20%7Ceditable", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/addReservedLease?name=Default&hardwareAddress=02-00-00-00-00-0C&ipAddress=192.168.1.22", server.AdminToken));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            async Task RejectAsync(string endpoint, string suffix)
+            {
+                JsonElement response = await server.CallAsync(endpoint, server.AdminToken);
+                Assert.Equal("error", response.GetProperty("status").GetString());
+                Assert.Contains("/dhcp/scopes/Default/reservations/02-00-00-00-00-" + suffix, response.GetProperty("errorMessage").GetString());
+            }
         }
 
         [Fact]

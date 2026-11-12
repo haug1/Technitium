@@ -398,6 +398,11 @@ namespace DnsServerCore
                 if (rename)
                     _dnsWebService._dhcpServer.CheckManifestScopeMembership(newName);
 
+                string reservationInput = request.QueryOrForm("reservedLeases");
+                IReadOnlyCollection<Lease> reservations = ParseReservedLeases(reservationInput);
+                if (scope is not null && reservationInput is not null)
+                    _dnsWebService._dhcpServer.CheckManifestReservations(scope, reservations);
+
                 bool scopeExists = scope is not null;
                 if (!scopeExists)
                 {
@@ -450,12 +455,14 @@ namespace DnsServerCore
                     _dnsWebService._dhcpServer.CheckManifestScopeOptions(scope, candidate =>
                     {
                         candidate.ChangeNetwork(startingAddress, endingAddress, subnetMask);
-                        SetDhcpScopeOptions(request, candidate, applyReservations: false);
+                        SetDhcpScopeOptions(request, candidate);
                     });
                     scope.ChangeNetwork(startingAddress, endingAddress, subnetMask);
                 }
 
-                SetDhcpScopeOptions(request, scope, applyReservations: true);
+                SetDhcpScopeOptions(request, scope);
+                if (reservationInput is not null)
+                    scope.ReservedLeases = reservations;
 
                 if (scopeExists)
                 {
@@ -478,7 +485,7 @@ namespace DnsServerCore
                 }
             }
 
-            private static void SetDhcpScopeOptions(HttpRequest request, Scope scope, bool applyReservations)
+            private static void SetDhcpScopeOptions(HttpRequest request, Scope scope)
             {
                 if (request.TryGetQueryOrForm("leaseTimeDays", ushort.Parse, out ushort leaseTimeDays))
                     scope.LeaseTimeDays = leaseTimeDays;
@@ -675,25 +682,6 @@ namespace DnsServerCore
                     }
                 }
 
-                string strReservedLeases = applyReservations ? request.QueryOrForm("reservedLeases") : null;
-                if (strReservedLeases is not null)
-                {
-                    if (strReservedLeases.Length == 0)
-                    {
-                        scope.ReservedLeases = null;
-                    }
-                    else
-                    {
-                        string[] strReservedLeaseParts = strReservedLeases.Split('|');
-                        List<Lease> reservedLeases = new List<Lease>();
-
-                        for (int i = 0; i < strReservedLeaseParts.Length; i += 4)
-                            reservedLeases.Add(new Lease(LeaseType.Reserved, strReservedLeaseParts[i + 0], DhcpMessageHardwareAddressType.Ethernet, strReservedLeaseParts[i + 1], IPAddress.Parse(strReservedLeaseParts[i + 2]), strReservedLeaseParts[i + 3]));
-
-                        scope.ReservedLeases = reservedLeases;
-                    }
-                }
-
                 if (request.TryGetQueryOrForm("allowOnlyReservedLeases", bool.Parse, out bool allowOnlyReservedLeases))
                     scope.AllowOnlyReservedLeases = allowOnlyReservedLeases;
 
@@ -702,6 +690,19 @@ namespace DnsServerCore
 
                 if (request.TryGetQueryOrForm("ignoreClientIdentifierOption", bool.Parse, out bool ignoreClientIdentifierOption))
                     scope.IgnoreClientIdentifierOption = ignoreClientIdentifierOption;
+            }
+
+            private static IReadOnlyCollection<Lease> ParseReservedLeases(string input)
+            {
+                if (string.IsNullOrEmpty(input))
+                    return null;
+
+                string[] fields = input.Split('|');
+                var leases = new List<Lease>();
+                for (int i = 0; i < fields.Length; i += 4)
+                    leases.Add(new Lease(LeaseType.Reserved, fields[i], DhcpMessageHardwareAddressType.Ethernet, fields[i + 1], IPAddress.Parse(fields[i + 2]), fields[i + 3]));
+
+                return leases;
             }
 
             public void AddReservedLease(HttpContext context)
@@ -803,6 +804,19 @@ namespace DnsServerCore
                 _dnsWebService._dhcpServer.DeleteScope(scopeName);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was deleted successfully: " + scopeName);
+            }
+
+            public async Task WithLeaseLockAsync(HttpContext context, Action<HttpContext> action)
+            {
+                await _dnsWebService._dhcpServer.EnterManifestGateAsync(context.RequestAborted);
+                try
+                {
+                    action(context);
+                }
+                finally
+                {
+                    _dnsWebService._dhcpServer.ExitManifestGate();
+                }
             }
 
             public void RemoveDhcpLease(HttpContext context)

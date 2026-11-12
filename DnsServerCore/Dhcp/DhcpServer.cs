@@ -1501,13 +1501,67 @@ namespace DnsServerCore.Dhcp
         internal void CheckManifestScopeOptions(Scope scope, Action<Scope> prepare)
         {
             string scopePath = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name);
-            string[] paths = _managedPaths.Where(path => path.StartsWith(scopePath + "/", StringComparison.Ordinal)).ToArray();
+            string reservationPath = scopePath + "/reservations";
+            string[] paths = _managedPaths.Where(path => path.StartsWith(scopePath + "/", StringComparison.Ordinal) &&
+                path != reservationPath && !path.StartsWith(reservationPath + "/", StringComparison.Ordinal)).ToArray();
             if (paths.Length == 0)
                 return;
 
             using Scope candidate = scope.CloneForManifest();
             prepare(candidate);
             ConfigurationDhcp.CheckScopeOptionOwnership(scope, candidate, scopePath, paths);
+        }
+
+        internal void CheckManifestReservations(Scope scope, IReadOnlyCollection<Lease> proposed)
+        {
+            string path = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name) + "/reservations";
+            if (!_managedPaths.Any(owned => owned == path || owned.StartsWith(path + "/", StringComparison.Ordinal)))
+                return;
+
+            var before = scope.ReservedLeases.ToDictionary(lease => lease.ClientIdentifier);
+            var after = (proposed ?? []).DistinctBy(lease => lease.ClientIdentifier).ToDictionary(lease => lease.ClientIdentifier);
+            foreach (ClientIdentifierOption identifier in before.Keys.Union(after.Keys))
+            {
+                before.TryGetValue(identifier, out Lease current);
+                after.TryGetValue(identifier, out Lease candidate);
+                CheckManifestReservation(scope, current, candidate);
+            }
+        }
+
+        internal void CheckManifestReservation(Scope scope, Lease current, Lease candidate)
+        {
+            if (current is null && candidate is null)
+                return;
+
+            string root = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name) + "/reservations";
+            string path = ConfigurationPlan.AppendPath(root, BitConverter.ToString((current ?? candidate).HardwareAddress));
+            bool ownsCollection = _managedPaths.Contains(root, StringComparer.Ordinal);
+            if (current is null || candidate is null)
+            {
+                if (ownsCollection || _managedPaths.Contains(path, StringComparer.Ordinal))
+                    throw new DhcpServerException($"{path}: Reservation membership is managed by the configuration manifest.");
+                return;
+            }
+
+            CheckField("address", current.Address, candidate.Address);
+            CheckField("hostName", EmptyAsNull(current.HostName), EmptyAsNull(candidate.HostName));
+            CheckField("comments", EmptyAsNull(current.Comments), EmptyAsNull(candidate.Comments));
+
+            void CheckField(string name, object previous, object next)
+            {
+                string fieldPath = path + "/" + name;
+                if (!Equals(previous, next) && (ownsCollection || _managedPaths.Contains(fieldPath, StringComparer.Ordinal)))
+                    throw new DhcpServerException($"{fieldPath}: Reservation field is managed by the configuration manifest.");
+            }
+
+            static string EmptyAsNull(string value) => string.IsNullOrEmpty(value) ? null : value;
+        }
+
+        internal void CheckManifestExclusionRemoval(Scope scope)
+        {
+            string path = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name) + "/exclusions";
+            if (_managedPaths.Contains(path, StringComparer.Ordinal))
+                throw new DhcpServerException($"{path}: Scope exclusions are managed by the configuration manifest.");
         }
 
         internal void CheckManifestScopeEnabled(Scope scope, bool enabled)

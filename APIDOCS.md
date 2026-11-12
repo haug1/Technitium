@@ -5812,7 +5812,7 @@ RESPONSE:
 
 ### List DHCP Scopes
 
-Lists all the DHCP scopes available on the server and returns managed scope membership and option paths in `managedSettings`.
+Lists all the DHCP scopes available on the server and returns managed scope membership, option, and reservation paths in `managedSettings`.
 
 URL:\
 `http://localhost:5380/api/dhcp/scopes/list`
@@ -5957,7 +5957,7 @@ RESPONSE:
 
 ### Set DHCP Scope
 
-Sets the DHCP scope configuration. A request that changes a manifest-managed option or scope membership is rejected before applying any edits.
+Sets the DHCP scope configuration. A request that changes a manifest-managed option, reservation, or scope membership is rejected before applying any edits.
 
 URL:\
 `http://localhost:5380/api/dhcp/scopes/set?name=Default&startingAddress=192.168.1.1&endingAddress=192.168.1.254&subnetMask=255.255.255.0&leaseTimeDays=7&leaseTimeHours=0&leaseTimeMinutes=0&offerDelayTime=0&domainName=local&dnsTtl=900&serverAddress=&serverHostName=&bootFileName=&routerAddress=192.168.1.1&useThisDnsServer=false&dnsServers=192.168.1.5&winsServers=192.168.1.5&ntpServers=192.168.1.5&staticRoutes=172.16.0.0|255.255.255.0|192.168.1.2&exclusions=192.168.1.1|192.168.1.10&reservedLeases=hostname|00-00-00-00-00-00|192.168.1.10|comments&allowOnlyReservedLeases=false`

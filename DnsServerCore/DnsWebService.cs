@@ -2313,9 +2313,9 @@ namespace DnsServerCore
 
             //dhcp
             _webService.MapGetAndPost("/api/dhcp/leases/list", _dhcpApi.ListDhcpLeases);
-            _webService.MapGetAndPost("/api/dhcp/leases/remove", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.RemoveDhcpLease));
-            _webService.MapGetAndPost("/api/dhcp/leases/convertToReserved", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.ConvertToReservedLease));
-            _webService.MapGetAndPost("/api/dhcp/leases/convertToDynamic", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.ConvertToDynamicLease));
+            _webService.MapGetAndPost("/api/dhcp/leases/remove", context => _settingsApi.WithConfigurationLockAsync(context, current => _dhcpApi.WithLeaseLockAsync(current, _dhcpApi.RemoveDhcpLease)));
+            _webService.MapGetAndPost("/api/dhcp/leases/convertToReserved", context => _settingsApi.WithConfigurationLockAsync(context, current => _dhcpApi.WithLeaseLockAsync(current, _dhcpApi.ConvertToReservedLease)));
+            _webService.MapGetAndPost("/api/dhcp/leases/convertToDynamic", context => _settingsApi.WithConfigurationLockAsync(context, current => _dhcpApi.WithLeaseLockAsync(current, _dhcpApi.ConvertToDynamicLease)));
             _webService.MapGetAndPost("/api/dhcp/scopes/list", _dhcpApi.ListDhcpScopes);
             _webService.MapGetAndPost("/api/dhcp/scopes/get", _dhcpApi.GetDhcpScope);
             _webService.MapGetAndPost("/api/dhcp/scopes/set", context => _settingsApi.WithConfigurationLockAsync(context, _dhcpApi.SetDhcpScopeAsync));

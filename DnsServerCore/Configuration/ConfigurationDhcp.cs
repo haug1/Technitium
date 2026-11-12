@@ -529,6 +529,25 @@ namespace DnsServerCore.Configuration
                 string path = ConfigurationPlan.AppendPath(scopePath, option.Name);
                 if (option.Name is "enabled" or "startingAddress" or "endingAddress" or "subnetMask" or "exclusions")
                     paths.Add(path);
+                else if (option.Name == "reservations")
+                {
+                    if (option.Value.ValueKind == JsonValueKind.Null)
+                        paths.Add(path);
+                    else
+                    {
+                        foreach (JsonProperty reservation in option.Value.EnumerateObject())
+                        {
+                            string key = ReadHardwareAddress(reservation.Name, path);
+                            string entryPath = ConfigurationPlan.AppendPath(path, key);
+                            paths.Add(entryPath);
+                            if (reservation.Value.ValueKind == JsonValueKind.Object)
+                            {
+                                foreach (JsonProperty field in reservation.Value.EnumerateObject())
+                                    paths.Add(ConfigurationPlan.AppendPath(entryPath, field.Name));
+                            }
+                        }
+                    }
+                }
                 else if (_defaultOptions[option.Name] is JsonObject && option.Value.ValueKind == JsonValueKind.Object)
                 {
                     foreach (JsonProperty field in option.Value.EnumerateObject())
