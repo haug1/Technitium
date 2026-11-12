@@ -19,7 +19,15 @@ Match surrounding code. C# uses four-space indentation, braces on separate lines
 
 ## Testing
 
-Run `dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj` after building the sibling library. Add tests for observable behavior and regressions using scratch configuration and controlled dependencies. For UI changes, exercise the affected screen and record the verification. See [build.md](build.md#regression-tests) for coverage commands.
+Run `dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj` after building the sibling library. Use scratch configuration and controlled dependencies. For UI changes, exercise the affected screen and record the verification.
+
+Before changing uncovered behavior, add focused tests through normal entry points. Assert observable outcomes for representative cases and failure paths. Prioritize legacy loading, failed listener restart recovery, and manifest conflicts with UI or API edits.
+
+Use CI line and branch coverage to find gaps in changed code. There is no repository-wide minimum. See [build.md](build.md#regression-tests).
+
+## Implementation Plans
+
+Keep plans focused on scope, decisions, and acceptance criteria. Keep historical test results and coverage snapshots in CI artifacts and change history in Git.
 
 ## Commits and Pull Requests
 

@@ -6,9 +6,7 @@ Technitium loads settings across several managers at startup. The DNS settings A
 
 ## 1. Establish an automated regression suite
 
-**Complete.** Eight baseline scenarios passed in a clean Nix checkout and in GitHub Actions. CI publishes C# line and branch coverage by assembly. The initial `DnsServerCore` baseline was 25.9% line coverage and 19.7% branch coverage. Use the report to identify gaps in changed code. [Local test instructions](build.md#regression-tests) · [Verified CI run](https://github.com/haug1/Technitium/actions/runs/43132416886)
-
-Capture existing behavior before changing how configuration is parsed, stored, or applied. Start with a .NET 10 test project, a documented `dotnet test` command that works in the Nix development shell, and a CI check that runs the suite on each pull request.
+Use the .NET 10 regression suite to protect existing behavior as configuration parsing, storage, and application change. Run it locally in the Nix development shell and in CI on each pull request. [Local test instructions](build.md#regression-tests)
 
 - Exercise the server through its normal entry points. Cover authoritative DNS answers and negative responses, recursion and forwarding through a controlled upstream, DHCP scope and reservation behavior, API permissions, DNS app configuration, and cluster configuration transfer.
 - Prioritize configuration workflows that cross component boundaries. Verify that settings applied through the API survive a restart, a legacy configuration loads with the expected effective settings, a backup restores selected settings, and a rejected update preserves the prior working behavior.
