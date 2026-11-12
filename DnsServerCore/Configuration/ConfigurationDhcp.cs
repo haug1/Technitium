@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using DnsServerCore.Dhcp.Options;
 using DnsServerCore.Dhcp;
 using TechnitiumLibrary.Net;
 
@@ -47,27 +49,8 @@ namespace DnsServerCore.Configuration
                 IPAddress mask = ReadAddress(scope, "subnetMask");
                 ValidateNetwork(path, start, end, mask);
 
-                if (scope.TryGetProperty("exclusions", out JsonElement exclusions) && exclusions.ValueKind == JsonValueKind.Array)
-                {
-                    int index = 0;
-                    foreach (JsonElement exclusion in exclusions.EnumerateArray())
-                    {
-                        string entryPath = $"{path}/exclusions/{index++}";
-                        IPAddress first = ReadAddress(exclusion, "startingAddress");
-                        IPAddress last = ReadAddress(exclusion, "endingAddress");
-                        try
-                        {
-                            _ = new Exclusion(first, last);
-                        }
-                        catch (ArgumentException)
-                        {
-                            throw new InvalidDataException($"{entryPath}/endingAddress: Exclusion end must be at or after its start.");
-                        }
-
-                        CheckRange(entryPath + "/startingAddress", first, start, end);
-                        CheckRange(entryPath + "/endingAddress", last, start, end);
-                    }
-                }
+                if (scope.TryGetProperty("exclusions", out JsonElement exclusions))
+                    ReadExclusions(exclusions, path + "/exclusions", start, end);
 
                 if (scope.TryGetProperty("reservations", out JsonElement reservations) && reservations.ValueKind == JsonValueKind.Object)
                 {
@@ -103,7 +86,7 @@ namespace DnsServerCore.Configuration
                 writer.WriteString("subnetMask", scope.SubnetMask.ToString());
                 writer.WriteBoolean("enabled", scope.Enabled);
 
-                if (declarations.ValueKind != JsonValueKind.Object || !declarations.TryGetProperty(name, out _))
+                if (declarations.ValueKind == JsonValueKind.Object && !declarations.TryGetProperty(name, out _))
                 {
                     writer.WriteEndObject();
                     continue;
@@ -133,19 +116,8 @@ namespace DnsServerCore.Configuration
                 }
                 writer.WriteEndObject();
 
-                var exclusionAddresses = new SortedSet<uint>();
-                if (scope.Exclusions is not null)
-                {
-                    foreach (Exclusion exclusion in scope.Exclusions)
-                    {
-                        exclusionAddresses.Add(exclusion.StartingAddress.ConvertIpToNumber());
-                        exclusionAddresses.Add(exclusion.EndingAddress.ConvertIpToNumber());
-                    }
-                }
-                writer.WriteStartArray("exclusionAddresses");
-                foreach (uint address in exclusionAddresses)
-                    writer.WriteNumberValue(address);
-                writer.WriteEndArray();
+                writer.WritePropertyName("exclusions");
+                WriteExclusions(scope.Exclusions).WriteTo(writer);
                 writer.WriteEndObject();
             }
             writer.WriteEndObject();
@@ -156,7 +128,11 @@ namespace DnsServerCore.Configuration
             if (!dhcp.TryGetProperty("scopes", out JsonElement scopes))
                 return;
             if (scopes.ValueKind == JsonValueKind.Null)
-                throw new InvalidDataException($"{ScopesPath}: Preview of resetting all scopes is not implemented.");
+            {
+                foreach (JsonProperty scope in snapshot.EnumerateObject())
+                    PreviewRemoval(scope.Name, scope.Value, changes);
+                return;
+            }
 
             var candidates = new Dictionary<string, ScopeState>(StringComparer.Ordinal);
             foreach (JsonProperty entry in snapshot.EnumerateObject())
@@ -173,18 +149,14 @@ namespace DnsServerCore.Configuration
                 if (entry.Value.ValueKind == JsonValueKind.Null)
                 {
                     if (candidates.Remove(entry.Name))
-                    {
-                        if (snapshot.GetProperty(entry.Name).GetProperty("activeLeases").GetArrayLength() != 0)
-                            throw new InvalidDataException($"{path}: A scope with active leases cannot be removed.");
-                        changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Remove, false));
-                    }
+                        PreviewRemoval(entry.Name, snapshot.GetProperty(entry.Name), changes);
                     continue;
                 }
 
                 JsonElement scope = entry.Value;
                 foreach (JsonProperty field in scope.EnumerateObject())
                 {
-                    if (field.Name is not ("startingAddress" or "endingAddress" or "subnetMask" or "enabled" or "reservations"))
+                    if (field.Name is not ("startingAddress" or "endingAddress" or "subnetMask" or "enabled" or "reservations" or "exclusions"))
                         throw new InvalidDataException($"{ConfigurationPlan.AppendPath(path, field.Name)}: Planning for this scope setting is not implemented.");
                 }
 
@@ -220,8 +192,17 @@ namespace DnsServerCore.Configuration
                 {
                     foreach (JsonElement lease in currentScope.GetProperty("activeLeases").EnumerateArray())
                         CheckRange(path, ReadAddress(lease, "address"), start, end);
-                    foreach (JsonElement address in currentScope.GetProperty("exclusionAddresses").EnumerateArray())
-                        CheckRange(path, IPAddressExtensions.ConvertNumberToIp(address.GetUInt32()), start, end);
+                }
+
+                if (scope.TryGetProperty("exclusions", out JsonElement exclusions))
+                {
+                    var desired = ReadExclusions(exclusions, path + "/exclusions", start, end);
+                    if (previous is not null && !desired.SequenceEqual(ReadExclusions(currentScope.GetProperty("exclusions"), path + "/exclusions", null, null)))
+                        changes.Add(new ConfigurationChange(path + "/exclusions", ConfigurationChangeKind.Update, false));
+                }
+                else if (rangeChanged && previous is not null)
+                {
+                    ReadExclusions(currentScope.GetProperty("exclusions"), path + "/exclusions", start, end);
                 }
 
                 candidates[entry.Name] = candidate;
@@ -251,6 +232,131 @@ namespace DnsServerCore.Configuration
                     first <= other.Value.End.ConvertIpToNumber() && other.Value.Start.ConvertIpToNumber() <= last))
                     throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ScopesPath, name)}: The range overlaps another DHCP scope.");
             }
+        }
+
+        private static void PreviewRemoval(string name, JsonElement current, List<ConfigurationChange> changes)
+        {
+            string path = ConfigurationPlan.AppendPath(ScopesPath, name);
+            if (current.GetProperty("activeLeases").GetArrayLength() != 0)
+                throw new InvalidDataException($"{path}: A scope with active leases cannot be removed.");
+            changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Remove, false));
+        }
+
+        internal static JsonObject ExportScopes(IReadOnlyDictionary<string, Scope> scopes, ISet<string> missingInputs)
+        {
+            var exported = new JsonObject();
+            foreach (var (name, scope) in scopes.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+            {
+                var reservations = new JsonObject();
+                var reservedAddresses = new HashSet<IPAddress>();
+                bool representable = true;
+                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal))
+                {
+                    string mac = BitConverter.ToString(reservation.HardwareAddress);
+                    if (reservation.HardwareAddress.Length != 6 || reservations.ContainsKey(mac) ||
+                        !reservedAddresses.Add(reservation.Address) || !Scope.IsAddressInRange(reservation.Address, scope.StartingAddress, scope.EndingAddress) ||
+                        !reservation.ClientIdentifier.Equals(new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, reservation.HardwareAddress)))
+                    {
+                        representable = false;
+                        break;
+                    }
+                    reservations.Add(mac, new JsonObject
+                    {
+                        ["address"] = reservation.Address.ToString(),
+                        ["hostName"] = reservation.HostName,
+                        ["comments"] = reservation.Comments
+                    });
+                }
+                if (!representable)
+                {
+                    missingInputs.Add(ConfigurationPlan.AppendPath(ScopesPath, name));
+                    continue;
+                }
+
+                var vendorInfo = new JsonObject();
+                if (scope.VendorInfo is not null)
+                {
+                    foreach (var (identifier, option) in scope.VendorInfo.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+                        vendorInfo.Add(identifier, BitConverter.ToString(option.Information).Replace('-', ':'));
+                }
+
+                JsonNode settings = JsonSerializer.SerializeToNode(new
+                {
+                    enabled = scope.Enabled,
+                    startingAddress = scope.StartingAddress.ToString(),
+                    endingAddress = scope.EndingAddress.ToString(),
+                    subnetMask = scope.SubnetMask.ToString(),
+                    leaseTime = new { days = scope.LeaseTimeDays, hours = scope.LeaseTimeHours, minutes = scope.LeaseTimeMinutes },
+                    offerDelayMs = scope.OfferDelayTime,
+                    pingCheck = new { enabled = scope.PingCheckEnabled, timeoutMs = scope.PingCheckTimeout, retries = scope.PingCheckRetries },
+                    domainName = scope.DomainName,
+                    domainSearchList = scope.DomainSearchList ?? [],
+                    dnsUpdates = new { enabled = scope.DnsUpdates, overwriteDynamicRecords = scope.DnsOverwriteForDynamicLease, ttl = scope.DnsTtl },
+                    boot = new { serverAddress = scope.ServerAddress?.ToString(), serverHostName = scope.ServerHostName, fileName = scope.BootFileName },
+                    routerAddress = scope.RouterAddress?.ToString(),
+                    dns = new { useThisServer = scope.UseThisDnsServer, servers = WriteAddresses(scope.UseThisDnsServer ? null : scope.DnsServers) },
+                    winsServers = WriteAddresses(scope.WinsServers),
+                    ntp = new { servers = WriteAddresses(scope.NtpServers), serverDomainNames = scope.NtpServerDomainNames ?? [] },
+                    staticRoutes = scope.StaticRoutes?.Select(route => new
+                    {
+                        destination = route.Destination.ToString(),
+                        subnetMask = route.SubnetMask.ToString(),
+                        router = route.Router.ToString()
+                    }),
+                    vendorInfo,
+                    capwapAcIpAddresses = WriteAddresses(scope.CAPWAPAcIpAddresses),
+                    tftpServerAddresses = WriteAddresses(scope.TftpServerAddresses),
+                    genericOptions = scope.GenericOptions?.Select(option => new { code = (byte)option.Code, value = Convert.ToHexString(option.RawValue) }),
+                    exclusions = WriteExclusions(scope.Exclusions),
+                    reservations,
+                    allowOnlyReservedLeases = scope.AllowOnlyReservedLeases,
+                    blockLocallyAdministeredMacAddresses = scope.BlockLocallyAdministeredMacAddresses,
+                    ignoreClientIdentifierOption = scope.IgnoreClientIdentifierOption
+                });
+                exported.Add(name, settings);
+            }
+            return exported;
+
+            static IEnumerable<string> WriteAddresses(IEnumerable<IPAddress> addresses) =>
+                addresses?.Select(address => address.ToString()) ?? [];
+        }
+
+        private static JsonArray WriteExclusions(IReadOnlyCollection<Exclusion> exclusions)
+        {
+            var result = new JsonArray();
+            if (exclusions is not null)
+            {
+                foreach (Exclusion entry in exclusions.OrderBy(item => item.StartingAddress.ConvertIpToNumber()).ThenBy(item => item.EndingAddress.ConvertIpToNumber()))
+                    result.Add(new JsonObject { ["startingAddress"] = entry.StartingAddress.ToString(), ["endingAddress"] = entry.EndingAddress.ToString() });
+            }
+            return result;
+        }
+
+        private static (uint Start, uint End)[] ReadExclusions(JsonElement value, string path, IPAddress start, IPAddress end)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return [];
+
+            var ranges = new SortedSet<(uint Start, uint End)>();
+            int index = 0;
+            foreach (JsonElement exclusion in value.EnumerateArray())
+            {
+                string entryPath = $"{path}/{index++}";
+                IPAddress first = ReadAddress(exclusion, "startingAddress");
+                IPAddress last = ReadAddress(exclusion, "endingAddress");
+                try
+                {
+                    _ = new Exclusion(first, last);
+                }
+                catch (ArgumentException)
+                {
+                    throw new InvalidDataException($"{entryPath}/endingAddress: Exclusion end must be at or after its start.");
+                }
+                CheckRange(entryPath + "/startingAddress", first, start, end);
+                CheckRange(entryPath + "/endingAddress", last, start, end);
+                ranges.Add((first.ConvertIpToNumber(), last.ConvertIpToNumber()));
+            }
+            return ranges.ToArray();
         }
 
         private static void CompareReservations(JsonElement scope, JsonElement current, string scopePath,

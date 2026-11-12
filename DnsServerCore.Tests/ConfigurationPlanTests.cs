@@ -2452,6 +2452,48 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpInspectionExportAndExclusionPreviewUseConfiguredScopeValues()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.60&subnetMask=255.255.255.0" +
+                "&leaseTimeDays=3&exclusions=192.0.2.45%7C192.0.2.47&genericOptions=224%7CAA%3ABB", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-0A&ipAddress=192.0.2.30&hostName=reserved", server.AdminToken));
+
+            JsonElement response = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
+            LoopbackWebService.AssertOk(response);
+            JsonElement export = response.GetProperty("response").GetProperty("manifest");
+            _ = Load(export.GetRawText());
+            JsonElement scope = export.GetProperty("dhcp").GetProperty("scopes").GetProperty("Lab");
+            Assert.Equal(3, scope.GetProperty("leaseTime").GetProperty("days").GetInt32());
+            Assert.Equal("AABB", Assert.Single(scope.GetProperty("genericOptions").EnumerateArray()).GetProperty("value").GetString());
+            Assert.Equal("reserved", scope.GetProperty("reservations").GetProperty("02-00-00-00-00-0A").GetProperty("hostName").GetString());
+            Assert.False(scope.TryGetProperty("activeLeases", out _));
+            Assert.Equal("192.0.2.45", Assert.Single(scope.GetProperty("exclusions").EnumerateArray()).GetProperty("startingAddress").GetString());
+
+            const string resize = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}""";
+            using var invalid = new StringContent(resize, Encoding.UTF8, "application/json");
+            JsonElement blocked = await server.CallAsync("settings/config/plan", server.AdminToken, invalid);
+            Assert.Equal("error", blocked.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Lab/exclusions/0/", blocked.GetProperty("errorMessage").GetString());
+
+            const string replacement = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40",
+                  "exclusions":[{"startingAddress":"192.0.2.20","endingAddress":"192.0.2.22"}]}}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, replacement);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.Equal("/dhcp/scopes/Lab/endingAddress", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dhcp/scopes/Lab/exclusions", change.GetProperty("path").GetString()));
+
+            const string reset = """{"schemaVersion":1,"dhcp":{"scopes":null}}""";
+            JsonElement removal = await PreviewAsync(server, reset);
+            Assert.Contains(removal.GetProperty("changes").EnumerateArray(), change =>
+                change.GetProperty("path").GetString() == "/dhcp/scopes/Lab" && change.GetProperty("kind").GetString() == "Remove");
+        }
+
+        [Fact]
         public async Task DhcpReservationPreviewComparesNormalizedEntriesAndEffectiveRange()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -2525,7 +2567,7 @@ namespace DnsServerCore.Tests
                         {"hardwareAddress":"02-00-00-00-00-0A","address":"192.0.2.20"},
                         {"hardwareAddress":"02-00-00-00-00-0C","address":"192.0.2.22"}
                     ],
-                    "exclusionAddresses":[]
+                    "exclusions":[]
                 }}}
                 """);
 

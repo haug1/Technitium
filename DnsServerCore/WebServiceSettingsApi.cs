@@ -568,6 +568,13 @@ namespace DnsServerCore
                 var missingInputs = new SortedSet<string>(StringComparer.Ordinal);
                 DnsServer dns = _dnsWebService._dnsServer;
 
+                if (includePreviewOnly && _dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.View))
+                {
+                    var scopes = ConfigurationDhcp.ExportScopes(_dnsWebService._dhcpServer.Scopes, missingInputs);
+                    if (scopes.Count > 0)
+                        manifest.Add("dhcp", new System.Text.Json.Nodes.JsonObject { ["scopes"] = scopes });
+                }
+
                 if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
                     missingInputs.Add("/blocklists/sources");
                 if (dns.Forwarders?.Count > 0 && manifest["dns"]?["forwarding"]?["servers"] is null)
