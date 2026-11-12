@@ -21,6 +21,22 @@ namespace DnsServerCore.Configuration
 
         internal static string AppPath(string name) => ConfigurationPlan.AppendPath(Path, name);
 
+        internal static void ValidateNames(JsonElement settings)
+        {
+            if (!settings.TryGetProperty("apps", out JsonElement apps) ||
+                !apps.TryGetProperty("packages", out JsonElement packages) || packages.ValueKind == JsonValueKind.Null)
+                return;
+
+            HashSet<string> windowsNames = OperatingSystem.IsWindows() ? new(StringComparer.OrdinalIgnoreCase) : null;
+            foreach (JsonProperty item in packages.EnumerateObject())
+            {
+                if (!IsSafeName(item.Name))
+                    throw new InvalidDataException($"{AppPath(item.Name)}: Invalid app name.");
+                if (windowsNames is not null && !windowsNames.Add(item.Name))
+                    throw new InvalidDataException($"{AppPath(item.Name)}: App names must be unique ignoring case on Windows.");
+            }
+        }
+
         internal static bool HasPackageDigestPins(IEnumerable<string> paths) =>
             paths.Any(path => path.LastIndexOf('/') > Path.Length && path.EndsWith("/packageSha256", StringComparison.Ordinal));
 
@@ -70,9 +86,7 @@ namespace DnsServerCore.Configuration
             var entries = new List<Entry>();
             foreach (JsonProperty item in packages.EnumerateObject().OrderBy(entry => entry.Name, StringComparer.Ordinal))
             {
-                string path = ConfigurationPlan.AppendPath(Path, item.Name);
-                if (!IsSafeName(item.Name))
-                    throw new InvalidDataException($"{path}: Invalid app name.");
+                string path = AppPath(item.Name);
                 if (OperatingSystem.IsWindows() && !manager.Applications.ContainsKey(item.Name) &&
                     manager.Applications.Keys.Contains(item.Name, StringComparer.OrdinalIgnoreCase))
                     throw new InvalidDataException($"{path}: Use the installed app name with its original casing.");

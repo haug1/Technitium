@@ -167,6 +167,35 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public void RejectsAppNamesThatAreNotSingleDirectoryNames()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"apps":{"packages":{"one/two":null}}}
+                """);
+
+            var error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains("/apps/packages/one~1two", error.Message);
+        }
+
+        [Fact]
+        public void RejectsCaseAliasedAppDirectoriesOnWindows()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"apps":{"packages":{"Fixture":null,"fixture":null}}}
+                """);
+
+            if (OperatingSystem.IsWindows())
+            {
+                var error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+                Assert.Contains("/apps/packages/fixture", error.Message);
+            }
+            else
+            {
+                ConfigurationManifest.Load(path);
+            }
+        }
+
+        [Fact]
         public void OfflineValidationRejectsInvalidAppVersionPins()
         {
             string path = WriteManifest("""
