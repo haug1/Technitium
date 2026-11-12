@@ -119,29 +119,49 @@ namespace DnsServerCore.Configuration
                 {
                     var records = new List<DnsResourceRecord>();
                     dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);
-                    JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, dns.AuthZoneManager.DefaultNsRecordTtl, path, records, missingInputs);
+                    uint defaultNsTtl = dns.AuthZoneManager.DefaultNsRecordTtl;
+                    bool replaceApexNameServers = false;
+                    if (zone.Type == AuthZoneType.Primary)
+                    {
+                        var apexNameServers = records.Where(record => record.Type == DnsResourceRecordType.NS &&
+                            record.Name.Equals(zone.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
+                        replaceApexNameServers = apexNameServers.Any(record => record.Tag is not GenericRecordInfo { Disabled: true }) &&
+                            apexNameServers.Any(record => !ConfigurationPlan.IsGeneratedRecord(zone.Name, dns.ServerDomain, record.Name, record.Type, record.RDATA) ||
+                                HasCustomizedNameServer(record, defaultNsTtl));
+                    }
+                    JsonArray exportedRecords = ExportRecords(zone.Name, dns.ServerDomain, defaultNsTtl, replaceApexNameServers, path, records, missingInputs);
                     if (exportedRecords is not null)
+                    {
                         declaration.Add("records", exportedRecords);
+                        if (replaceApexNameServers)
+                            declaration.Add("replaceApexNameServers", true);
+                    }
                 }
                 result.Add(name, declaration);
             }
             return result;
         }
 
-        private static JsonArray ExportRecords(string zone, string serverDomain, uint defaultNsTtl, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
+        private static bool HasCustomizedNameServer(DnsResourceRecord record, uint defaultNsTtl)
+        {
+            var info = record.Tag as GenericRecordInfo;
+            return record.OriginalTtlValue != defaultNsTtl || info?.Disabled == true ||
+                !string.IsNullOrEmpty(info?.Comments) || info?.ExpiryTtl > 0 || info is NSRecordInfo { GlueRecords.Count: > 0 };
+        }
+
+        private static JsonArray ExportRecords(string zone, string serverDomain, uint defaultNsTtl, bool replaceApexNameServers, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
             var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
                 JsonArray Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, List<string> MissingInputs)>();
             foreach (DnsResourceRecord record in records)
             {
                 var info = record.Tag as GenericRecordInfo;
-                bool customizedApexNs = record.Type == DnsResourceRecordType.NS &&
-                    (record.OriginalTtlValue != defaultNsTtl || info?.Disabled == true ||
-                        !string.IsNullOrEmpty(info?.Comments) || info?.ExpiryTtl > 0 ||
-                        info is NSRecordInfo { GlueRecords.Count: > 0 });
+                bool preserveNameServer = record.Type == DnsResourceRecordType.NS &&
+                    (replaceApexNameServers && record.Name.Equals(zone, StringComparison.OrdinalIgnoreCase) ||
+                        HasCustomizedNameServer(record, defaultNsTtl));
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
                     (record.Type != DnsResourceRecordType.SOA &&
-                        !customizedApexNs &&
+                        !preserveNameServer &&
                         ConfigurationPlan.IsGeneratedRecord(zone, serverDomain, record.Name, record.Type, record.RDATA)))
                     continue;
 

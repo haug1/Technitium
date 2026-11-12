@@ -5998,6 +5998,38 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ExplicitApexNameServerSetReplacesTheDestinationDefault()
+        {
+            await using var source = await LoopbackWebService.StartAsync("source.test");
+            LoopbackWebService.AssertOk(await source.CallAsync("zones/create?zone=delegated.test&type=Primary", source.AdminToken));
+            const string declaration = """
+                {"schemaVersion":1,"zones":{"DELEGATED.test.":{"replaceApexNameServers":true,"records":[
+                    {"owner":"@","type":"NS","ttl":120,"data":{"zoneFile":"ns1.external.test."}},
+                    {"owner":"@","type":"NS","ttl":120,"data":{"zoneFile":"ns2.external.test."}}
+                ]}}}
+                """;
+            JsonElement preview = await PreviewAsync(source, declaration);
+            Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change => change.GetProperty("kind").ValueEquals("Remove"));
+            LoopbackWebService.AssertOk(await ApplyAsync(source, declaration, preview.GetProperty("revision").GetString()!));
+
+            JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zones = export.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            Assert.True(zones.GetProperty("delegated.test").GetProperty("replaceApexNameServers").GetBoolean());
+
+            await using var destination = await LoopbackWebService.StartAsync("destination.test");
+            string migration = JsonSerializer.Serialize(new { schemaVersion = 1, zones });
+            string revision = (await PreviewAsync(destination, migration)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, migration, revision));
+            await destination.RestartAsync();
+            var answer = (await destination.QueryAsync("delegated.test", DnsResourceRecordType.NS)).Answer;
+            Assert.All(answer, record => Assert.Equal(120u, record.OriginalTtlValue));
+            Assert.Equal(new[] { "ns1.external.test", "ns2.external.test" },
+                answer.Select(record => Assert.IsType<DnsNSRecordData>(record.RDATA).NameServer).Order(StringComparer.Ordinal));
+            Assert.Empty((await PreviewAsync(destination, migration)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

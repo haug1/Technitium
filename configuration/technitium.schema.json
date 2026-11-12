@@ -966,6 +966,7 @@
             {"type": "null"}
           ]
         },
+        "replaceApexNameServers": {"type": "boolean"},
         "records": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/record"}}, {"type": "null"}]},
         "dnssec": {
           "type": "object",

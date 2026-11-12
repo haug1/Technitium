@@ -27,11 +27,13 @@ namespace DnsServerCore.Configuration
         private static readonly Lazy<JsonSchema> _schema = new(LoadSchema);
         private readonly Lazy<IReadOnlyList<string>> _blockListSources;
         private readonly Lazy<NameServerAddress[]> _forwardingServers;
+        private readonly HashSet<string> _apexNameServerReplacements;
 
-        private ConfigurationManifest(string filePath, JsonElement settings)
+        private ConfigurationManifest(string filePath, JsonElement settings, HashSet<string> apexNameServerReplacements = null)
         {
             FilePath = filePath;
             Settings = settings;
+            _apexNameServerReplacements = apexNameServerReplacements;
             if (settings.ValueKind == JsonValueKind.Object && settings.TryGetProperty("blocklists", out JsonElement blocklists) &&
                 blocklists.TryGetProperty("sources", out JsonElement sources))
                 _blockListSources = new(() => ReadBlockListSources(sources, this));
@@ -48,6 +50,7 @@ namespace DnsServerCore.Configuration
         // Use the same resolved values to calculate the revision and apply this manifest.
         internal IReadOnlyList<string> BlockListSources => _blockListSources?.Value;
         internal NameServerAddress[] ForwardingServers => _forwardingServers?.Value;
+        internal bool ReplacesApexNameServers(string zone) => _apexNameServerReplacements?.Contains(zone) == true;
 
         internal static ConfigurationManifest ReferenceContext(string configFolder) =>
             new(Path.Combine(configFolder, DefaultFileName), default);
@@ -110,7 +113,7 @@ namespace DnsServerCore.Configuration
             if (root.TryGetProperty("blockZones", out JsonElement blocked))
                 ConfigurationDomainLists.Read(blocked, "/blockZones");
             CheckDnsNameKeys(root, "zones", "", allowRoot: true);
-            ValidateZoneRecords(root);
+            HashSet<string> apexNameServerReplacements = ValidateZoneRecords(root);
             ConfigurationZoneDnssec.ValidateDeclarations(root);
             ConfigurationZonePolicies.Validate(root);
             ConfigurationDhcp.Validate(root);
@@ -203,7 +206,7 @@ namespace DnsServerCore.Configuration
             if (root.TryGetProperty("blocklists", out JsonElement blocklists) && blocklists.TryGetProperty("sources", out JsonElement sources))
                 ReadBlockListSources(sources);
 
-            return new ConfigurationManifest(filePath, root.Clone());
+            return new ConfigurationManifest(filePath, root.Clone(), apexNameServerReplacements);
         }
 
         internal static void ValidateWebTlsDependencies(bool? tlsEnabled, bool enableHttp3, bool redirectToTls)
@@ -713,24 +716,35 @@ namespace DnsServerCore.Configuration
             return name.ToLowerInvariant();
         }
 
-        private static void ValidateZoneRecords(JsonElement root)
+        private static HashSet<string> ValidateZoneRecords(JsonElement root)
         {
+            var replacements = new HashSet<string>(StringComparer.Ordinal);
             if (!root.TryGetProperty("zones", out JsonElement zones))
-                return;
+                return replacements;
 
             foreach (JsonProperty zone in zones.EnumerateObject())
             {
-                if (zone.Value.ValueKind != JsonValueKind.Object || !zone.Value.TryGetProperty("records", out JsonElement records) ||
-                    records.ValueKind != JsonValueKind.Array)
+                if (zone.Value.ValueKind != JsonValueKind.Object)
                     continue;
 
                 string zonePath = AppendPath("/zones", zone.Name);
+                bool replace = zone.Value.TryGetProperty("replaceApexNameServers", out JsonElement replaceValue) && replaceValue.GetBoolean();
+                if (replace && (!zone.Value.TryGetProperty("records", out JsonElement replacement) || replacement.ValueKind != JsonValueKind.Array ||
+                    zone.Value.TryGetProperty("type", out JsonElement typeValue) && !typeValue.ValueEquals("Primary")))
+                    throw new InvalidDataException($"{zonePath}/replaceApexNameServers: A primary zone and an explicit record list are required.");
+                if (!zone.Value.TryGetProperty("records", out JsonElement records) || records.ValueKind != JsonValueKind.Array)
+                    continue;
+
                 string zoneName = CanonicalDnsName(zone.Name, zonePath, allowRoot: true);
+                bool hasEnabledApexNs = false;
                 int index = 0;
                 foreach (JsonElement record in records.EnumerateArray())
                 {
                     string recordPath = $"{zonePath}/records/{index++}";
                     (string owner, DnsResourceRecordType type) = ReadZoneRecordIdentity(zoneName, record, recordPath);
+                    if (type == DnsResourceRecordType.NS && owner == zoneName &&
+                        (!record.TryGetProperty("disabled", out JsonElement nsDisabled) || !nsDisabled.GetBoolean()))
+                        hasEnabledApexNs = true;
                     if (type == DnsResourceRecordType.SOA &&
                         (owner != zoneName || record.TryGetProperty("disabled", out JsonElement disabled) && disabled.GetBoolean() ||
                         record.TryGetProperty("expiryTtl", out JsonElement expiry) && expiry.GetDecimal() != 0))
@@ -765,7 +779,14 @@ namespace DnsServerCore.Configuration
                         }
                     }
                 }
+                if (replace)
+                {
+                    if (!hasEnabledApexNs)
+                        throw new InvalidDataException($"{zonePath}/replaceApexNameServers: Declare at least one enabled apex NS record.");
+                    replacements.Add(zoneName);
+                }
             }
+            return replacements;
         }
 
         internal static (string Owner, DnsResourceRecordType Type) ReadZoneRecordIdentity(string zoneName, JsonElement record, string path)

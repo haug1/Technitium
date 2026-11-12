@@ -1242,7 +1242,7 @@ namespace DnsServerCore.Configuration
                             }
                             continue;
                         }
-                        if (field.Name is "enabled" or "records" or "permissions" or "primary" or "catalog" or "dnssec" ||
+                        if (field.Name is "enabled" or "records" or "replaceApexNameServers" or "permissions" or "primary" or "catalog" or "dnssec" ||
                             (field.Name == "type" && field.Value.GetString() is "Primary" or "Forwarder" or "Secondary" or "SecondaryForwarder" or "Catalog" or "SecondaryCatalog" or "Stub"))
                             continue;
                         throw new InvalidDataException($"{AppendPath(zonePath, field.Name)}: Applying this zone setting is not implemented.");
@@ -1441,7 +1441,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled" or "records" or "permissions" or "primary" or "catalog" or "dnssec") && !ConfigurationZonePolicies.IsPolicy(field.Name))
+                    if (field.Name is not ("type" or "enabled" or "records" or "replaceApexNameServers" or "permissions" or "primary" or "catalog" or "dnssec") && !ConfigurationZonePolicies.IsPolicy(field.Name))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 
@@ -1658,12 +1658,18 @@ namespace DnsServerCore.Configuration
                 }
             }
 
+            bool replaceApexNameServers = manifest.ReplacesApexNameServers(zoneName);
+            if (replaceApexNameServers && forwarderZone)
+                throw new InvalidDataException($"{path}: Apex name server replacement requires a primary zone.");
+
             foreach (DnsResourceRecord record in currentRecords)
             {
+                bool replaceNameServer = replaceApexNameServers && record.Type == DnsResourceRecordType.NS &&
+                    record.Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase);
                 if (!matched.Contains(record) && !IsLeaseRecord(record) &&
-                    !IsGeneratedRecord(zoneName, serverDomain, record.Name, record.Type, record.RDATA))
+                    (replaceNameServer || !IsGeneratedRecord(zoneName, serverDomain, record.Name, record.Type, record.RDATA)))
                 {
-                    if (!ownsRecords)
+                    if (!ownsRecords && !replaceNameServer)
                         throw new InvalidDataException($"{path}: An existing record has no known owner. Declare the existing record or omit the collection.");
 
                     changes.Add(new ZoneRecordEdit(record.Name.ToLowerInvariant(), record.Type, record.RDATA,

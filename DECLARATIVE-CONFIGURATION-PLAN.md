@@ -4,10 +4,9 @@ A versioned `technitium.json` manifest should reproduce the operator-controlled 
 
 ## 1. Close configuration and export gaps
 
-- Preserve the complete apex NS record set when the source replaces its generated default name server. Give operators explicit control over that replacement while keeping the existing behavior for manifests that leave the generated record implicit.
 - Audit the inventory against the schema, preview, apply, and export. Close gaps where an operator-controlled value is lost or a valid source configuration cannot be represented. Use the same domain rules for equivalent manifest and API inputs.
 
-**Acceptance.** Migrating a zone with a replaced apex NS set serves the same name servers and TTLs on a clean destination. A manifest that leaves the default implicit still gets a generated name server. Every operator-settable field in the inventory has a documented manifest representation and a migration path.
+**Acceptance.** Every operator-settable field in the inventory has a documented manifest representation and a migration path.
 
 ## 2. Verify clean-instance migration and recovery
 

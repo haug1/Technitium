@@ -831,7 +831,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 HashSet<(string Owner, DnsResourceRecordType Type, DnsClass Class, DnsResourceRecordData Data,
                     uint Ttl, bool Disabled, string Comments, uint ExpiryTtl, string Glue)> OperatorRecordKeys(List<DnsResourceRecord> source) =>
                     source.Where(record => !ConfigurationPlan.IsLeaseRecord(record) &&
-                        !ConfigurationPlan.IsGeneratedRecord(name, _dnsServer.ServerDomain, record.Name, record.Type, record.RDATA))
+                        (record.Type == DnsResourceRecordType.NS ||
+                            !ConfigurationPlan.IsGeneratedRecord(name, _dnsServer.ServerDomain, record.Name, record.Type, record.RDATA)))
                         .Select(record =>
                         {
                             var metadata = record.Tag as GenericRecordInfo;
