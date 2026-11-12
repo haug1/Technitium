@@ -683,6 +683,47 @@ namespace DnsServerCore.Dns
         SslServerAuthenticationOptions _doqSslServerAuthenticationOptions;
         SslServerAuthenticationOptions _dohSslServerAuthenticationOptions;
 
+        IReadOnlySet<string> _managedTsigKeyNames;
+        bool _manifestOwnsAllTsigKeys;
+        internal bool HasManagedTsigKeys => _manifestOwnsAllTsigKeys || _managedTsigKeyNames?.Count > 0;
+
+        internal void CheckManagedTsigKeys(IReadOnlyDictionary<string, TsigKey> candidate)
+        {
+            if (!HasManagedTsigKeys)
+                return;
+
+            IEnumerable<string> names = _manifestOwnsAllTsigKeys
+                ? (_tsigKeys?.Keys ?? []).Union(candidate?.Keys ?? [], StringComparer.OrdinalIgnoreCase)
+                : _managedTsigKeyNames;
+            foreach (string name in names)
+            {
+                TsigKey previous = null, desired = null;
+                _tsigKeys?.TryGetValue(name, out previous);
+                candidate?.TryGetValue(name, out desired);
+                if (!ConfigurationTsig.SameKey(previous, desired))
+                    throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationTsig.Path, name)}: TSIG key is managed by the configuration manifest.");
+            }
+        }
+
+        internal void ValidateManifestTsigRemovals(IReadOnlyDictionary<string, TsigKey> candidate)
+        {
+            if (_tsigKeys is null)
+                return;
+
+            string[] removed = _tsigKeys.Keys.Where(name => !candidate.ContainsKey(name)).ToArray();
+            if (removed.Length == 0)
+                return;
+            IReadOnlyList<AuthZoneInfo> zones = _authZoneManager.GetAllZones();
+            foreach (string name in removed)
+            {
+                foreach (AuthZoneInfo zone in zones)
+                {
+                    if (zone.ZoneTransferTsigKeyNames?.Contains(name) == true || zone.UpdateSecurityPolicies?.ContainsKey(name) == true)
+                        throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationTsig.Path, name)}: The TSIG key is still referenced by a zone.");
+                }
+            }
+        }
+
         IReadOnlyDictionary<string, TsigKey> _tsigKeys;
 
         DnsServerRecursion _recursion;
@@ -1074,14 +1115,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default, DnsBindings? persistedBindings = null, DnsCertificate persistedCertificate = null)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default, DnsBindings? persistedBindings = null, DnsCertificate persistedCertificate = null, ConfigurationTsig.Candidate? tsig = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, persistedBindings ?? _previousManifestDnsBindings ?? CaptureDnsBindings(), persistedCertificate ?? _previousManifestDnsCertificate ?? CaptureDnsCertificate());
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, persistedBindings ?? _previousManifestDnsBindings ?? CaptureDnsBindings(), persistedCertificate ?? _previousManifestDnsCertificate ?? CaptureDnsCertificate(), tsig);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -1112,7 +1153,7 @@ namespace DnsServerCore.Dns
         private static int ReadConfigVersion(BinaryReader bR)
         {
             int version = bR.ReadByte();
-            if ((version < 1) || (version > 7))
+            if ((version < 1) || (version > 8))
                 throw new InvalidDataException("DNS Server config version not supported.");
             return version;
         }
@@ -1144,7 +1185,7 @@ namespace DnsServerCore.Dns
                 throw new InvalidDataException($"{conflict}: Setting is managed by the configuration manifest.");
         }
 
-        internal bool HasManagedDnsSettings => _managedDnsSettings != 0 || _managedDnsSettingsExtension != 0;
+        internal bool HasManagedDnsSettings => HasManagedTsigKeys || _managedDnsSettings != 0 || _managedDnsSettingsExtension != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
         internal bool ManifestOwnsResponsiblePerson => _managedDnsSettings.HasFlag(ManagedDnsSettings.ResponsiblePerson);
         internal bool HasManagedAuthoritativeNetworks => (_managedDnsSettings &
@@ -1348,6 +1389,13 @@ namespace DnsServerCore.Dns
                 yield return "/dns/listeners/certificate/path";
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.DnsCertificatePassword))
                 yield return "/dns/listeners/certificate/password";
+            if (_manifestOwnsAllTsigKeys)
+                yield return ConfigurationTsig.Path;
+            else if (_managedTsigKeyNames is not null)
+            {
+                foreach (string name in _managedTsigKeyNames.Order(StringComparer.Ordinal))
+                    yield return ConfigurationPlan.AppendPath(ConfigurationTsig.Path, name);
+            }
             foreach (string path in ConfigurationProxy.Paths(ManagedProxyFields))
                 yield return path;
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
@@ -2515,6 +2563,8 @@ namespace DnsServerCore.Dns
                     tsigKeys.Add(keyName, new TsigKey(keyName, sharedSecret, algorithm));
                 }
 
+                if (!readOwnership)
+                    CheckManagedTsigKeys(tsigKeys);
                 if (apply)
                     _tsigKeys = tsigKeys;
             }
@@ -2755,8 +2805,21 @@ namespace DnsServerCore.Dns
 
             if (readOwnership)
             {
-                _managedDnsSettings = version == 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
-                _managedDnsSettingsExtension = version == 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
+                _managedDnsSettings = version >= 7 ? (ManagedDnsSettings)ReadOwnershipWord(s) : 0;
+                _managedDnsSettingsExtension = version >= 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
+                _manifestOwnsAllTsigKeys = version >= 8 && bR.ReadBoolean();
+                _managedTsigKeyNames = null;
+                if (version >= 8)
+                {
+                    int count = bR.ReadUInt16();
+                    if (count > 0)
+                    {
+                        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        for (int i = 0; i < count; i++)
+                            names.Add(s.ReadShortString());
+                        _managedTsigKeyNames = names;
+                    }
+                }
             }
         }
 
@@ -2773,12 +2836,15 @@ namespace DnsServerCore.Dns
             return ownership;
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, DnsBindings persistedBindings, DnsCertificate persistedCertificate)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, DnsBindings persistedBindings, DnsCertificate persistedCertificate, ConfigurationTsig.Candidate? tsig)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
             bW.Write(Encoding.ASCII.GetBytes("DC")); //format
-            bW.Write((byte)7); //version
+            bool ownsAllTsigKeys = tsig?.OwnsAll ?? _manifestOwnsAllTsigKeys;
+            IReadOnlySet<string> ownedTsigNames = tsig.HasValue ? tsig.Value.OwnedNames : _managedTsigKeyNames;
+            bool hasTsigOwnership = ownsAllTsigKeys || ownedTsigNames?.Count > 0;
+            bW.Write((byte)(hasTsigOwnership ? 8 : 7)); //version
 
             //general
             s.WriteShortString(serverDomain ?? _serverDomain);
@@ -2888,15 +2954,16 @@ namespace DnsServerCore.Dns
             s.WriteShortString(listenerPolicy.RealIpHeader ?? _dnsOverHttpRealIpHeader);
 
             //tsig
-            if (_tsigKeys is null)
+            IReadOnlyDictionary<string, TsigKey> persistedKeys = tsig?.Keys ?? _tsigKeys;
+            if (persistedKeys is null)
             {
                 bW.Write((byte)0);
             }
             else
             {
-                bW.Write(Convert.ToByte(_tsigKeys.Count));
+                bW.Write(Convert.ToByte(persistedKeys.Count));
 
-                foreach (KeyValuePair<string, TsigKey> tsigKey in _tsigKeys)
+                foreach (KeyValuePair<string, TsigKey> tsigKey in persistedKeys.OrderBy(entry => entry.Key, StringComparer.Ordinal))
                 {
                     s.WriteShortString(tsigKey.Key);
                     s.WriteShortString(tsigKey.Value.SharedSecret);
@@ -2996,7 +3063,19 @@ namespace DnsServerCore.Dns
             bW.Write(statistics.InMemory ?? _statsManager.EnableInMemoryStats);
             bW.Write(statistics.RetentionDays ?? _statsManager.MaxStatFileDays);
             // Keep the first ownership word byte-compatible with existing version 7 files.
-            if (_managedDnsSettingsExtension == 0)
+            if (hasTsigOwnership)
+            {
+                bW.Write((ulong)_managedDnsSettings);
+                bW.Write((ulong)_managedDnsSettingsExtension);
+                bW.Write(ownsAllTsigKeys);
+                bW.Write((ushort)(ownedTsigNames?.Count ?? 0));
+                if (ownedTsigNames is not null)
+                {
+                    foreach (string name in ownedTsigNames.Order(StringComparer.Ordinal))
+                        s.WriteShortString(name);
+                }
+            }
+            else if (_managedDnsSettingsExtension == 0)
             {
                 for (ulong ownership = (ulong)_managedDnsSettings; ownership != 0; ownership >>= 8)
                     bW.Write((byte)ownership);
@@ -4295,7 +4374,8 @@ namespace DnsServerCore.Dns
 
             if (request.IsSigned)
             {
-                if (!request.VerifySignedRequest(_tsigKeys, out DnsDatagram unsignedRequest, out DnsDatagram errorResponse))
+                IReadOnlyDictionary<string, TsigKey> requestKeys = _tsigKeys;
+                if (!request.VerifySignedRequest(requestKeys, out DnsDatagram unsignedRequest, out DnsDatagram errorResponse))
                 {
                     _log.Write(remoteEP, protocol, "DNS Server received a request that failed TSIG signature verification (RCODE: " + errorResponse.RCODE + "; TSIG Error: " + errorResponse.TsigError + ")");
 
@@ -4311,7 +4391,7 @@ namespace DnsServerCore.Dns
                 if (unsignedResponse is null)
                     return null;
 
-                return unsignedResponse.SignResponse(request, _tsigKeys);
+                return unsignedResponse.SignResponse(request, requestKeys);
             }
 
             if (request.EDNS is not null)
@@ -8494,7 +8574,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationDnsCertificate.Candidate certificate, ConfigurationProxy.Candidate proxy, ConfigurationTsig.Candidate tsig, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8827,7 +8907,14 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !certificateChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (tsig.Keys is not null)
+                        ValidateManifestTsigRemovals(tsig.Keys);
+                    bool tsigChanged = tsig.Keys is not null && (tsig.Keys.Count != (_tsigKeys?.Count ?? 0) ||
+                        tsig.Keys.Any(entry => _tsigKeys is null || !_tsigKeys.TryGetValue(entry.Key, out TsigKey existing) ||
+                            !ConfigurationTsig.SameKey(existing, entry.Value)));
+                    bool tsigOwnershipChanged = tsig.OwnsAll != _manifestOwnsAllTsigKeys ||
+                        (_managedTsigKeyNames is null ? tsig.OwnedNames?.Count > 0 : !_managedTsigKeyNames.SetEquals(tsig.OwnedNames is null ? Array.Empty<string>() : tsig.OwnedNames));
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !tsigChanged && !tsigOwnershipChanged && !certificateChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8842,7 +8929,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, CaptureDnsBindings(), CaptureDnsCertificate()));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, CaptureDnsBindings(), CaptureDnsCertificate(), tsig));
                         _pendingSave = false;
                         if (bindingsChanged)
                             FinishManifestDnsBindings(committed: true);
@@ -8859,6 +8946,11 @@ namespace DnsServerCore.Dns
                         SetSourceNetworks(previousSourceNetworks);
                         throw;
                     }
+
+                    if (tsigChanged)
+                        TsigKeys = tsig.Keys;
+                    _manifestOwnsAllTsigKeys = tsig.OwnsAll;
+                    _managedTsigKeyNames = tsig.OwnedNames?.Count > 0 ? tsig.OwnedNames : null;
 
                     SetOutboundSocketSettings(outbound);
                     SetClientSubnetSettings(subnet);

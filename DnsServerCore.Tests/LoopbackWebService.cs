@@ -120,10 +120,10 @@ namespace DnsServerCore.Tests
             return result.GetProperty("response");
         }
 
-        public Task<DnsDatagram> QueryAsync(string name, DnsResourceRecordType type)
+        public Task<DnsDatagram> QueryAsync(string name, DnsResourceRecordType type, TsigKey? key = null)
         {
             var client = new DnsClient(DnsEndPoint) { Timeout = 2000, Retries = 2 };
-            return client.ResolveAsync(name, type);
+            return key is null ? client.ResolveAsync(name, type) : client.TsigResolveAsync(name, type, key);
         }
 
         public static void AssertOk(JsonElement result)

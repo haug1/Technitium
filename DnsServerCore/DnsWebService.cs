@@ -959,7 +959,7 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsCertificate) &&
+                if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings || _dnsServer.HasManagedDnsCertificate || _dnsServer.HasManagedTsigKeys) &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                 {
                     bool checkDnsBody;
@@ -3048,7 +3048,18 @@ namespace DnsServerCore
             return changed;
         }
 
-        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate)
+        private ConfigurationTsig.Candidate PrepareTsigKeys(ConfigurationManifest manifest)
+        {
+            if (!ConfigurationTsig.TryGetDeclaration(manifest, out JsonElement declaration))
+                return default;
+
+            string catalogKey = _clusterManager.ClusterInitialized ? ConfigurationTsig.GetCatalogKey(_clusterManager.ClusterDomain) : null;
+            var candidate = ConfigurationTsig.Prepare(manifest, declaration, _dnsServer.TsigKeys, catalogKey);
+            _dnsServer.ValidateManifestTsigRemovals(candidate.Keys);
+            return candidate;
+        }
+
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig)
         {
             WebListeners previous = CaptureWebListeners();
             SslServerAuthenticationOptions previousTlsOptions;
@@ -3071,7 +3082,7 @@ namespace DnsServerCore
                     ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
                 await StartWebServiceAsync(false, listeners);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
-                await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, listeners: listeners,
+                await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners,
                     listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated);
             }
             catch
@@ -3204,7 +3215,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3226,7 +3237,7 @@ namespace DnsServerCore
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate);
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig);
             }
             catch
             {
@@ -3452,6 +3463,7 @@ namespace DnsServerCore
                     }
                 }
 
+                ConfigurationTsig.Candidate tsig = PrepareTsigKeys(startupManifest);
                 DnsServer.DnsBindings dnsBindings = ConfigurationPlan.GetDnsBindings(startupManifest);
                 DnsServer.DnsBindings previousDnsBindings = _dnsServer.CaptureDnsBindings();
                 ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(startupManifest, _dnsServer);
@@ -3510,7 +3522,7 @@ namespace DnsServerCore
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged);
+                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged);
                         }
                     });
                 }

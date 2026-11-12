@@ -276,7 +276,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig)
         {
             CheckApplySupport(manifest);
 
@@ -288,7 +288,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, alreadyActive, listenerTuningStaged, dnsBindingsStaged, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), certificate, proxy, tsig, alreadyActive, listenerTuningStaged, dnsBindingsStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -773,6 +773,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
+                throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
             if (ConfigurationWebCertificate.IsDeclared(manifest))
                 throw new InvalidDataException("/web/certificate: Applying web certificate settings to a cluster is not implemented.");
             if (GetWebListeners(manifest).HasValues)
@@ -848,7 +850,7 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (path is "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
@@ -953,7 +955,7 @@ namespace DnsServerCore.Configuration
                 section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
             }
 
-            if (includePreviewOnly && currentSettings.TryGetProperty("tsigKeys", out JsonElement keys) && keys.GetArrayLength() > 0)
+            if (currentSettings.TryGetProperty("tsigKeys", out JsonElement keys) && keys.GetArrayLength() > 0)
             {
                 string catalogKey = currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain)
                     ? ConfigurationTsig.GetCatalogKey(clusterDomain.GetString()) : null;

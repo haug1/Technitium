@@ -669,7 +669,7 @@ namespace DnsServerCore
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     ConfigurationPlan.CheckApplySupport(manifest);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                    var (proxy, dnsCertificate, webCertificate) = CheckApplyRevision(manifest, expected, sessionUser);
+                    var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
 
@@ -687,7 +687,7 @@ namespace DnsServerCore
                     }
                     else
                     {
-                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, listeners: listeners, webCertificate: webCertificate);
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate);
                     }
                 }
                 catch (InvalidDataException ex)
@@ -704,18 +704,19 @@ namespace DnsServerCore
                 }
             }
 
-            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
+            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
                 ConfigurationProxy.Candidate proxy = ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
                 ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer);
                 var webCertificate = _dnsWebService.PrepareWebCertificate(manifest);
-                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate);
+                var tsig = _dnsWebService.PrepareTsigKeys(manifest);
+                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig);
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
                 ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, ConfigurationPlan.GetDnsBindings(manifest),
                     _dnsWebService._dnsServer.CaptureDnsBindings(), _dnsWebService._dnsServer.HasDnsListenerCertificate);
-                return (proxy, dnsCertificate, webCertificate);
+                return (proxy, dnsCertificate, webCertificate, tsig);
             }
 
             private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation, User sessionUser)
@@ -725,9 +726,9 @@ namespace DnsServerCore
                     await WithConfigurationLockAsync(async () =>
                     {
                         ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                        var (proxy, dnsCertificate, webCertificate) = CheckApplyRevision(manifest, expected, sessionUser);
+                        var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
                         _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
-                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate);
+                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig);
                     });
                     operation.State = "applied";
                 }
@@ -807,7 +808,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null)
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
@@ -831,15 +832,12 @@ namespace DnsServerCore
                         }
                         ConfigurationProxy.WritePasswordSnapshot(writer, password, _dnsWebService._dnsServer.Proxy, _configurationRevisionKey);
                     }
-                    if (ConfigurationTsig.TryGetDeclaration(manifest, out JsonElement tsig))
+                    if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
                     {
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
                             throw new DnsWebServiceException("Access was denied.");
-                        var keys = _dnsWebService._dnsServer.TsigKeys;
-                        string protectedKey = _dnsWebService._clusterManager.ClusterInitialized
-                            ? ConfigurationTsig.GetCatalogKey(_dnsWebService._clusterManager.ClusterDomain) : null;
-                        var candidate = ConfigurationTsig.Prepare(manifest, tsig, keys, protectedKey);
-                        ConfigurationTsig.WriteSnapshot(writer, keys, candidate, _configurationRevisionKey);
+                        var candidate = preparedTsig ?? _dnsWebService.PrepareTsigKeys(manifest);
+                        ConfigurationTsig.WriteSnapshot(writer, _dnsWebService._dnsServer.TsigKeys, candidate.Keys, _configurationRevisionKey);
                     }
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
@@ -1186,6 +1184,30 @@ namespace DnsServerCore
                 if (dnsTlsCertificatePath is not null)
                     _dnsWebService._dnsServer.CheckManagedDnsCertificate(dnsTlsCertificatePath, dnsTlsCertificatePath.Length == 0 ? null : dnsTlsCertificatePassword);
                 _dnsWebService._dnsServer.CheckManagedDnsBindingDependencies(dnsBindings, removingCertificate: dnsTlsCertificatePath == "");
+
+                Dictionary<string, TsigKey> requestedTsigKeys = null;
+                if (request.TryQueryOrFormArray("tsigKeys",
+                    item => ReadTsigKey(item.GetProperty("keyName").GetString(), item.GetProperty("sharedSecret").GetString(),
+                        item.GetProperty("algorithmName").GetString()),
+                    row => ReadTsigKey(row[0], row[1], row[2]), 3, out TsigKey[] tsigKeys, '|'))
+                {
+                    if (tsigKeys.Length > byte.MaxValue)
+                        throw new InvalidDataException("/dns/tsigKeys: At most 255 TSIG keys are supported.");
+                    requestedTsigKeys = tsigKeys.ToDictionary(key => key.KeyName, StringComparer.OrdinalIgnoreCase);
+                    if (_dnsWebService._clusterManager.ClusterInitialized &&
+                        !requestedTsigKeys.ContainsKey(ConfigurationTsig.GetCatalogKey(_dnsWebService._clusterManager.ClusterDomain)))
+                        throw new DnsWebServiceException("Cannot remove the TSIG key for the Cluster Catalog zone.");
+                    _dnsWebService._dnsServer.CheckManagedTsigKeys(requestedTsigKeys);
+                }
+
+                static TsigKey ReadTsigKey(string name, string secret, string algorithm)
+                {
+                    name = name.TrimEnd('.').ToLowerInvariant();
+                    if (DnsClient.IsDomainNameUnicode(name))
+                        name = DnsClient.ConvertDomainNameToAscii(name);
+                    DnsClient.IsDomainNameValid(name, true);
+                    return secret.Length == 0 ? new TsigKey(name, algorithm) : new TsigKey(name, secret, algorithm);
+                }
 
                 bool hasProxyType = request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType);
                 NetProxy requestedProxy = null;
@@ -1679,74 +1701,11 @@ namespace DnsServerCore
 
                         #region tsig
 
-                        if (request.TryQueryOrFormArray("tsigKeys", delegate (JsonElement jsonObject)
+                        if (requestedTsigKeys is not null)
                         {
-                            string keyName = jsonObject.GetProperty("keyName").GetString().TrimEnd('.').ToLowerInvariant();
-                            string sharedSecret = jsonObject.GetProperty("sharedSecret").GetString();
-                            string algorithmName = jsonObject.GetProperty("algorithmName").GetString();
-
-                            if (DnsClient.IsDomainNameUnicode(keyName))
-                                keyName = DnsClient.ConvertDomainNameToAscii(keyName);
-
-                            DnsClient.IsDomainNameValid(keyName, true);
-
-                            if (sharedSecret.Length == 0)
-                                return new TsigKey(keyName, algorithmName);
-
-                            return new TsigKey(keyName, sharedSecret, algorithmName);
-                        },
-                            delegate (ArraySegment<string> tableRow)
-                            {
-                                string keyName = tableRow[0].TrimEnd('.').ToLowerInvariant();
-                                string sharedSecret = tableRow[1];
-                                string algorithmName = tableRow[2];
-
-                                if (DnsClient.IsDomainNameUnicode(keyName))
-                                    keyName = DnsClient.ConvertDomainNameToAscii(keyName);
-
-                                DnsClient.IsDomainNameValid(keyName, true);
-
-                                if (sharedSecret.Length == 0)
-                                    return new TsigKey(keyName, algorithmName);
-
-                                return new TsigKey(keyName, sharedSecret, algorithmName);
-                            },
-                            3, out TsigKey[] tsigKeys, '|')
-                        )
-                        {
-                            string strTsigKeys = "";
-
-                            if (tsigKeys.Length == 0)
-                            {
-                                if (_dnsWebService._clusterManager.ClusterInitialized)
-                                    throw new DnsWebServiceException($"Cannot remove TSIG key for 'cluster-catalog.{_dnsWebService._clusterManager.ClusterDomain}' Cluster Catalog zone.");
-
-                                _dnsWebService._dnsServer.TsigKeys = null;
-                            }
-                            else
-                            {
-                                Dictionary<string, TsigKey> tsigKeysMap = new Dictionary<string, TsigKey>(tsigKeys.Length);
-
-                                foreach (TsigKey tsigKey in tsigKeys)
-                                {
-                                    tsigKeysMap.Add(tsigKey.KeyName, tsigKey);
-
-                                    if (strTsigKeys.Length == 0)
-                                        strTsigKeys = tsigKey.KeyName + "|" + tsigKey.SharedSecret + "|" + tsigKey.AlgorithmName;
-                                    else
-                                        strTsigKeys += "|" + tsigKey.KeyName + "|" + tsigKey.SharedSecret + "|" + tsigKey.AlgorithmName;
-                                }
-
-                                if (_dnsWebService._clusterManager.ClusterInitialized)
-                                {
-                                    if (!tsigKeysMap.ContainsKey($"cluster-catalog.{_dnsWebService._clusterManager.ClusterDomain}"))
-                                        throw new DnsWebServiceException($"Cannot remove TSIG key for 'cluster-catalog.{_dnsWebService._clusterManager.ClusterDomain}' Cluster Catalog zone.");
-                                }
-
-                                _dnsWebService._dnsServer.TsigKeys = tsigKeysMap;
-                            }
-
-                            clusterParameters.Add("tsigKeys", strTsigKeys);
+                            _dnsWebService._dnsServer.TsigKeys = requestedTsigKeys;
+                            clusterParameters.Add("tsigKeys", string.Join("|", requestedTsigKeys.Values.Select(
+                                key => $"{key.KeyName}|{key.SharedSecret}|{key.AlgorithmName}")));
                         }
 
                         #endregion

@@ -636,7 +636,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task TsigPreviewReportsKeyChangesWithoutExposingSecrets()
+        public async Task TsigApplyRotatesTheSigningKeyAndPersistsOwnership()
         {
             await using var server = await LoopbackWebService.StartAsync();
             const string variable = "TECHNITIUM_TEST_TSIG_PASSWORD";
@@ -644,6 +644,13 @@ namespace DnsServerCore.Tests
             const string nextSecret = "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=";
             string keys = $"current.test|{currentSecret}|hmac-sha256|remove.test|{currentSecret}|hmac-sha256";
             LoopbackWebService.AssertOk(await server.CallAsync("settings/set?tsigKeys=" + Uri.EscapeDataString(keys), server.AdminToken));
+
+            await server.RestartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] originalBackup = await backup.Content.ReadAsByteArrayAsync();
 
             const string manifest = """
                 {"schemaVersion":1,"dns":{"tsigKeys":{
@@ -676,6 +683,37 @@ namespace DnsServerCore.Tests
                 Assert.False(exported.GetProperty("current.test").TryGetProperty("secret", out _));
                 Assert.DoesNotContain(currentSecret, inspection.GetRawText());
 
+                JsonElement stale = await ApplyAsync(server, manifest, first.GetProperty("revision").GetString()!);
+                Assert.Equal("error", stale.GetProperty("status").GetString());
+                Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+                JsonNode failedCandidate = JsonNode.Parse(manifest)!;
+                failedCandidate["logging"] = new JsonObject { ["retentionDays"] = 90 };
+                string failedManifest = failedCandidate.ToJsonString();
+                JsonElement failurePreview = await PreviewAsync(server, failedManifest);
+                string blockedLogFile = Path.Combine(server.ConfigurationDirectory, "log.tmp");
+                Directory.CreateDirectory(blockedLogFile);
+                JsonElement failed = await ApplyAsync(server, failedManifest, failurePreview.GetProperty("revision").GetString()!);
+                Assert.Equal("error", failed.GetProperty("status").GetString());
+                Directory.Delete(blockedLogFile);
+                await server.QueryAsync("localhost", DnsResourceRecordType.A, new TsigKey("current.test", currentSecret, "hmac-sha256"));
+
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, rotated.GetProperty("revision").GetString()!));
+                await server.RestartAsync();
+                await server.QueryAsync("localhost", DnsResourceRecordType.A, new TsigKey("current.test", nextSecret, "hmac-sha256"));
+                await server.QueryAsync("localhost", DnsResourceRecordType.A, new TsigKey("new.test", nextSecret, "hmac-sha512"));
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement conflict = await server.CallAsync("settings/set?maxLogFileDays=22&tsigKeys=" + Uri.EscapeDataString(keys), server.AdminToken);
+                Assert.Equal("error", conflict.GetProperty("status").GetString());
+                Assert.Contains("/dns/tsigKeys/", conflict.GetProperty("errorMessage").GetString());
+                Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+                using var restore = new MultipartFormDataContent();
+                restore.Add(new ByteArrayContent(originalBackup), "file", "backup.zip");
+                JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, restore);
+                Assert.Equal("error", restored.GetProperty("status").GetString());
+                Assert.Contains("/dns/tsigKeys/", restored.GetProperty("errorMessage").GetString());
+
                 Environment.SetEnvironmentVariable(variable, "invalid-fixture-secret");
                 InvalidDataException invalid = Assert.Throws<InvalidDataException>(() => Load(manifest).ValidateReferences());
                 Assert.Contains("/secret", invalid.Message);
@@ -685,6 +723,21 @@ namespace DnsServerCore.Tests
                 Assert.Equal("error", rejected.GetProperty("status").GetString());
                 Assert.Contains("/secret", rejected.GetProperty("errorMessage").GetString());
                 Assert.DoesNotContain("invalid-fixture-secret", rejected.GetRawText());
+
+                const string clear = """{"schemaVersion":1,"dns":{"tsigKeys":null}}""";
+                LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=transfer.test&type=Primary", server.AdminToken));
+                LoopbackWebService.AssertOk(await server.CallAsync("zones/options/set?zone=transfer.test&zoneTransferTsigKeyNames=current.test", server.AdminToken));
+                using var clearContent = new StringContent(clear, Encoding.UTF8, "application/json");
+                JsonElement inUse = await server.CallAsync("settings/config/plan", server.AdminToken, clearContent);
+                Assert.Equal("error", inUse.GetProperty("status").GetString());
+                Assert.Contains("still referenced by a zone", inUse.GetProperty("errorMessage").GetString());
+                LoopbackWebService.AssertOk(await server.CallAsync("zones/options/set?zone=transfer.test&zoneTransferTsigKeyNames=false", server.AdminToken));
+                JsonElement cleared = await PreviewAsync(server, clear);
+                LoopbackWebService.AssertOk(await ApplyAsync(server, clear, cleared.GetProperty("revision").GetString()!));
+                await server.RestartAsync();
+                JsonElement settings = await server.GetSettingsAsync();
+                Assert.Empty(settings.GetProperty("tsigKeys").EnumerateArray());
+                Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), path => path.GetString() == "/dns/tsigKeys");
             }
             finally
             {

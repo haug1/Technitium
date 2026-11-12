@@ -14,6 +14,24 @@ namespace DnsServerCore.Configuration
     {
         internal const string Path = "/dns/tsigKeys";
 
+        internal readonly record struct Candidate(IReadOnlyDictionary<string, TsigKey> Keys, IReadOnlySet<string> OwnedNames, bool OwnsAll);
+
+        internal static bool SameKey(TsigKey first, TsigKey second)
+        {
+            if (ReferenceEquals(first, second))
+                return true;
+            if (first is null || second is null || first.Algorithm != second.Algorithm)
+                return false;
+            if (first.SharedSecret == second.SharedSecret)
+                return true;
+
+            Span<byte> firstBytes = stackalloc byte[192];
+            Span<byte> secondBytes = stackalloc byte[192];
+            return Convert.TryFromBase64String(first.SharedSecret, firstBytes, out int firstLength) &&
+                Convert.TryFromBase64String(second.SharedSecret, secondBytes, out int secondLength) &&
+                CryptographicOperations.FixedTimeEquals(firstBytes[..firstLength], secondBytes[..secondLength]);
+        }
+
         internal static string GetCatalogKey(string clusterDomain) =>
             string.IsNullOrEmpty(clusterDomain) ? null : "cluster-catalog." + clusterDomain;
 
@@ -39,7 +57,7 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static IReadOnlyDictionary<string, TsigKey> Prepare(ConfigurationManifest manifest, JsonElement declaration,
+        internal static Candidate Prepare(ConfigurationManifest manifest, JsonElement declaration,
             IReadOnlyDictionary<string, TsigKey> current, string protectedKey)
         {
             var candidate = new Dictionary<string, TsigKey>(StringComparer.OrdinalIgnoreCase);
@@ -47,7 +65,7 @@ namespace DnsServerCore.Configuration
             {
                 if (protectedKey is not null && current is not null && current.TryGetValue(protectedKey, out TsigKey clusterKey))
                     candidate.Add(protectedKey, clusterKey);
-                return candidate;
+                return new Candidate(candidate, null, true);
             }
 
             if (current is not null)
@@ -56,10 +74,12 @@ namespace DnsServerCore.Configuration
                     candidate.Add(name, key);
             }
 
+            var ownedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (JsonProperty entry in declaration.EnumerateObject())
             {
                 string path = ConfigurationPlan.AppendPath(Path, entry.Name);
                 string name = ConfigurationManifest.CanonicalDnsName(entry.Name, path, allowRoot: false);
+                ownedNames.Add(name);
                 if (string.Equals(name, protectedKey, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException($"{path}: The cluster catalog manages this TSIG key.");
 
@@ -76,12 +96,15 @@ namespace DnsServerCore.Configuration
                 string secret = entry.Value.TryGetProperty("secret", out JsonElement reference)
                     ? ReadSecret(manifest, reference, path + "/secret") : previous?.SharedSecret ??
                         throw new InvalidDataException($"{path}/secret: A new TSIG key requires a secret reference.");
-                candidate[name] = new TsigKey(name, secret, algorithm);
+                var key = new TsigKey(name, secret, algorithm);
+                candidate[name] = SameKey(previous, key) ? previous : key;
             }
 
             if (candidate.Count > byte.MaxValue)
                 throw new InvalidDataException($"{Path}: At most 255 TSIG keys are supported.");
-            return candidate;
+            if (ownedNames.Count > ushort.MaxValue)
+                throw new InvalidDataException($"{Path}: Too many TSIG key declarations.");
+            return new Candidate(candidate, ownedNames, false);
         }
 
         private static TsigAlgorithm ReadAlgorithm(JsonElement value, string path)

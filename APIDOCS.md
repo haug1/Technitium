@@ -5321,7 +5321,7 @@ Web certificate preview validates the PKCS #12 file and private key against the 
 
 The settings response reports the effective custom static web root as `webServiceRootPath`, or null when using installed assets. `web.rootPath` can be previewed through the API with Settings modify permission. Apply it with a local startup manifest. The regular export reports a custom web root as a missing input, and inspection export includes the path.
 
-TSIG preview reports additions, removals, algorithm updates, and secret rotation by key name. It requires Settings modify permission and resolves secrets on the server without returning them. Inspection export includes key names and algorithms and lists the secrets in `missingInputs`. TSIG apply is pending.
+TSIG preview reports additions, removals, algorithm updates, and secret rotation by key name. It requires Settings modify permission and resolves secrets on the server without returning them. Export includes operator key names and algorithms and lists the secrets in `missingInputs`. Standalone servers can apply these changes without restarting DNS. The server rejects removal of a key still referenced by a zone and prevents conflicting settings writes and backup restores while keys are managed.
 
 DNS listener policy can be applied live. It covers ECS client source selection, the ordered DNS reverse-proxy ACL, and the DNS-over-HTTP real-IP header and help redirect. These settings are node-local. The server rejects conflicting edits and backup restores while the fields are managed by a manifest.
 
