@@ -1118,11 +1118,32 @@ namespace DnsServerCore.Tests
                 JsonElement exported = await server.CallAsync("settings/config/export", server.AdminToken);
                 LoopbackWebService.AssertOk(exported);
                 JsonElement response = exported.GetProperty("response");
-                Assert.Equal("resolver.pfx", response.GetProperty("manifest").GetProperty("dns").GetProperty("listeners")
-                    .GetProperty("certificate").GetProperty("path").GetString());
+                JsonElement exportedListeners = response.GetProperty("manifest").GetProperty("dns").GetProperty("listeners");
+                Assert.Equal("resolver.pfx", exportedListeners.GetProperty("certificate").GetProperty("path").GetString());
                 Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
                     input => input.GetString() == "/dns/listeners/certificate/password");
                 Assert.DoesNotContain(password, response.GetRawText());
+
+                await using (var destination = await LoopbackWebService.StartAsync())
+                {
+                    int migratedPort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+                    JsonNode listeners = JsonNode.Parse(exportedListeners.GetRawText())!;
+                    listeners["tls"]!["port"] = migratedPort;
+                    listeners["certificate"]!["path"] = "migrated-resolver.pfx";
+                    listeners["certificate"]!["password"] = new JsonObject { ["environment"] = variable };
+                    File.Copy(certificateFile, Path.Combine(destination.ConfigurationDirectory, "migrated-resolver.pfx"));
+                    string migration = new JsonObject
+                    {
+                        ["schemaVersion"] = 1,
+                        ["dns"] = new JsonObject { ["listeners"] = listeners }
+                    }.ToJsonString();
+                    string revision = (await PreviewAsync(destination, migration)).GetProperty("revision").GetString()!;
+                    LoopbackWebService.AssertOk(await ApplyAsync(destination, migration, revision));
+                    Assert.Equal(activeThumbprint, await ReadThumbprintAsync(migratedPort));
+                    await destination.RestartAsync();
+                    Assert.Equal(activeThumbprint, await ReadThumbprintAsync(migratedPort));
+                    Assert.Empty((await PreviewAsync(destination, migration)).GetProperty("changes").EnumerateArray());
+                }
 
                 JsonElement conflict = await server.CallAsync("settings/set?dnsTlsCertificatePath=replacement.pfx", server.AdminToken);
                 Assert.Equal("error", conflict.GetProperty("status").GetString());
