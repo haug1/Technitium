@@ -90,3 +90,118 @@ These fields are read and written by the settings API and stored in `dns.config`
 | `dns.clientSubnet.ipv6PrefixLength` | `eDnsClientSubnetIPv6PrefixLength` | | Integer bits, 56 | Cluster-wide. Range 0–64. Applies live. |
 | `dns.clientSubnet.ipv4Override` | `eDnsClientSubnetIpv4Override` | | Optional IPv4 network, unset | Cluster-wide. Must be IPv4. A host address uses the configured IPv4 prefix length. Empty clears the override. Applies live. |
 | `dns.clientSubnet.ipv6Override` | `eDnsClientSubnetIpv6Override` | | Optional IPv6 network, unset | Cluster-wide. Must be IPv6. A host address uses the configured IPv6 prefix length. Empty clears the override. Applies live. |
+
+## DNS rate limits and listener tuning
+
+These fields persist in `dns.config` and transfer across the cluster. Changes are live unless the activation column calls for a DNS listener restart. Older DNS config versions before 3 supply 2048 KiB for each UDP buffer. [Defaults](DnsServerCore/Dns/DnsServer.cs#L169) · [Persistence reader](DnsServerCore/Dns/DnsServer.cs#L793) · [API activation](DnsServerCore/WebServiceSettingsApi.cs#L709)
+
+| Proposed manifest path | API field | Type and default | Validation and activation |
+| --- | --- | --- | --- |
+| `dns.rateLimits.ipv4` | `qpmPrefixLimitsIPv4` | Prefix limits, /32 at 600 and /24 at 6000 queries/minute for both UDP and TCP | Unique prefixes 0–32, up to 255 entries, nonnegative protocol limits. |
+| `dns.rateLimits.ipv6` | `qpmPrefixLimitsIPv6` | Prefix limits, /128 at 600, /64 at 1200, /56 at 6000 queries/minute for both UDP and TCP | Unique prefixes 0–128, up to 255 entries, nonnegative protocol limits. |
+| `dns.rateLimits.sampleMinutes` | `qpmLimitSampleMinutes` | Integer minutes, 5 | Range 1–60. |
+| `dns.rateLimits.udpTruncationPercentage` | `qpmLimitUdpTruncationPercentage` | Integer percent, 50 | Range 0–100. Controls the share of rate-limited UDP queries that receive a truncated response. |
+| `dns.rateLimits.bypassNetworks` | `qpmLimitBypassList` | Network array, empty | Up to 255 entries. Empty clears the list. |
+| `dns.tuning.clientTimeoutMs` | `clientTimeout` | Integer milliseconds, 2000 | Range 1000–10000. |
+| `dns.tuning.tcpSendTimeoutMs` | `tcpSendTimeout` | Integer milliseconds, 10000 | Range 1000–90000. Restart DNS listeners. |
+| `dns.tuning.tcpReceiveTimeoutMs` | `tcpReceiveTimeout` | Integer milliseconds, 10000 | Range 1000–90000. Restart DNS listeners. |
+| `dns.tuning.quicIdleTimeoutMs` | `quicIdleTimeout` | Integer milliseconds, 60000 | Range 1000–90000. Restart DNS listeners. |
+| `dns.tuning.quicMaxInboundStreams` | `quicMaxInboundStreams` | Integer stream count, 100 | The setter accepts 0–1000. Restart DNS listeners. |
+| `dns.tuning.listenBacklog` | `listenBacklog` | Integer connection count, 100 | The setter passes the value to the listener. Restart DNS listeners. |
+| `dns.tuning.udpSendBufferKiB` | `udpSendBufferSizeKB` | Integer KiB, 2048 | Range 8–65536. Restart DNS listeners. |
+| `dns.tuning.udpReceiveBufferKiB` | `udpReceiveBufferSizeKB` | Integer KiB, 2048 | Range 8–65536. Restart DNS listeners. |
+| `dns.tuning.maxConcurrentResolutionsPerCore` | `maxConcurrentResolutionsPerCore` | Unsigned 16-bit count, 100 | At least 1. Reconfigures the resolver task pool live. |
+
+## Optional DNS listeners
+
+These fields persist in `dns.config`. They are node-local under current cluster transfer. DNS port fields below accept 0–65535 in their setters, subject to protocol-specific exclusions. Listener flags, ports, and socket paths trigger a DNS listener restart when changed. [Persistence reader](DnsServerCore/Dns/DnsServer.cs#L833) · [API activation](DnsServerCore/WebServiceSettingsApi.cs#L1084) · [Property validators](DnsServerCore/Dns/DnsServer.cs#L7434)
+
+| Proposed manifest path | API field or alias | Type and default | Validation, dependencies, and activation |
+| --- | --- | --- | --- |
+| `dns.listeners.useClientSubnetAsSource` | `enableEDnsClientSubnetSourceAddress` | Boolean, false | Applies live. |
+| `dns.listeners.udpProxy.enabled` | `enableDnsOverUdpProxy` | Boolean, false | Uses the UDP proxy port. |
+| `dns.listeners.udpProxy.port` | `dnsOverUdpProxyPort` | Port, 538 | Must bind when the listener is enabled. |
+| `dns.listeners.tcpProxy.enabled` | `enableDnsOverTcpProxy` | Boolean, false | Uses the TCP proxy port. |
+| `dns.listeners.tcpProxy.port` | `dnsOverTcpProxyPort` | Port, 538 | Must bind when the listener is enabled. |
+| `dns.listeners.http.enabled` | `enableDnsOverHttp` | Boolean, false | Initial environment input is `DNS_SERVER_OPTIONAL_PROTOCOL_DNS_OVER_HTTP`. |
+| `dns.listeners.http.port` | `dnsOverHttpPort` | Port, 80 | Excludes ports 53 and 853. |
+| `dns.listeners.http.unixSocket.enabled` | `enableDnsOverHttpUnixSocket` | Boolean, false | Requires OS Unix socket support and a usable socket path. |
+| `dns.listeners.http.unixSocket.path` | `dnsOverHttpUnixSocket` | Optional socket path, unset | Blank clears the path. |
+| `dns.listeners.https.unixSocket.enabled` | `enableDnsOverHttpsUnixSocket` | Boolean, false | Requires OS Unix socket support, a usable socket path, and a certificate. |
+| `dns.listeners.https.unixSocket.path` | `dnsOverHttpsUnixSocket` | Optional socket path, unset | Blank clears the path. |
+| `dns.listeners.tls.enabled` | `enableDnsOverTls` | Boolean, false | Requires a loaded DNS TLS certificate for the listener. |
+| `dns.listeners.tls.port` | `dnsOverTlsPort` | Port, 853 | Excludes port 53. |
+| `dns.listeners.https.enabled` | `enableDnsOverHttps` | Boolean, false | Requires a loaded DNS TLS certificate for the listener. |
+| `dns.listeners.https.port` | `dnsOverHttpsPort` | Port, 443 | Excludes ports 53 and 853. |
+| `dns.listeners.https.http3Enabled` | `enableDnsOverHttp3` | Boolean, false | Requires QUIC support and a TLS listener. |
+| `dns.listeners.quic.enabled` | `enableDnsOverQuic` | Boolean, false | Requires QUIC support and a loaded DNS TLS certificate. |
+| `dns.listeners.quic.port` | `dnsOverQuicPort` | Port, 853 | Excludes port 53. |
+| `dns.listeners.http.helpRedirect` | `enableDnsOverHttpHelpRedirect` | Boolean, true | Controls the DoH help redirect. Applies live. |
+| `dns.listeners.reverseProxyAcl` | `dnsReverseProxyNetworkACL`, legacy `reverseProxyNetworkACL` | Ordered ACL, empty | Up to 255 entries. Empty clears the list. Applies live. |
+| `dns.listeners.http.realIpHeader` | `dnsOverHttpRealIpHeader` | String, `X-Real-IP` | Empty selects the default. Rejects spaces and values longer than 255 characters. Applies live. |
+| `dns.listeners.certificate.path` | `dnsTlsCertificatePath` | Optional certificate path, unset | Resolve relative to config directory. Empty removes the certificate. A listener restart may be needed when a certificate becomes available or is removed. |
+| `dns.listeners.certificate.password` | `dnsTlsCertificatePassword` | Optional secret reference, unset | Supplied with the certificate path. The legacy masked placeholder retains the current password. Export a reference or missing-input marker. |
+
+Versions before 4 omit the HTTP Unix socket settings and help redirect, and versions before 5 omit HTTPS Unix socket settings. Certificate timestamps and loaded TLS contexts are derived state.
+
+## DNS recursion, forwarding, and outbound proxy
+
+These fields persist in `dns.config`, transfer across the cluster, and apply live. Older files before version 4 default locally served DNS zones to enabled. The current forwarder reader upgrades the legacy `HttpsJson` transport to `Https`. [Persistence reader](DnsServerCore/Dns/DnsServer.cs#L1010) · [Initial environment settings](DnsServerCore/Dns/DnsServer.cs#L504) · [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L1361)
+
+| Proposed manifest path | API field or alias | Type and default | Validation and dependencies |
+| --- | --- | --- | --- |
+| `dns.recursion.mode` | `recursion` | Enum, `AllowOnlyForPrivateNetworks` | `Deny`, `Allow`, `AllowOnlyForPrivateNetworks`, or `UseSpecifiedNetworkACL`. Initial environment input is `DNS_SERVER_RECURSION`. |
+| `dns.recursion.networkAcl` | `recursionNetworkACL` | Ordered ACL, empty | Up to 255 entries. Initial input `DNS_SERVER_RECURSION_NETWORK_ACL` takes precedence over legacy `DNS_SERVER_RECURSION_DENIED_NETWORKS` and `DNS_SERVER_RECURSION_ALLOWED_NETWORKS`, which are converted to an ACL. |
+| `dns.recursion.randomizeName` | `randomizeName` | Boolean, false | Controls randomized DNS query name case. |
+| `dns.recursion.qnameMinimization` | `qnameMinimization` | Boolean, true | Controls iterative resolution query minimization. |
+| `dns.recursion.locallyServedDnsZones` | `locallyServedDnsZones` | Boolean, true | Controls local handling of special-use DNS zones. |
+| `dns.recursion.retries` | `resolverRetries` | Integer count, 2 | Range 1–10. |
+| `dns.recursion.timeoutMs` | `resolverTimeout` | Integer milliseconds, 1500 | Range 1000–10000. |
+| `dns.recursion.concurrency` | `resolverConcurrency` | Integer count, 2 | Range 1–4. |
+| `dns.recursion.maxStackCount` | `resolverMaxStackCount` | Integer count, 16 | Range 10–30. |
+| `dns.proxy.type` | `proxyType` | Enum, `None` | `None`, `Http`, or `Socks5`. Changing the type rebuilds the proxy configuration. |
+| `dns.proxy.address` | `proxyAddress` | Optional host or address, unset | Used when the proxy is enabled. |
+| `dns.proxy.port` | `proxyPort` | Optional integer port, unset | Required with an enabled proxy. |
+| `dns.proxy.username` | `proxyUsername` | Optional string, unset | Up to 255 characters. Credential creation depends on username presence. |
+| `dns.proxy.password` | `proxyPassword` | Optional secret reference, unset | Resolved password up to 255 characters. Export a reference or missing-input marker. |
+| `dns.proxy.bypass` | `proxyBypass` | Bypass entry array, empty | Entries use the network library's bypass parser. Storage uses a byte-sized count. |
+| `dns.forwarding.servers` | `forwarders`, `forwarderProtocol` | Ordered nameserver array with transport per entry, empty | Use nameserver address parsing. The API and initial environment inputs `DNS_SERVER_FORWARDERS` and `DNS_SERVER_FORWARDER_PROTOCOL` use a shared transport. Empty removes the configured forwarders. Storage uses a byte-sized count. QUIC needs platform support. HTTP proxy is incompatible with UDP and QUIC forwarding. |
+| `dns.forwarding.concurrent` | `concurrentForwarding` | Boolean, true | Controls concurrent use of configured forwarders. |
+| `dns.forwarding.retries` | `forwarderRetries` | Integer count, 3 | Range 1–10. |
+| `dns.forwarding.timeoutMs` | `forwarderTimeout` | Integer milliseconds, 2000 | Range 1000–10000. |
+| `dns.forwarding.concurrency` | `forwarderConcurrency` | Integer count, 2 | Range 1–10. |
+
+## DNS cache
+
+These fields persist in `dns.config`, apply live, and remain local during cluster transfer. Versions before 6 contain two discarded sampling fields. Versions before 7 infer whether prefetch is enabled from the trigger value. Cache contents are runtime data. [Persistence reader](DnsServerCore/Dns/DnsServer.cs#L1034) · [Cache defaults](DnsServerCore/Dns/ZoneManagers/CacheZoneManager.cs#L40) · [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L1428)
+
+| Proposed manifest path | API field | Type and default | Validation and dependencies |
+| --- | --- | --- | --- |
+| `dns.cache.saveToDisk` | `saveCache` | Boolean, true | Disabling deletes the on-disk cache. |
+| `dns.cache.serveStale.enabled` | `serveStale` | Boolean, true | Enables stale answers. |
+| `dns.cache.serveStale.ttl` | `serveStaleTtl` | Unsigned seconds, 259200 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.serveStale.answerTtl` | `serveStaleAnswerTtl` | Unsigned seconds, 30 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.serveStale.resetTtl` | `serveStaleResetTtl` | Unsigned seconds, 30 | Range 10–900. |
+| `dns.cache.serveStale.maxWaitMs` | `serveStaleMaxWaitTime` | Integer milliseconds, 1800 | Range 0–1800. |
+| `dns.cache.maximumEntries` | `cacheMaximumEntries` | Signed 64-bit count, 10000 | Nonnegative. Zero disables the entry limit. |
+| `dns.cache.minimumRecordTtl` | `cacheMinimumRecordTtl` | Unsigned seconds, 10 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.maximumRecordTtl` | `cacheMaximumRecordTtl` | Unsigned seconds, 604800 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.negativeRecordTtl` | `cacheNegativeRecordTtl` | Unsigned seconds, 300 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.failureRecordTtl` | `cacheFailureRecordTtl` | Unsigned seconds, 10 | Use the DNS TTL parser for legacy API input. |
+| `dns.cache.prefetch.enabled` | `enableCachePrefetch` | Boolean, true | Enabling with a trigger below 1 restores the default trigger. |
+| `dns.cache.prefetch.eligibility` | `cachePrefetchEligibility` | Integer seconds, 2 | Minimum 2. |
+| `dns.cache.prefetch.trigger` | `cachePrefetchTrigger` | Integer seconds, 9 | Nonnegative. Zero disables prefetch. |
+
+## DNS blocking policy and TSIG
+
+These fields persist in `dns.config`, apply live, and transfer across the cluster. The effective blocking status can include a temporary pause and should be exported from the persisted policy. [DNS defaults](DnsServerCore/Dns/DnsServer.cs#L237) · [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L1290) · [Blocking persistence](DnsServerCore/Dns/DnsServer.cs#L1105)
+
+| Proposed manifest path | API field | Type and default | Validation and dependencies |
+| --- | --- | --- | --- |
+| `dns.blocking.enabled` | `enableBlocking` | Boolean, true | Initial environment input is `DNS_SERVER_ENABLE_BLOCKING`. |
+| `dns.blocking.allowTxtReport` | `allowTxtBlockingReport` | Boolean, true | Initial environment input is `DNS_SERVER_ALLOW_TXT_BLOCKING_REPORT`. |
+| `dns.blocking.bypassNetworks` | `blockingBypassList` | Network array, empty | Up to 255 entries. Empty clears the list. |
+| `dns.blocking.responseType` | `blockingType` | Enum, `NxDomain` | `AnyAddress`, `NxDomain`, or `CustomAddress`. |
+| `dns.blocking.answerTtl` | `blockingAnswerTtl` | Unsigned seconds, 30 | Use the DNS TTL parser for legacy API input. Updates the blocking SOA. |
+| `dns.blocking.customAddresses` | `customBlockingAddresses` | IP address array, empty | IPv4 or IPv6 for custom address mode. Legacy API skips invalid addresses. Storage uses a byte-sized count. |
+| `dns.tsigKeys` | `tsigKeys` | Named keys with algorithm and secret reference, empty | Up to 255 keys. Normalize DNS names, require unique names, and validate algorithms and secrets with the TSIG implementation. The legacy API can generate a secret from empty input. The cluster catalog key is lifecycle-managed and cannot be removed through settings. |
