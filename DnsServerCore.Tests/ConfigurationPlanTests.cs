@@ -3636,6 +3636,49 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task LocalManifestMigratesServerGeneratedSigningKeysFromAZoneFile()
+        {
+            await using var source = await LoopbackWebService.StartAsync();
+            await using var destination = await LoopbackWebService.StartAsync();
+            const string name = "generated-keys.test";
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"generated-keys.test":{"type":"Primary","dnssec":{"enabled":true,"keys":{
+                    "ksk":{"role":"KeySigningKey","algorithm":"ECDSA","curve":"P256"},
+                    "zsk":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P256"}
+                }}}}}
+                """;
+            string revision = (await PreviewAsync(source, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(source, manifest, revision));
+            var expected = (await source.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer
+                .Select(record => record.RDATA.ToString()).Order().ToArray();
+            Assert.Equal(2, expected.Length);
+
+            JsonElement export = await source.CallAsync("settings/config/export", source.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            var zone = JsonNode.Parse(export.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty(name).GetRawText())!;
+            const string keyFile = "migration-inputs/key-source.zone";
+            foreach (var (id, key) in zone["dnssec"]!["keys"]!.AsObject())
+            {
+                key!["privateKey"] = new JsonObject
+                {
+                    ["zoneFile"] = keyFile,
+                    ["keyTag"] = ushort.Parse(id, System.Globalization.CultureInfo.InvariantCulture)
+                };
+            }
+            var migration = new JsonObject { ["schemaVersion"] = 1, ["zones"] = new JsonObject { [name] = zone } };
+            string path = Path.Combine(destination.ConfigurationDirectory, "technitium.json");
+            string keySource = Path.Combine(destination.ConfigurationDirectory, keyFile);
+            Directory.CreateDirectory(Path.GetDirectoryName(keySource)!);
+            File.Copy(Path.Combine(source.ConfigurationDirectory, "zones", name + ".zone"), keySource);
+            await File.WriteAllTextAsync(path, migration.ToJsonString());
+            ConfigurationManifest.Load(path).ValidateReferences();
+            await destination.RestartAsync();
+            await destination.RestartAsync();
+            Assert.Equal(expected, (await destination.QueryAsync(name, DnsResourceRecordType.DNSKEY)).Answer
+                .Select(record => record.RDATA.ToString()).Order().ToArray());
+        }
+
+        [Fact]
         public async Task SignedZoneExportRecreatesTheSameKeysFromReferences()
         {
             await using var source = await LoopbackWebService.StartAsync();

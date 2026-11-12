@@ -340,14 +340,23 @@ namespace DnsServerCore.Configuration
             DnssecPrivateKey imported = null;
             if (manifest is not null && reference.HasValue)
             {
-                string pem = manifest.ResolveReference(reference.Value, path + "/privateKey");
-                try
+                if (reference.Value.TryGetProperty("zoneFile", out JsonElement zoneFile))
                 {
-                    imported = DnssecPrivateKey.Create(algorithm, role, pem);
+                    imported = ReadZoneFileKey(manifest, zoneFile.GetString(), reference.Value.GetProperty("keyTag").GetUInt16(), path + "/privateKey");
+                    if (imported.Algorithm != algorithm || imported.KeyType != role)
+                        throw new InvalidDataException($"{path}/privateKey: The referenced key has a different algorithm or role.");
                 }
-                catch (Exception ex) when (ex is ArgumentException or CryptographicException or FormatException or IOException or InvalidOperationException)
+                else
                 {
-                    throw new InvalidDataException($"{path}/privateKey: The referenced DNSSEC key could not be read.");
+                    string pem = manifest.ResolveReference(reference.Value, path + "/privateKey");
+                    try
+                    {
+                        imported = DnssecPrivateKey.Create(algorithm, role, pem);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or CryptographicException or FormatException or IOException or InvalidOperationException)
+                    {
+                        throw new InvalidDataException($"{path}/privateKey: The referenced DNSSEC key could not be read.");
+                    }
                 }
                 if (size != -1 && ((DnssecRsaPrivateKey)imported).KeySize != size)
                     throw new InvalidDataException($"{path}/keySize: The referenced RSA key has a different size.");
@@ -356,6 +365,33 @@ namespace DnsServerCore.Configuration
             }
 
             return new Key(role, algorithm, size, rollover, imported, path, value.TryGetProperty("rolloverDays", out _), Read(value, "publishOnSign")?.GetBoolean() ?? true);
+        }
+
+        private static DnssecPrivateKey ReadZoneFileKey(ConfigurationManifest manifest, string file, ushort tag, string path)
+        {
+            if (manifest.FilePath is null)
+                throw new InvalidDataException($"{path}: Zone-file key references require a local manifest.");
+
+            DnssecPrivateKey key;
+            try
+            {
+                string localPath = System.IO.Path.GetFullPath(file, System.IO.Path.GetDirectoryName(manifest.FilePath));
+                using var input = File.OpenRead(localPath);
+                using var reader = new BinaryReader(input);
+                if (reader.ReadByte() != 'D' || reader.ReadByte() != 'Z' || reader.ReadByte() != 4)
+                    throw new InvalidDataException();
+                var info = new AuthZoneInfo(reader, DateTime.UnixEpoch);
+                key = info.Type == AuthZoneType.Primary ? info.DnssecPrivateKeys?.FirstOrDefault(candidate => candidate.KeyTag == tag) : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or CryptographicException or NotSupportedException or DnsServerException)
+            {
+                throw new InvalidDataException($"{path}: The referenced primary zone file could not be read.");
+            }
+
+            if (key is null)
+                throw new InvalidDataException($"{path}: The specified DNSSEC key tag was not found in the referenced primary zone file.");
+            key.ResetForImport();
+            return key;
         }
 
         private static string GetDnsKeyDigest(DnssecPrivateKey key)

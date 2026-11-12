@@ -759,7 +759,21 @@
         "hashAlgorithm": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
         "curve": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
         "keySize": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 2147483647}, {"type": "null"}]},
-        "privateKey": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
+        "privateKey": {
+          "anyOf": [
+            {"$ref": "#/$defs/secretReference"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "zoneFile": {"type": "string", "minLength": 1},
+                "keyTag": {"type": "integer", "minimum": 0, "maximum": 65535}
+              },
+              "required": ["zoneFile", "keyTag"]
+            },
+            {"type": "null"}
+          ]
+        },
         "rolloverDays": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 365}, {"type": "null"}]}
       }
     },

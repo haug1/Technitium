@@ -358,6 +358,15 @@ namespace DnsServerCore.Dns.Dnssec
             return new DnsResourceRecord(firstRecord.Name, DnsResourceRecordType.RRSIG, firstRecord.Class, firstRecord.OriginalTtlValue, signedRRSigRecord);
         }
 
+        internal void ResetForImport()
+        {
+            _state = DnssecPrivateKeyState.Generated;
+            _stateChangedOn = DateTime.UtcNow;
+            _stateTransitionBy = default;
+            _isRetiring = false;
+            InitDnsKey(_dnsKey.PublicKey);
+        }
+
         internal void SetState(DnssecPrivateKeyState state, uint stateTransitionInTtl = 0)
         {
             if (_state >= state)

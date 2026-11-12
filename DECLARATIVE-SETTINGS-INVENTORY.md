@@ -346,7 +346,7 @@ Record data is required unless the existing type permits empty fields. Use the e
 | `keys.<id>.publishOnSign` | Initial signing or staging | Boolean, true. Set false to preserve a Generated key during migration. |
 | `keys.<id>.rolloverDays` | `zskRolloverDays`, `rolloverDays` | 0–365 days for ZSKs, with 0 disabling automatic rollover. Initial signing defaults to 30 for a generated ZSK and 0 for an imported ZSK. |
 
-Publish, rollover, retire, and delete are lifecycle operations. Current key state, state-change timestamps, computed key tags, signatures, and denial records are derived or operational state. Private key material stays in referenced inputs.
+Publish, rollover, retire, and delete are lifecycle operations. Current key state, state-change timestamps, computed key tags, signatures, and denial records are derived or operational state. Private key material stays in referenced inputs. Local manifests can also reference an existing primary zone file and numeric key tag.
 
 ## Authentication, users, groups, and permissions
 
