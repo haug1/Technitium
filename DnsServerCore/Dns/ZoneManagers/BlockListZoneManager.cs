@@ -60,6 +60,7 @@ namespace DnsServerCore.Dns.ZoneManagers
         Timer _blockListUpdateTimer;
         DateTime _blockListLastUpdatedOn;
         int _blockListUpdateIntervalHours = 24;
+        bool _manifestOwnsUpdateInterval;
         const int BLOCK_LIST_UPDATE_TIMER_INITIAL_INTERVAL = 5000;
         const int BLOCK_LIST_UPDATE_TIMER_PERIODIC_INTERVAL = 900000;
 
@@ -159,7 +160,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             {
                 using (FileStream fS = new FileStream(blockListConfigFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS, false);
+                    ReadConfigFrom(fS, false, readOwnership: true);
                 }
 
                 _dnsServer.LogManager.Write("DNS Server block list config file was loaded: " + blockListConfigFile);
@@ -197,6 +198,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             using (FileStream fS = new FileStream(tmpBlockListConfigFile, FileMode.Create, FileAccess.Write))
             {
                 WriteConfigTo(fS);
+                fS.Flush(flushToDisk: true);
             }
 
             File.Move(tmpBlockListConfigFile, blockListConfigFile, true);
@@ -224,55 +226,98 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer)
+        internal bool ManifestOwnsUpdateInterval => _manifestOwnsUpdateInterval;
+
+        internal void CheckManifestUpdateInterval(int interval)
         {
-            if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "BL") //format
-                throw new InvalidDataException("DnsServer block list zone file format is invalid.");
+            if (_manifestOwnsUpdateInterval && interval != _blockListUpdateIntervalHours)
+                throw new DnsWebServiceException("/blocklists/updateIntervalHours: Setting is managed by the configuration manifest.");
+        }
 
-            BinaryReader bR = new BinaryReader(s);
+        internal void CheckRestoreManifestOwnership(Stream stream)
+        {
+            var reader = new BinaryReader(stream);
+            var (_, interval) = ReadConfigPrefix(reader);
+            CheckManifestUpdateInterval(interval);
+        }
 
-            byte version = bR.ReadByte();
-            switch (version)
+        internal void ApplyManifestUpdateInterval(int? interval, Action<Action> persist)
+        {
+            lock (_saveLock)
             {
-                case 1:
-                    int count = bR.ReadByte();
-                    string[] blockListUrls = new string[count];
+                int previous = _blockListUpdateIntervalHours;
+                bool previouslyOwned = _manifestOwnsUpdateInterval;
+                int effective = interval ?? previous;
+                if (effective == previous && interval.HasValue == previouslyOwned)
+                {
+                    persist(null);
+                    return;
+                }
 
-                    for (int i = 0; i < count; i++)
-                        blockListUrls[i] = s.ReadShortString();
+                _blockListUpdateIntervalHours = effective;
+                _manifestOwnsUpdateInterval = interval.HasValue;
+                try
+                {
+                    persist(SaveConfigFileInternal);
+                    _pendingSave = false;
+                    _pendingLazySave = false;
+                }
+                catch
+                {
+                    _blockListUpdateIntervalHours = previous;
+                    _manifestOwnsUpdateInterval = previouslyOwned;
+                    throw;
+                }
 
-                    _blockListUpdateIntervalHours = bR.ReadInt32();
-
-                    DateTime blockListLastUpdatedOn = s.ReadDateTime();
-                    if (!isConfigTransfer)
-                        _blockListLastUpdatedOn = blockListLastUpdatedOn;
-
-                    if (!isConfigTransfer)
-                    {
-                        if (blockListUrls.Length > 0)
-                        {
-                            //load block list URLs async
-                            ThreadPool.QueueUserWorkItem(delegate (object state)
-                            {
-                                try
-                                {
-                                    LoadBlockLists();
-                                }
-                                catch (Exception ex)
-                                {
-                                    _dnsServer.LogManager.Write(ex);
-                                }
-                            });
-                        }
-                    }
-
-                    ApplyBlockListUrls(blockListUrls);
+                if (effective != previous)
                     ApplyBlockListUpdateInterval();
-                    break;
-
-                default:
-                    throw new InvalidDataException("DnsServer block list zone file version not supported.");
             }
+        }
+
+        private static (string[] Urls, int Interval) ReadConfigPrefix(BinaryReader reader)
+        {
+            Stream stream = reader.BaseStream;
+            if (Encoding.ASCII.GetString(stream.ReadExactly(2)) != "BL")
+                throw new InvalidDataException("DnsServer block list zone file format is invalid.");
+            if (reader.ReadByte() != 1)
+                throw new InvalidDataException("DnsServer block list zone file version not supported.");
+
+            var urls = new string[reader.ReadByte()];
+            for (int i = 0; i < urls.Length; i++)
+                urls[i] = stream.ReadShortString();
+
+            return (urls, reader.ReadInt32());
+        }
+
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false)
+        {
+            var (blockListUrls, interval) = ReadConfigPrefix(new BinaryReader(s));
+            _blockListUpdateIntervalHours = interval;
+            DateTime blockListLastUpdatedOn = s.ReadDateTime();
+            if (readOwnership)
+                _manifestOwnsUpdateInterval = s.ReadByte() == 1;
+
+            if (!isConfigTransfer)
+            {
+                _blockListLastUpdatedOn = blockListLastUpdatedOn;
+                if (blockListUrls.Length > 0)
+                {
+                    ThreadPool.QueueUserWorkItem(delegate (object state)
+                    {
+                        try
+                        {
+                            LoadBlockLists();
+                        }
+                        catch (Exception ex)
+                        {
+                            _dnsServer.LogManager.Write(ex);
+                        }
+                    });
+                }
+            }
+
+            ApplyBlockListUrls(blockListUrls);
+            ApplyBlockListUpdateInterval();
         }
 
         private void WriteConfigTo(Stream s)
@@ -289,6 +334,9 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             bW.Write(_blockListUpdateIntervalHours);
             s.WriteDateTime(_blockListLastUpdatedOn);
+            // Existing version 1 readers stop after the timestamp.
+            if (_manifestOwnsUpdateInterval)
+                bW.Write((byte)1);
         }
 
         #endregion

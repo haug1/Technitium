@@ -921,6 +921,13 @@ namespace DnsServerCore
                     CheckRestoreManifestDnsSettings(dnsConfiguration, isConfigTransfer: true);
                 }
 
+                if (isConfigTransfer && blockLists && _dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval &&
+                    backupZip.GetEntry("blocklist.config") is ZipArchiveEntry managedBlockListEntry)
+                {
+                    using Stream blockListConfiguration = managedBlockListEntry.Open();
+                    _dnsServer.BlockListZoneManager.CheckRestoreManifestOwnership(blockListConfiguration);
+                }
+
                 bool restartWebService = false;
 
                 try

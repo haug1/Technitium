@@ -216,6 +216,9 @@ namespace DnsServerCore
 
             if (format == "DS")
             {
+                if (_dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
+                    throw new InvalidDataException("/blocklists/updateIntervalHours: Cannot verify the update interval in this combined backup format.");
+
                 int version = reader.ReadByte();
                 if (version is >= 28 and <= 42)
                 {

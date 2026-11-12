@@ -66,7 +66,7 @@ namespace DnsServerCore.Configuration
             ["/logging/logQueries"] = Field("logQueries", false),
             ["/statistics/inMemory"] = Field("enableInMemoryStats", false),
             ["/statistics/retentionDays"] = Field("maxStatFileDays", 365),
-            ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24),
+            ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24, canApply: true),
             ["/blocklists/sources"] = new("blockListUrls", JsonSerializer.SerializeToElement(Array.Empty<string>()),
                 false, NormalizeBlockListSources, OmitFromExport: true),
             ["/apps/autoUpdate"] = Field("dnsAppsEnableAutomaticUpdate", true)
@@ -131,13 +131,23 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig =>
+                dns.BlockListZoneManager.ApplyManifestUpdateInterval(GetBlockListInterval(manifest), writeBlockListConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
-                writeDnsConfig, writeCertificate));
+                writeDnsConfig, writeCertificate, writeBlockListConfig)));
+        }
+
+        private static int? GetBlockListInterval(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("blocklists", out JsonElement blocklists) ||
+                !blocklists.TryGetProperty("updateIntervalHours", out JsonElement value))
+                return null;
+
+            return value.ValueKind == JsonValueKind.Null ? 24 : decimal.ToInt32(value.GetDecimal());
         }
 
         private static DnsServer.SourceNetworks GetSourceNetworks(ConfigurationManifest manifest)
@@ -213,6 +223,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             if (GetAuthoritativeDefaults(manifest).HasValues)
                 throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
+            if (GetBlockListInterval(manifest).HasValue)
+                throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }

@@ -565,6 +565,47 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task BlockListSchedulePersistsAndRollsBackWithOtherSettings()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?blockLists=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"blocklists":{"updateIntervalHours":0},"logging":{"retentionDays":180}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            string blockedPath = Path.Combine(server.ConfigurationDirectory, "blocklist.tmp");
+            Directory.CreateDirectory(blockedPath);
+            JsonElement failed = await ApplyAsync(server, manifest, revision);
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Directory.Delete(blockedPath);
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(24, current.GetProperty("blockListUpdateIntervalHours").GetInt32());
+            Assert.Equal(365, current.GetProperty("maxLogFileDays").GetInt32());
+
+            revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            current = await server.GetSettingsAsync();
+            Assert.Equal(0, current.GetProperty("blockListUpdateIntervalHours").GetInt32());
+            Assert.Equal(180, current.GetProperty("maxLogFileDays").GetInt32());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement edit = await server.CallAsync("settings/set?blockListUpdateIntervalHours=24", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/blocklists/updateIntervalHours", edit.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?blockLists=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/blocklists/updateIntervalHours", restore.GetProperty("errorMessage").GetString());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

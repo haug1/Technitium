@@ -465,6 +465,8 @@ namespace DnsServerCore
                 jsonWriter.WriteStartArray("managedSettings");
                 foreach (string path in _dnsWebService._dnsServer.GetManagedDnsPaths())
                     jsonWriter.WriteStringValue(path);
+                if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
+                    jsonWriter.WriteStringValue("/blocklists/updateIntervalHours");
                 foreach (string path in _dnsWebService._log.GetManagedManifestPaths())
                     jsonWriter.WriteStringValue(path);
                 jsonWriter.WriteEndArray();
@@ -678,6 +680,9 @@ namespace DnsServerCore
                     defaultResponsiblePerson is null ? null : DnsServer.NormalizeDefaultResponsiblePerson(defaultResponsiblePerson),
                     zoneTransferAllowedNetworks, notifyAllowedNetworks);
                 _dnsWebService._dnsServer.CheckManifestAuthoritativeDefaults(authoritativeDefaults);
+                bool hasBlockListInterval = request.TryGetQueryOrForm("blockListUpdateIntervalHours", int.Parse, out int blockListUpdateIntervalHours);
+                if (hasBlockListInterval)
+                    _dnsWebService._dnsServer.BlockListZoneManager.CheckManifestUpdateInterval(blockListUpdateIntervalHours);
                 bool hasUpdateChecks = request.TryGetQueryOrForm("dnsServerEnableCheckForUpdate", bool.Parse, out bool dnsServerEnableCheckForUpdate);
                 bool hasUdpPayload = request.TryGetQueryOrForm("udpPayloadSize", ushort.Parse, out ushort udpPayloadSize);
                 bool hasDnssecValidation = request.TryGetQueryOrForm("dnssecValidation", bool.Parse, out bool dnssecValidation);
@@ -1661,7 +1666,7 @@ namespace DnsServerCore
                             clusterParameters.Add("blockListUrls", blockListUrls.Join());
                         }
 
-                        if (request.TryGetQueryOrForm("blockListUpdateIntervalHours", int.Parse, out int blockListUpdateIntervalHours))
+                        if (hasBlockListInterval)
                         {
                             _dnsWebService._dnsServer.BlockListZoneManager.BlockListUpdateIntervalHours = blockListUpdateIntervalHours;
                             _dnsWebService._dnsServer.BlockListZoneManager.SaveConfigFile();
@@ -2024,8 +2029,10 @@ namespace DnsServerCore
                             fS.Position = 0;
 
                             bool checkLog = logSettings && _dnsWebService._log.HasManagedLoggingSettings;
-                            bool checkDns = dnsSettings && _dnsWebService._dnsServer.HasManagedDnsSettings;
-                            if (checkLog || checkDns)
+                            bool ownsBlockListInterval = _dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval;
+                            bool checkDns = dnsSettings && (_dnsWebService._dnsServer.HasManagedDnsSettings || ownsBlockListInterval);
+                            bool checkBlockList = blockLists && ownsBlockListInterval;
+                            if (checkLog || checkDns || checkBlockList)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
@@ -2038,6 +2045,11 @@ namespace DnsServerCore
                                     {
                                         using Stream dnsConfiguration = dnsEntry.Open();
                                         _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
+                                    }
+                                    if (checkBlockList && archive.GetEntry("blocklist.config") is ZipArchiveEntry blockListEntry)
+                                    {
+                                        using Stream blockListConfiguration = blockListEntry.Open();
+                                        _dnsWebService._dnsServer.BlockListZoneManager.CheckRestoreManifestOwnership(blockListConfiguration);
                                     }
                                 }
 
