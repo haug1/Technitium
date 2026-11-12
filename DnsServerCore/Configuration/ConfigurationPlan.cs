@@ -1514,7 +1514,7 @@ namespace DnsServerCore.Configuration
         }
 
         internal sealed record ZoneRecordEdit(string Owner, DnsResourceRecordType Type, DnsResourceRecordData Data,
-            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, IPAddress[] Glue,
+            DnsResourceRecord Existing, uint? Ttl, bool? Disabled, string Comments, uint? ExpiryTtl, (IPAddress Address, uint? Ttl)[] Glue,
             bool? UseSerialDateScheme, ConfigurationChangeKind? Kind, bool AutoIpv4Hint = false, bool AutoIpv6Hint = false);
 
         internal static IReadOnlyList<ZoneRecordEdit> PrepareZoneRecordEdits(ConfigurationManifest manifest, string zoneName, string declarationName, string serverDomain,
@@ -1604,12 +1604,14 @@ namespace DnsServerCore.Configuration
                 string comments = record.TryGetProperty("comments", out JsonElement commentsValue) ? commentsValue.GetString() : null;
                 uint? expiry = record.TryGetProperty("expiryTtl", out JsonElement expiryValue) ? decimal.ToUInt32(expiryValue.GetDecimal()) : null;
                 bool? useSerialDateScheme = record.TryGetProperty("useSerialDateScheme", out JsonElement scheme) ? scheme.GetBoolean() : null;
-                IPAddress[] glue = null;
+                (IPAddress Address, uint? Ttl)[] glue = null;
                 if (record.TryGetProperty("glue", out JsonElement glueValue))
                 {
                     if (rdata is not DnsNSRecordData ns)
                         throw new InvalidDataException($"{recordPath}/glue: Glue addresses require an NS record.");
-                    glue = glueValue.EnumerateArray().Select(address => IPAddress.Parse(address.GetString())).ToArray();
+                    glue = glueValue.EnumerateArray().Select(entry => entry.ValueKind == JsonValueKind.String
+                        ? (IPAddress.Parse(entry.GetString()), (uint?)null)
+                        : (IPAddress.Parse(entry.GetProperty("address").GetString()), decimal.ToUInt32(entry.GetProperty("ttl").GetDecimal()))).ToArray();
                     if (glue.Length > 0 && owner == zoneName && (ns.NameServer.Equals(zoneName, StringComparison.OrdinalIgnoreCase) ||
                         zoneName.Length == 0 || ns.NameServer.EndsWith("." + zoneName, StringComparison.OrdinalIgnoreCase)))
                         throw new InvalidDataException($"{recordPath}/glue: Use separate address records for in-zone apex name servers.");
@@ -1637,8 +1639,8 @@ namespace DnsServerCore.Configuration
                         (disabled.HasValue && disabled.Value != (metadata?.Disabled ?? false)) ||
                         (comments is not null && comments != (metadata?.Comments ?? string.Empty)) ||
                         (expiry.HasValue && expiry.Value != (metadata?.ExpiryTtl ?? 0u)) ||
-                        (glue is not null && !glue.Select(address => address.ToString()).SequenceEqual(
-                            (metadata as NSRecordInfo)?.GlueRecords?.Select(address => address.RDATA.ToString()) ?? [], StringComparer.Ordinal)))
+                        (glue is not null && !glue.Select(entry => (entry.Address.ToString(), entry.Ttl ?? ttl ?? existing.OriginalTtlValue)).SequenceEqual(
+                            (metadata as NSRecordInfo)?.GlueRecords?.Select(record => (record.RDATA.ToString(), record.OriginalTtlValue)) ?? [])))
                         kind = ConfigurationChangeKind.Update;
                 }
                 changes.Add(new ZoneRecordEdit(owner, type, rdata, existing, ttl, disabled, comments, expiry, glue,

@@ -5824,7 +5824,7 @@ namespace DnsServerCore.Tests
             const string manifest = """
                 {"schemaVersion":1,"zones":{"glue.test":{"type":"Primary","records":[
                     {"owner":"child.glue.test","type":"NS","ttl":300,"data":{"zoneFile":"ns.child.glue.test."},
-                     "glue":["192.0.2.42","2001:db8::42"]}
+                     "glue":["192.0.2.42",{"address":"2001:db8::42","ttl":120}]}
                 ]}}}
                 """;
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
@@ -5839,9 +5839,26 @@ namespace DnsServerCore.Tests
                 entry => entry.GetProperty("type").GetInt32() == (int)DnsResourceRecordType.NS);
             Assert.Collection(record.GetProperty("glue").EnumerateArray(),
                 address => Assert.Equal("192.0.2.42", address.GetString()),
-                address => Assert.Equal("2001:db8::42", address.GetString()));
+                address =>
+                {
+                    Assert.Equal("2001:db8::42", address.GetProperty("address").GetString());
+                    Assert.Equal(120u, address.GetProperty("ttl").GetUInt32());
+                });
 
-            string clear = manifest.Replace("[\"192.0.2.42\",\"2001:db8::42\"]", "[]", StringComparison.Ordinal);
+            await using var destination = await LoopbackWebService.StartAsync();
+            string migrated = new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["zones"] = new JsonObject { ["glue.test"] = JsonNode.Parse(zone.GetRawText()) }
+            }.ToJsonString();
+            revision = (await PreviewAsync(destination, migrated)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(destination, migrated, revision));
+            await destination.RestartAsync();
+            Assert.Empty((await PreviewAsync(destination, migrated)).GetProperty("changes").EnumerateArray());
+
+            JsonNode cleared = JsonNode.Parse(manifest)!;
+            cleared["zones"]!["glue.test"]!["records"]![0]!["glue"] = new JsonArray();
+            string clear = cleared.ToJsonString();
             JsonElement preview = await PreviewAsync(server, clear);
             Assert.Equal("Update", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
             LoopbackWebService.AssertOk(await ApplyAsync(server, clear, preview.GetProperty("revision").GetString()!));

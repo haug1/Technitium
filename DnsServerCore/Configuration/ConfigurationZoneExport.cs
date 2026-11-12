@@ -127,7 +127,7 @@ namespace DnsServerCore.Configuration
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
             var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl,
-                string[] Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, List<string> MissingInputs)>();
+                JsonArray Glue, bool? UseSerialDateScheme, bool AutoIpv4Hint, bool AutoIpv6Hint, JsonObject Data, List<string> MissingInputs)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -214,11 +214,11 @@ namespace DnsServerCore.Configuration
                     sortKey = hex;
                 }
 
-                string[] glue = null;
+                JsonArray glue = null;
                 if (record.RDATA is DnsNSRecordData ns)
                 {
                     IReadOnlyList<DnsResourceRecord> glueRecords = (info as NSRecordInfo)?.GlueRecords ?? [];
-                    if (glueRecords.Any(address => address.Class != DnsClass.IN || address.OriginalTtlValue != record.OriginalTtlValue ||
+                    if (glueRecords.Any(address => address.Class != DnsClass.IN ||
                         !address.Name.Equals(ns.NameServer, StringComparison.OrdinalIgnoreCase) ||
                         address.Type is not (DnsResourceRecordType.A or DnsResourceRecordType.AAAA)) ||
                         (glueRecords.Count > 0 && owner == zone && (zone.Length == 0 ||
@@ -228,7 +228,13 @@ namespace DnsServerCore.Configuration
                         missingInputs.Add(path + "/records");
                         return null;
                     }
-                    glue = glueRecords.Select(address => address.RDATA.ToString()).ToArray();
+                    glue = new JsonArray();
+                    foreach (DnsResourceRecord address in glueRecords)
+                    {
+                        string ip = address.RDATA.ToString();
+                        glue.Add(address.OriginalTtlValue == record.OriginalTtlValue
+                            ? JsonValue.Create(ip) : new JsonObject { ["address"] = ip, ["ttl"] = address.OriginalTtlValue });
+                    }
                 }
 
                 entries.Add((owner, (ushort)record.Type, sortKey, record.OriginalTtlValue, info?.Disabled ?? false,
@@ -252,7 +258,7 @@ namespace DnsServerCore.Configuration
                     ["expiryTtl"] = entry.ExpiryTtl
                 };
                 if (entry.Glue is not null)
-                    record["glue"] = JsonSerializer.SerializeToNode(entry.Glue);
+                    record["glue"] = entry.Glue;
                 if (entry.UseSerialDateScheme.HasValue)
                     record["useSerialDateScheme"] = entry.UseSerialDateScheme.Value;
                 if (entry.AutoIpv4Hint)

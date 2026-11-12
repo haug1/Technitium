@@ -747,7 +747,16 @@
         "disabled": {"type": "boolean"},
         "comments": {"type": "string"},
         "expiryTtl": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-        "glue": {"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255},
+        "glue": {
+          "type": "array",
+          "items": {"anyOf": [
+            {"$ref": "#/$defs/ipAddress"},
+            {"type": "object", "additionalProperties": false,
+             "properties": {"address": {"$ref": "#/$defs/ipAddress"}, "ttl": {"type": "integer", "minimum": 0, "maximum": 4294967295}},
+             "required": ["address", "ttl"]}
+          ]},
+          "maxItems": 255
+        },
         "useSerialDateScheme": {"type": "boolean"},
         "autoIpv4Hint": {"type": "boolean"},
         "autoIpv6Hint": {"type": "boolean"}

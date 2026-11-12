@@ -34,23 +34,29 @@ namespace DnsServerCore.Dns.ResourceRecords
 
         internal static void SetGlueRecords(this DnsResourceRecord record, IReadOnlyList<IPAddress> glueAddresses)
         {
+            SetGlueRecords(record, glueAddresses.Select(address => (address, (uint?)null)).ToArray());
+        }
+
+        internal static void SetGlueRecords(this DnsResourceRecord record, IReadOnlyList<(IPAddress Address, uint? Ttl)> glue)
+        {
             if (record.RDATA is not DnsNSRecordData nsRecord)
                 throw new InvalidOperationException();
 
             string domain = nsRecord.NameServer;
 
-            DnsResourceRecord[] glueRecords = new DnsResourceRecord[glueAddresses.Count];
+            DnsResourceRecord[] glueRecords = new DnsResourceRecord[glue.Count];
 
             for (int i = 0; i < glueRecords.Length; i++)
             {
-                switch (glueAddresses[i].AddressFamily)
+                var (address, ttl) = glue[i];
+                switch (address.AddressFamily)
                 {
                     case AddressFamily.InterNetwork:
-                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.A, DnsClass.IN, record.TTL, new DnsARecordData(glueAddresses[i]));
+                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.A, DnsClass.IN, ttl ?? record.TTL, new DnsARecordData(address));
                         break;
 
                     case AddressFamily.InterNetworkV6:
-                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.AAAA, DnsClass.IN, record.TTL, new DnsAAAARecordData(glueAddresses[i]));
+                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.AAAA, DnsClass.IN, ttl ?? record.TTL, new DnsAAAARecordData(address));
                         break;
                 }
             }

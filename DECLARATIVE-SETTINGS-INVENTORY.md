@@ -305,7 +305,7 @@ Transfer expiry, IXFR history, validation failures, last modification timestamps
 | `disabled` | `disable` | Boolean, false. Applies where the record supports disabling. |
 | `comments` | `comments` | Optional string, unset. |
 | `expiryTtl` | `expiryTtl` | Unsigned seconds, 0 for no expiry. Last-modified timestamp and expiry timer are runtime state. |
-| `glue` | `glue` | Address array, empty. Associated with NS RDATA. |
+| `glue` | `glue` | Array of addresses or address and TTL objects, empty. Bare addresses inherit the NS TTL. |
 | `useSerialDateScheme` | `useSerialDateScheme`, creation `useSoaSerialDateScheme` | Boolean on the SOA record, defaults to the server's authoritative setting for new primary zones. |
 | `autoIpv4Hint`, `autoIpv6Hint` | `autoIpv4Hint`, `autoIpv6Hint` | Booleans, false. Generated hints follow address records when enabled. |
 
