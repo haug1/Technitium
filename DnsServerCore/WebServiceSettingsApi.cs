@@ -1027,7 +1027,7 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Access was denied.");
 
                     if (declaration.Value.ValueKind == JsonValueKind.Object)
-                        ConfigurationZonePolicies.ValidateTransferKeys(declaration.Value, ConfigurationPlan.AppendPath("/zones", declaration.Name), keys);
+                        ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, ConfigurationPlan.AppendPath("/zones", declaration.Name), zone, keys);
                     writer.WriteStartObject(name);
                     bool clusterProtected = _dnsWebService._clusterManager.ClusterInitialized &&
                         (_dnsWebService._clusterManager.IsClusterPrimaryZone(name) || _dnsWebService._clusterManager.IsClusterCatalogZone(name));

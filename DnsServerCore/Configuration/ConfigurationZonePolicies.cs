@@ -6,6 +6,7 @@ using System.Net;
 using System.Text.Json;
 using DnsServerCore.Dns.Zones;
 using TechnitiumLibrary.Net;
+using PolicyMap = System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<TechnitiumLibrary.Net.Dns.ResourceRecords.DnsResourceRecordType>>>;
 
 namespace DnsServerCore.Configuration
 {
@@ -15,7 +16,7 @@ namespace DnsServerCore.Configuration
             AuthZoneQueryAccess? QueryAccess, NetworkAccessControl[] QueryAcl,
             AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl, IReadOnlySet<string> TransferKeys,
             AuthZoneNotify? Notify, IPAddress[] NotifyServers,
-            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl)
+            AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl, PolicyMap UpdatePolicies)
         {
             internal void Apply(AuthZoneInfo zone)
             {
@@ -37,10 +38,12 @@ namespace DnsServerCore.Configuration
                     zone.UpdateNetworkACL = UpdateAcl;
                 if (Update.HasValue)
                     zone.Update = Update.Value;
+                if (UpdatePolicies is not null)
+                    zone.UpdateSecurityPolicies = UpdatePolicies.Count == 0 ? null : UpdatePolicies;
             }
         }
 
-        internal static Changes Prepare(JsonElement declaration, string path, AuthZoneInfo current)
+        internal static Changes Prepare(JsonElement declaration, string zone, string path, AuthZoneInfo current)
         {
             declaration.TryGetProperty("query", out JsonElement query);
             declaration.TryGetProperty("transfer", out JsonElement transfer);
@@ -63,11 +66,15 @@ namespace DnsServerCore.Configuration
             if (transferKeys is not null && transferKeys.SetEquals(current?.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>()))
                 transferKeys = null;
 
+            PolicyMap policies = ConfigurationZoneUpdatePolicies.Prepare(declaration, zone, path, current?.UpdateSecurityPolicies);
+            if (ConfigurationZoneUpdatePolicies.Same(policies, current?.UpdateSecurityPolicies))
+                policies = null;
+
             return new Changes(
                 ReadMode(query, "query", current?.QueryAccess), ReadAcl(query, "query", current?.QueryAccessNetworkACL),
                 ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL), transferKeys,
                 notifyMode, notifyServers,
-                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL));
+                ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL), policies);
 
             static T? ReadMode<T>(JsonElement policy, string name, T? previous) where T : struct, Enum
             {
@@ -105,7 +112,7 @@ namespace DnsServerCore.Configuration
                     "notify/nameServers" => !Equal(current.NotifyNameServers, candidate.NotifyNameServers),
                     "updates/mode" => current.Update != candidate.Update,
                     "updates/networkAcl" => !Equal(current.UpdateNetworkACL, candidate.UpdateNetworkACL),
-                    _ => false
+                    _ => ConfigurationZoneUpdatePolicies.OwnedValueChanged(field, current.UpdateSecurityPolicies, candidate.UpdateSecurityPolicies)
                 };
                 if (changed)
                     throw new InvalidDataException($"{path}/{field}: Zone policy is managed by the configuration manifest.");
@@ -129,10 +136,14 @@ namespace DnsServerCore.Configuration
             return names;
         }
 
-        internal static void ValidateTransferKeys(JsonElement declaration, string path, IReadOnlyDictionary<string, TechnitiumLibrary.Net.Dns.TsigKey> keys)
+        internal static void ValidateKeyReferences(JsonElement declaration, string zone, string path, AuthZoneInfo current, IReadOnlyDictionary<string, TechnitiumLibrary.Net.Dns.TsigKey> keys)
         {
             if (ReadTransferKeys(declaration, path)?.Any(name => keys?.ContainsKey(name) != true) == true)
                 throw new InvalidDataException($"{path}/transfer/tsigKeys: A referenced TSIG key is missing from the effective DNS configuration.");
+            if (declaration.TryGetProperty("updates", out JsonElement updates) && updates.TryGetProperty("securityPolicies", out _) &&
+                ConfigurationZoneUpdatePolicies.Prepare(declaration, zone, path, current?.UpdateSecurityPolicies)
+                    .Keys.Any(name => keys?.ContainsKey(name) != true))
+                throw new InvalidDataException($"{path}/updates/securityPolicies: A referenced TSIG key is missing from the effective DNS configuration.");
         }
 
         internal static bool IsPolicy(string name)
@@ -152,6 +163,8 @@ namespace DnsServerCore.Configuration
 
                 string path = ConfigurationPlan.AppendPath("/zones", zone.Name);
                 ReadTransferKeys(zone.Value, path);
+                string name = ConfigurationManifest.CanonicalDnsName(zone.Name, path, allowRoot: true);
+                ConfigurationZoneUpdatePolicies.Prepare(zone.Value, name, path, null);
                 foreach (JsonProperty policy in zone.Value.EnumerateObject())
                 {
                     if (IsPolicy(policy.Name) && policy.Value.TryGetProperty("networkAcl", out JsonElement acl))
@@ -205,11 +218,16 @@ namespace DnsServerCore.Configuration
                         writer.WriteStringValue(key);
                     writer.WriteEndArray();
                 }
+                if (name == "updates")
+                {
+                    writer.WritePropertyName("securityPolicies");
+                    ConfigurationZoneUpdatePolicies.Write(zone.UpdateSecurityPolicies).WriteTo(writer);
+                }
                 writer.WriteEndObject();
             }
         }
 
-        internal static void Compare(string zonePath, JsonElement declared, JsonElement current, List<ConfigurationChange> changes)
+        internal static void Compare(string zoneName, string zonePath, JsonElement declared, JsonElement current, List<ConfigurationChange> changes)
         {
             bool exists = current.ValueKind == JsonValueKind.Object && current.TryGetProperty("type", out _);
             foreach (JsonProperty policy in declared.EnumerateObject())
@@ -247,6 +265,12 @@ namespace DnsServerCore.Configuration
                     else if (field.Name == "tsigKeys" && policy.Name == "transfer")
                     {
                         changed = exists && !EqualList(currentPolicy, field.Name, ReadTransferKeys(declared, zonePath));
+                    }
+                    else if (field.Name == "securityPolicies" && policy.Name == "updates")
+                    {
+                        PolicyMap previous = exists ? ConfigurationZoneUpdatePolicies.ReadSnapshot(currentPolicy.GetProperty("securityPolicies")) : null;
+                        PolicyMap candidate = ConfigurationZoneUpdatePolicies.Prepare(declared, zoneName, zonePath, previous);
+                        changed = exists && !ConfigurationZoneUpdatePolicies.Same(previous, candidate);
                     }
                     else if (field.Name == "nameServers" && policy.Name == "notify")
                     {

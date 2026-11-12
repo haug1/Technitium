@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Auth;
+using DnsServerCore.Configuration;
 using DnsServerCore.Cluster;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.Dnssec;
@@ -3471,6 +3472,42 @@ namespace DnsServerCore
                         .Select(name => name.Trim('.').ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
                 }
 
+                string policyInput = request.QueryOrForm("updateSecurityPolicies");
+                bool setUpdatePolicies = policyInput is not null && zoneInfo.Type is AuthZoneType.Primary or AuthZoneType.Forwarder;
+                var updatePolicies = setUpdatePolicies ? ParseLegacyUpdatePolicies(policyInput) : null;
+                if (setUpdatePolicies && manager.ManifestOwnedZones.TryGetValue(zoneInfo.Name, out string[] policyFields))
+                {
+                    foreach (string field in policyFields)
+                    {
+                        if (ConfigurationZoneUpdatePolicies.OwnedValueChanged(field, zoneInfo.UpdateSecurityPolicies, updatePolicies))
+                            Reject(field);
+                    }
+                }
+
+                IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>>> ParseLegacyUpdatePolicies(string value)
+                {
+                    if (value.Length == 0 || value.Equals("false", StringComparison.OrdinalIgnoreCase))
+                        return null;
+
+                    string[] parts = value.Split(_pipeSeparator, StringSplitOptions.RemoveEmptyEntries);
+                    var policies = new Dictionary<string, IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>>>();
+                    for (int index = 0; index < parts.Length; index += 3)
+                    {
+                        string key = parts[index].Trim('.').ToLowerInvariant();
+                        string owner = parts[index + 1].Trim('.').ToLowerInvariant();
+                        if (!AuthZoneManager.DomainBelongsToZone(zoneInfo.Name, owner))
+                            throw new DnsWebServiceException("Cannot set Dynamic Updates security policies: the domain '" + owner + "' must be part of the current zone.");
+
+                        if (!policies.TryGetValue(key, out var owners))
+                            policies.Add(key, owners = new Dictionary<string, IReadOnlyList<DnsResourceRecordType>>());
+                        if (!owners.TryGetValue(owner, out var types))
+                            ((Dictionary<string, IReadOnlyList<DnsResourceRecordType>>)owners).Add(owner, types = new List<DnsResourceRecordType>());
+                        foreach (string type in parts[index + 2].Split(_commaSpaceSeparator, StringSplitOptions.RemoveEmptyEntries))
+                            ((List<DnsResourceRecordType>)types).Add(Enum.Parse<DnsResourceRecordType>(type, true));
+                    }
+                    return policies;
+                }
+
                 bool setDisabled = request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled);
                 if (setDisabled)
                     _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneEnabled(zoneInfo, disabled);
@@ -3721,52 +3758,8 @@ namespace DnsServerCore
                         break;
                 }
 
-                switch (zoneInfo.Type)
-                {
-                    case AuthZoneType.Primary:
-                    case AuthZoneType.Forwarder:
-                        string strUpdateSecurityPolicies = request.QueryOrForm("updateSecurityPolicies");
-                        if (strUpdateSecurityPolicies is not null)
-                        {
-                            if ((strUpdateSecurityPolicies.Length == 0) || strUpdateSecurityPolicies.Equals("false", StringComparison.OrdinalIgnoreCase))
-                            {
-                                zoneInfo.UpdateSecurityPolicies = null;
-                            }
-                            else
-                            {
-                                string[] strUpdateSecurityPoliciesParts = strUpdateSecurityPolicies.Split(_pipeSeparator, StringSplitOptions.RemoveEmptyEntries);
-                                Dictionary<string, IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>>> updateSecurityPolicies = new Dictionary<string, IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>>>(strUpdateSecurityPoliciesParts.Length);
-
-                                for (int i = 0; i < strUpdateSecurityPoliciesParts.Length; i += 3)
-                                {
-                                    string tsigKeyName = strUpdateSecurityPoliciesParts[i].Trim('.').ToLowerInvariant();
-                                    string domain = strUpdateSecurityPoliciesParts[i + 1].Trim('.').ToLowerInvariant();
-                                    string strTypes = strUpdateSecurityPoliciesParts[i + 2];
-
-                                    if (!domain.Equals(zoneInfo.Name, StringComparison.OrdinalIgnoreCase) && !domain.EndsWith("." + zoneInfo.Name, StringComparison.OrdinalIgnoreCase))
-                                        throw new DnsWebServiceException("Cannot set Dynamic Updates security policies: the domain '" + domain + "' must be part of the current zone.");
-
-                                    if (!updateSecurityPolicies.TryGetValue(tsigKeyName, out IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>> policyMap))
-                                    {
-                                        policyMap = new Dictionary<string, IReadOnlyList<DnsResourceRecordType>>();
-                                        updateSecurityPolicies.Add(tsigKeyName, policyMap);
-                                    }
-
-                                    if (!policyMap.TryGetValue(domain, out IReadOnlyList<DnsResourceRecordType> types))
-                                    {
-                                        types = new List<DnsResourceRecordType>();
-                                        (policyMap as Dictionary<string, IReadOnlyList<DnsResourceRecordType>>).Add(domain, types);
-                                    }
-
-                                    foreach (string strType in strTypes.Split(_commaSpaceSeparator, StringSplitOptions.RemoveEmptyEntries))
-                                        (types as List<DnsResourceRecordType>).Add(Enum.Parse<DnsResourceRecordType>(strType, true));
-                                }
-
-                                zoneInfo.UpdateSecurityPolicies = updateSecurityPolicies;
-                            }
-                        }
-                        break;
-                }
+                if (setUpdatePolicies && !ConfigurationZoneUpdatePolicies.Same(zoneInfo.UpdateSecurityPolicies, updatePolicies))
+                    zoneInfo.UpdateSecurityPolicies = updatePolicies;
 
                 //catalog zone; done last to allow using updated properties when there is change of ownership
                 switch (zoneInfo.Type)

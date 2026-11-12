@@ -879,7 +879,8 @@ namespace DnsServerCore.Configuration
                             foreach (JsonProperty option in field.Value.EnumerateObject())
                             {
                                 if (option.Name != "mode" && option.Name != (field.Name == "notify" ? "nameServers" : "networkAcl") &&
-                                    !(field.Name == "transfer" && option.Name == "tsigKeys"))
+                                    !(field.Name == "transfer" && option.Name == "tsigKeys") &&
+                                    !(field.Name == "updates" && option.Name == "securityPolicies"))
                                     throw new InvalidDataException($"{AppendPath(AppendPath(zonePath, field.Name), option.Name)}: Applying this zone setting is not implemented.");
                             }
                             continue;
@@ -1084,7 +1085,7 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
                     if (type != "Primary")
                         throw new InvalidDataException($"{path}/type: Preview of creation is currently supported for primary zones.");
-                    ConfigurationZonePolicies.Compare(path, declaration.Value, current, changes);
+                    ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
                     changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Add, false));
                     continue;
                 }
@@ -1092,7 +1093,7 @@ namespace DnsServerCore.Configuration
                 if (type is not null && !current.GetProperty("type").ValueEquals(type))
                     throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
 
-                ConfigurationZonePolicies.Compare(path, declaration.Value, current, changes);
+                ConfigurationZonePolicies.Compare(name, path, declaration.Value, current, changes);
 
                 if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
                 {

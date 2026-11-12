@@ -727,6 +727,7 @@ namespace DnsServerCore.Dns
             foreach (AuthZoneInfo zone in _authZoneManager.GetAllZones())
             {
                 IReadOnlySet<string> transferKeys = zone.ZoneTransferTsigKeyNames;
+                var updatePolicies = zone.UpdateSecurityPolicies;
                 if (zone.Type == AuthZoneType.Primary && zone.CatalogZoneName is null &&
                     declarations.TryGetValue(zone.Name, out JsonElement declaration))
                 {
@@ -734,11 +735,13 @@ namespace DnsServerCore.Dns
                         continue;
                     transferKeys = ConfigurationZonePolicies.ReadTransferKeys(declaration,
                         AuthZoneManager.GetManifestZonePath(zone.Name)) ?? transferKeys;
+                    updatePolicies = ConfigurationZoneUpdatePolicies.Prepare(declaration, zone.Name,
+                        AuthZoneManager.GetManifestZonePath(zone.Name), updatePolicies);
                 }
 
                 foreach (string name in removed)
                 {
-                    if (transferKeys?.Contains(name) == true || zone.UpdateSecurityPolicies?.ContainsKey(name) == true)
+                    if (transferKeys?.Contains(name) == true || updatePolicies?.ContainsKey(name) == true)
                         throw new InvalidDataException($"{ConfigurationPlan.AppendPath(ConfigurationTsig.Path, name)}: The TSIG key is still referenced by a zone.");
                 }
             }

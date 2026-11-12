@@ -802,7 +802,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     string path = ConfigurationPlan.AppendPath("/zones", declaration.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
-                    ownedZones.Add(name, GetOwnedZoneFields(declaration.Value));
+                    ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
                     if (zone is not null && (zone.Type != AuthZoneType.Primary || zone.CatalogZoneName is not null))
                         throw new InvalidDataException($"{path}: Apply requires a primary zone outside catalogs.");
@@ -819,8 +819,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                     bool? disabled = declaration.Value.TryGetProperty("enabled", out JsonElement enabled)
                         ? enabled.ValueKind == JsonValueKind.False : null;
-                    ConfigurationZonePolicies.ValidateTransferKeys(declaration.Value, path, tsigKeys);
-                    ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, path, zone);
+                    ConfigurationZonePolicies.ValidateKeyReferences(declaration.Value, name, path, zone, tsigKeys);
+                    ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, name, path, zone);
                     bool editRecords = declaration.Value.TryGetProperty("records", out JsonElement records);
                     if (editRecords && zone is not null)
                     {
@@ -1027,7 +1027,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private static string[] GetOwnedZoneFields(JsonElement declaration)
+        private static string[] GetOwnedZoneFields(string name, string path, JsonElement declaration)
         {
             if (declaration.ValueKind != JsonValueKind.Object)
                 return [];
@@ -1040,7 +1040,12 @@ namespace DnsServerCore.Dns.ZoneManagers
                 else if (ConfigurationZonePolicies.IsPolicy(field.Name))
                 {
                     foreach (JsonProperty option in field.Value.EnumerateObject())
-                        fields.Add(field.Name + "/" + option.Name);
+                    {
+                        if (field.Name == "updates" && option.Name == "securityPolicies")
+                            ConfigurationZoneUpdatePolicies.AddOwnedFields(option.Value, name, path, fields);
+                        else
+                            fields.Add(field.Name + "/" + option.Name);
+                    }
                 }
             }
             fields.Sort(StringComparer.Ordinal);

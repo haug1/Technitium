@@ -1222,7 +1222,7 @@ namespace DnsServerCore.Dns.Zones
 
                     bW.Write((byte)(policies.Update ?? _update));
                     WriteNetworkACLTo(policies.UpdateAcl ?? _updateNetworkACL, bW);
-                    WriteUpdateSecurityPoliciesTo(_updateSecurityPolicies, bW);
+                    WriteUpdateSecurityPoliciesTo(policies.UpdatePolicies ?? _updateSecurityPolicies, bW);
 
                     WriteDnssecPrivateKeysTo(_dnssecPrivateKeys, bW);
                     break;

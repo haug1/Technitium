@@ -50,8 +50,10 @@ namespace DnsServerCore.Configuration
                     declaration["transfer"].AsObject().Remove("tsigKeys");
                     missingInputs.Add(path + "/transfer/tsigKeys");
                 }
-                if (zone.UpdateSecurityPolicies?.Count > 0)
+                if (zone.UpdateSecurityPolicies?.Keys.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
                     missingInputs.Add(path + "/updates/securityPolicies");
+                else
+                    declaration["updates"].AsObject()["securityPolicies"] = ConfigurationZoneUpdatePolicies.Write(zone.UpdateSecurityPolicies);
 
                 var records = new List<DnsResourceRecord>();
                 dns.AuthZoneManager.ListAllZoneRecords(zone.Name, records);

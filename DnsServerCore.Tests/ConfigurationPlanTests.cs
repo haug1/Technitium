@@ -3312,6 +3312,67 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneUpdateSecurityPolicyRequiresItsConfiguredKeyAndOwner()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_UPDATE_POLICY_SECRET";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            string secret = Convert.ToBase64String(new byte[32]);
+            Environment.SetEnvironmentVariable(variable, secret);
+            try
+            {
+                const string manifest = """
+                    {"schemaVersion":1,
+                     "dns":{"tsigKeys":{"update-key.test":{"algorithm":"hmac-sha256","secret":{"environment":"TECHNITIUM_TEST_UPDATE_POLICY_SECRET"}}}},
+                     "zones":{"updates.test":{"type":"Primary","updates":{"mode":"Allow","securityPolicies":{
+                         "UPDATE-KEY.TEST.":{"WWW.UPDATES.TEST.":["A",1]}
+                     }}}}}
+                    """;
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                IPEndPoint endpoint = IPEndPoint.Parse((await server.GetSettingsAsync()).GetProperty("dnsServerLocalEndPoints")[0].GetString()!);
+                var client = new DnsClient(endpoint) { Timeout = 2000, Retries = 1 };
+                var key = new TsigKey("update-key.test", secret, "hmac-sha256");
+                Assert.Equal(DnsResponseCode.Refused, (await client.RawResolveAsync(CreateUpdate("www.updates.test"))).RCODE);
+                Assert.Equal(DnsResponseCode.NoError, (await client.TsigResolveAsync(CreateUpdate("www.updates.test"), key)).RCODE);
+                Assert.Single((await server.QueryAsync("www.updates.test", DnsResourceRecordType.A)).Answer);
+
+                JsonElement rejected = await server.CallAsync(
+                    "zones/options/set?zone=updates.test&updateSecurityPolicies=false", server.AdminToken);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/zones/updates.test/updates/securityPolicies/update-key.test", rejected.GetProperty("errorMessage").GetString());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement types = export.GetProperty("response").GetProperty("manifest").GetProperty("zones")
+                    .GetProperty("updates.test").GetProperty("updates").GetProperty("securityPolicies")
+                    .GetProperty("update-key.test").GetProperty("www.updates.test");
+                Assert.Equal(1, Assert.Single(types.EnumerateArray()).GetInt32());
+
+                const string clear = """
+                    {"schemaVersion":1,"dns":{"tsigKeys":null},"zones":{"updates.test":{
+                        "updates":{"mode":"Deny","securityPolicies":{"update-key.test":null}}
+                    }}}
+                    """;
+                revision = (await PreviewAsync(server, clear)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, clear, revision));
+                Assert.Empty((await PreviewAsync(server, clear)).GetProperty("changes").EnumerateArray());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+
+            static DnsDatagram CreateUpdate(string owner) => new(1, false, DnsOpcode.Update, false, false, false, false, false, false,
+                DnsResponseCode.NoError, [new DnsQuestionRecord("updates.test", DnsResourceRecordType.SOA, DnsClass.IN)],
+                authority: [new DnsResourceRecord(owner, DnsResourceRecordType.A, DnsClass.IN, 60,
+                    new DnsARecordData(IPAddress.Parse("192.0.2.42")))]);
+        }
+
+        [Fact]
         public async Task ZonePolicyOwnershipRejectsMixedEditsAndAllowsUnmanagedFields()
         {
             await using var server = await LoopbackWebService.StartAsync();
