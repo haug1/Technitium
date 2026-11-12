@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using DnsServerCore.Cluster;
 
@@ -9,11 +10,13 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationClusterOptions
     {
         internal const string Path = "/cluster";
+        internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership)
         {
-            internal bool Changed => Current != Desired;
+            internal bool ValuesChanged => Current != Desired;
+            internal bool OwnershipChanged => !CurrentOwnership.SequenceEqual(DesiredOwnership);
         }
 
         internal static bool IsDeclared(ConfigurationManifest manifest) => manifest is not null &&
@@ -24,14 +27,15 @@ namespace DnsServerCore.Configuration
 
         internal static Candidate? Prepare(ConfigurationManifest manifest, ClusterManager cluster)
         {
-            if (!IsDeclared(manifest))
+            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0))
                 return null;
 
-            JsonElement section = manifest.Settings.GetProperty("cluster");
-            foreach (JsonProperty field in section.EnumerateObject())
+            bool declared = manifest.Settings.TryGetProperty("cluster", out JsonElement section);
+            string[] ownership = declared ? section.EnumerateObject().Select(field => field.Name).Order(StringComparer.Ordinal).ToArray() : [];
+            foreach (string field in ownership)
             {
-                if (!Supports(field.Name))
-                    throw new InvalidDataException($"{Path}/{field.Name}: This cluster setting is not implemented.");
+                if (!Supports(field))
+                    throw new InvalidDataException($"{Path}/{field}: This cluster setting is not implemented.");
             }
             if (!cluster.ClusterInitialized || cluster.GetSelfNode().Type != ClusterNodeType.Primary)
                 throw new InvalidDataException($"{Path}: Only an initialized Primary node can apply cluster options.");
@@ -50,9 +54,9 @@ namespace DnsServerCore.Configuration
             {
                 throw new InvalidDataException($"{Path}/configRefreshSeconds: The configuration refresh interval must be greater than the heartbeat refresh interval.", ex);
             }
-            return new Candidate(current, desired, cluster.GetSelfNode().Id);
+            return new Candidate(current, desired, cluster.GetSelfNode().Id, cluster.ManagedOptionNames, ownership);
 
-            ushort Read(string field, ushort value, ushort defaultValue) => section.TryGetProperty(field, out JsonElement setting)
+            ushort Read(string field, ushort value, ushort defaultValue) => declared && section.TryGetProperty(field, out JsonElement setting)
                 ? setting.ValueKind == JsonValueKind.Null ? defaultValue : setting.GetUInt16() : value;
         }
 
@@ -72,6 +76,8 @@ namespace DnsServerCore.Configuration
             Export(candidate.Current).WriteTo(writer);
             writer.WritePropertyName("desired");
             Export(candidate.Desired).WriteTo(writer);
+            writer.WritePropertyName("currentOwnership");
+            JsonSerializer.Serialize(writer, candidate.CurrentOwnership);
             writer.WriteEndObject();
         }
 

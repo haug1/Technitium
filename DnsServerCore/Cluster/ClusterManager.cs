@@ -28,11 +28,13 @@ using DnsServerCore.HttpApi.Models;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary;
@@ -60,6 +62,7 @@ namespace DnsServerCore.Cluster
         ushort _configRefreshIntervalSeconds;
         ushort _configRetryIntervalSeconds;
         DateTime _configLastSynced;
+        volatile string[] _managedOptionNames = [];
 
         IReadOnlyDictionary<int, ClusterNode> _clusterNodes;
 
@@ -116,6 +119,10 @@ namespace DnsServerCore.Cluster
             });
 
             LoadConfigFile();
+
+            string ownershipFile = Path.Combine(_dnsWebService.ConfigFolder, ConfigurationClusterOptions.OwnershipFile);
+            if (File.Exists(ownershipFile))
+                _managedOptionNames = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(ownershipFile)) ?? [];
 
             if (ClusterInitialized)
             {
@@ -664,6 +671,8 @@ namespace DnsServerCore.Cluster
             if (GetSelfNode().Type != ClusterNodeType.Primary)
                 throw new DnsServerException("Failed to delete Cluster: only a Primary node can delete the Cluster.");
 
+            CheckManifestTopologyChange();
+
             if (!forceDelete && (_clusterNodes.Count > 1))
                 throw new DnsServerException("Failed to delete Cluster: please remove all Secondary nodes before deleting the Cluster.");
 
@@ -894,47 +903,44 @@ namespace DnsServerCore.Cluster
             if (GetSelfNode().Type != ClusterNodeType.Primary)
                 throw new DnsServerException("Failed to update Cluster options: only the Primary node can update the Cluster options.");
 
-            ValidateClusterOptions(new ConfigurationClusterOptions.Settings(heartbeatRefreshIntervalSeconds,
-                heartbeatRetryIntervalSeconds, configRefreshIntervalSeconds, configRetryIntervalSeconds));
-
-            bool changed = false;
-
-            if (_heartbeatRefreshIntervalSeconds != heartbeatRefreshIntervalSeconds)
+            var desired = new ConfigurationClusterOptions.Settings(heartbeatRefreshIntervalSeconds,
+                heartbeatRetryIntervalSeconds, configRefreshIntervalSeconds, configRetryIntervalSeconds);
+            lock (_saveLock)
             {
-                _heartbeatRefreshIntervalSeconds = heartbeatRefreshIntervalSeconds;
-                changed = true;
-            }
+                var current = GetManifestOptions();
+                ValidateClusterOptions(desired);
+                if (current == desired)
+                    return;
 
-            if (_heartbeatRetryIntervalSeconds != heartbeatRetryIntervalSeconds)
-            {
-                _heartbeatRetryIntervalSeconds = heartbeatRetryIntervalSeconds;
-                changed = true;
-            }
+                if (_managedOptionNames.Length != 0)
+                {
+                    JsonElement currentOptions = ConfigurationClusterOptions.Export(current);
+                    JsonElement desiredOptions = ConfigurationClusterOptions.Export(desired);
+                    foreach (string name in _managedOptionNames)
+                    {
+                        if (!JsonElement.DeepEquals(currentOptions.GetProperty(name), desiredOptions.GetProperty(name)))
+                            throw new DnsServerException($"/cluster/{name}: This setting is managed by the configuration manifest.");
+                    }
+                }
 
-            if (_configRefreshIntervalSeconds != configRefreshIntervalSeconds)
-            {
-                _configRefreshIntervalSeconds = configRefreshIntervalSeconds;
-                changed = true;
-            }
-
-            if (_configRetryIntervalSeconds != configRetryIntervalSeconds)
-            {
-                _configRetryIntervalSeconds = configRetryIntervalSeconds;
-                changed = true;
-            }
-
-            if (changed)
-            {
-                //apply new interval to all cluster nodes immediately
-                UpdateHeartbeatTimerForAllClusterNodes();
-
-                //save changes
+                SetManifestOptions(desired);
                 SaveConfigFile();
-
-                //trigger notify to all secondary nodes
-                TriggerNotifyAllSecondaryNodes();
             }
+
+            UpdateHeartbeatTimerForAllClusterNodes();
+            TriggerNotifyAllSecondaryNodes();
         }
+
+        internal IReadOnlyList<string> ManagedOptionNames => _managedOptionNames;
+
+        internal void CheckManifestTopologyChange()
+        {
+            if (_managedOptionNames.Length != 0)
+                throw new DnsServerException("/cluster: Release manifest ownership of cluster options before replacing the cluster configuration.");
+        }
+
+        private void SetManifestOptions(ConfigurationClusterOptions.Settings options) =>
+            (_heartbeatRefreshIntervalSeconds, _heartbeatRetryIntervalSeconds, _configRefreshIntervalSeconds, _configRetryIntervalSeconds) = options;
 
         internal ConfigurationClusterOptions.Settings GetManifestOptions()
         {
@@ -964,7 +970,7 @@ namespace DnsServerCore.Cluster
 
         internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
         {
-            if (candidate is not { Changed: true } change)
+            if (candidate is not { } change || (!change.ValuesChanged && !change.OwnershipChanged))
             {
                 persist(null);
                 return;
@@ -973,15 +979,43 @@ namespace DnsServerCore.Cluster
             lock (_saveLock)
             {
                 if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Primary || GetSelfNode().Id != change.NodeId ||
-                    GetManifestOptions() != change.Current)
+                    GetManifestOptions() != change.Current || !_managedOptionNames.SequenceEqual(change.CurrentOwnership))
                     throw new InvalidDataException("/cluster: Cluster options changed during apply. Create a new preview.");
 
-                persist(() => SaveConfigFileInternal(change.Desired));
-                (_heartbeatRefreshIntervalSeconds, _heartbeatRetryIntervalSeconds, _configRefreshIntervalSeconds, _configRetryIntervalSeconds) = change.Desired;
+                persist(() =>
+                {
+                    if (change.ValuesChanged)
+                        SaveConfigFileInternal(change.Desired);
+                    if (change.OwnershipChanged)
+                        WriteManifestOwnership(change.DesiredOwnership);
+                });
+                SetManifestOptions(change.Desired);
+                _managedOptionNames = change.DesiredOwnership;
             }
 
-            UpdateHeartbeatTimerForAllClusterNodes();
-            TriggerNotifyAllSecondaryNodes();
+            if (change.ValuesChanged)
+            {
+                UpdateHeartbeatTimerForAllClusterNodes();
+                TriggerNotifyAllSecondaryNodes();
+            }
+        }
+
+        private void WriteManifestOwnership(string[] names)
+        {
+            string file = Path.Combine(_dnsWebService.ConfigFolder, ConfigurationClusterOptions.OwnershipFile);
+            if (names.Length == 0)
+            {
+                File.Delete(file);
+                return;
+            }
+
+            string temporary = file + ".tmp";
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                JsonSerializer.Serialize(stream, names);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, file, true);
         }
 
         private void FindExistingRecordTtlValues(out uint nsTtl, out uint aTtl)

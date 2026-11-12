@@ -7674,6 +7674,8 @@ WHERE:
 - `configRefreshIntervalSeconds` (optional): The interval in seconds in which the DNS server must refresh the configuration from the Primary node. The valid range is `30`-`3600` and default value is `900`.
 - `configRetryIntervalSeconds` (optional): The interval in seconds in which the DNS server must retry the configuration refresh process for the Primary node in case of a failure. The valid range is `30`-`3600` and default value is `60`.
 
+Cluster state includes `managedOptionPaths` for the local node. An options request that changes a manifest-managed interval is rejected before any interval changes. Release manifest ownership before deleting the cluster or restoring its configuration from backup.
+
 RESPONSE:
 ```
 {

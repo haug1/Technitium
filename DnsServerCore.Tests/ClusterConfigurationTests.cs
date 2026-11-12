@@ -1,3 +1,5 @@
+using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -78,6 +80,43 @@ namespace DnsServerCore.Tests
             JsonElement repeated = await PlanAsync(primary, primary.AdminToken, manifest);
             LoopbackWebService.AssertOk(repeated);
             Assert.Empty(repeated.GetProperty("response").GetProperty("changes").EnumerateArray());
+
+            JsonElement state = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            LoopbackWebService.AssertOk(state);
+            Assert.Contains(state.GetProperty("response").GetProperty("managedOptionPaths").EnumerateArray(),
+                path => path.ValueEquals("/cluster/configRefreshSeconds"));
+
+            const string changeOptions = "admin/cluster/primary/setOptions?configRefreshIntervalSeconds=180&configRetryIntervalSeconds=80";
+            JsonElement blocked = await primary.CallAsync(changeOptions, primary.AdminToken);
+            Assert.Equal("error", blocked.GetProperty("status").GetString());
+            Assert.Contains("/cluster/configRefreshSeconds", blocked.GetProperty("errorMessage").GetString());
+            state = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            Assert.Equal(60, state.GetProperty("response").GetProperty("configRetryIntervalSeconds").GetInt32());
+
+            JsonElement blockedDelete = await primary.CallAsync("admin/cluster/primary/delete?forceDelete=true", primary.AdminToken);
+            Assert.Equal("error", blockedDelete.GetProperty("status").GetString());
+            Assert.Contains("Release manifest ownership", blockedDelete.GetProperty("errorMessage").GetString());
+
+            using var backup = new MemoryStream();
+            using (var archive = new ZipArchive(backup, ZipArchiveMode.Create, leaveOpen: true))
+                archive.CreateEntryFromFile(Path.Combine(primary.ConfigurationDirectory, "cluster.config"), "cluster.config");
+            using var restore = new MultipartFormDataContent();
+            restore.Add(new ByteArrayContent(backup.ToArray()), "file", "backup.zip");
+            JsonElement blockedRestore = await primary.CallAsync("settings/restore?clusterConfig=true", primary.AdminToken, restore);
+            Assert.Equal("error", blockedRestore.GetProperty("status").GetString());
+            Assert.Contains("Release manifest ownership", blockedRestore.GetProperty("errorMessage").GetString());
+
+            const string release = """{"schemaVersion":1}""";
+            JsonElement releasePlan = await PlanAsync(primary, primary.AdminToken, release);
+            LoopbackWebService.AssertOk(releasePlan);
+            using var releaseBody = new StringContent(release, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await primary.CallAsync("settings/config/apply", primary.AdminToken, releaseBody,
+                releasePlan.GetProperty("response").GetProperty("revision").GetString()));
+
+            state = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            Assert.Empty(state.GetProperty("response").GetProperty("managedOptionPaths").EnumerateArray());
+            Assert.Equal(120, state.GetProperty("response").GetProperty("configRefreshIntervalSeconds").GetInt32());
+            LoopbackWebService.AssertOk(await primary.CallAsync(changeOptions, primary.AdminToken));
 
             JsonElement secondarySettings = await secondary.CallAsync("settings/get", syncedAdmin);
             LoopbackWebService.AssertOk(secondarySettings);

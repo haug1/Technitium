@@ -1057,7 +1057,7 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
-                    if (ConfigurationClusterOptions.IsDeclared(manifest))
+                    if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0))
                     {
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Modify))
                             throw new DnsWebServiceException("Access was denied.");
@@ -2438,10 +2438,13 @@ namespace DnsServerCore
                             bool checkZones = zones && _dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.Count > 0;
                             bool checkApps = apps && _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths.Count > 0;
                             bool checkAuth = authConfig && _dnsWebService._authManager.HasManagedAuthSettings;
-                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes || checkZones || checkAuth || checkApps)
+                            bool checkCluster = clusterConfig && _dnsWebService._clusterManager.ManagedOptionNames.Count > 0;
+                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes || checkZones || checkAuth || checkApps || checkCluster)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
+                                    if (checkCluster && archive.GetEntry("cluster.config") is not null)
+                                        _dnsWebService._clusterManager.CheckManifestTopologyChange();
                                     if (checkAuth && archive.GetEntry("auth.config") is ZipArchiveEntry authEntry)
                                     {
                                         var auth = _dnsWebService._authManager;

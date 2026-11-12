@@ -20,7 +20,7 @@ namespace DnsServerCore.Configuration
 
         private static readonly HashSet<string> _configurationFiles = new(StringComparer.Ordinal)
         {
-            "dns.config", "cluster.config", "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config", "auth.config", "allowed.config", "blocked.config", Dns.ZoneManagers.AuthZoneManager.ManifestOwnershipFile, Auth.AuthManager.LdapOwnershipFile, Auth.AuthManager.SsoOwnershipFile, Auth.AuthManager.GroupOwnershipFile, Auth.AuthManager.UserOwnershipFile, Auth.AuthManager.PermissionOwnershipFile, ConfigurationStaticSessions.FileName, ConfigurationApplications.OwnershipFile
+            "dns.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile, "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config", "auth.config", "allowed.config", "blocked.config", Dns.ZoneManagers.AuthZoneManager.ManifestOwnershipFile, Auth.AuthManager.LdapOwnershipFile, Auth.AuthManager.SsoOwnershipFile, Auth.AuthManager.GroupOwnershipFile, Auth.AuthManager.UserOwnershipFile, Auth.AuthManager.PermissionOwnershipFile, ConfigurationStaticSessions.FileName, ConfigurationApplications.OwnershipFile
         };
 
         internal static void Recover(string configFolder)

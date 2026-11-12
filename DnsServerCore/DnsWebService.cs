@@ -2358,7 +2358,7 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/ldap/test", _authApi.TestLdapConnectionAsync);
             _webService.MapGetAndPost("/api/admin/cluster/state", _clusterApi.GetClusterState);
             _webService.MapGetAndPost("/api/admin/cluster/init", _clusterApi.InitializeCluster);
-            _webService.MapGetAndPost("/api/admin/cluster/primary/delete", _clusterApi.DeleteCluster);
+            _webService.MapGetAndPost("/api/admin/cluster/primary/delete", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.DeleteCluster));
             _webService.MapGetAndPost("/api/admin/cluster/primary/join", _clusterApi.JoinCluster);
             _webService.MapGetAndPost("/api/admin/cluster/primary/removeSecondary", _clusterApi.RemoveSecondaryNodeAsync);
             _webService.MapGetAndPost("/api/admin/cluster/primary/deleteSecondary", _clusterApi.DeleteSecondaryNode);
@@ -3267,14 +3267,18 @@ namespace DnsServerCore
                     sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
                 var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager);
                 Action writeCluster = null;
-                string[] clusterFiles = clusterOptions is { Changed: true } ? ["cluster.config"] : [];
+                var clusterFiles = new List<string>(2);
+                if (clusterOptions is { ValuesChanged: true })
+                    clusterFiles.Add("cluster.config");
+                if (clusterOptions is { OwnershipChanged: true })
+                    clusterFiles.Add(ConfigurationClusterOptions.OwnershipFile);
                 DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
                 apps ??= ConfigurationApplications.Prepare(manifest, manager);
                 await ConfigurationApplications.ApplyAsync(manager, apps, ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeApps + writeScopes + zones.Write + (clusterFiles.Length == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
                         persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
                         {
                             writeCluster = write;
@@ -3491,7 +3495,10 @@ namespace DnsServerCore
                 //init cluster manager and load config file
                 _clusterManager = new ClusterManager(this);
                 if (startupManifest is not null)
+                {
                     ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
+                    ConfigurationClusterOptions.Prepare(startupManifest, _clusterManager);
+                }
                 ConfigurationSso.Settings sso = ConfigurationSso.Prepare(startupManifest, _authManager);
                 ConfigurationProxy.Candidate proxy = startupManifest is null ? default : ConfigurationPlan.PrepareProxy(startupManifest, _dnsServer);
 

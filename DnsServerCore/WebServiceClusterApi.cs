@@ -71,6 +71,11 @@ namespace DnsServerCore
                     jsonWriter.WriteNumber("configRefreshIntervalSeconds", _dnsWebService._clusterManager.ConfigRefreshIntervalSeconds);
                     jsonWriter.WriteNumber("configRetryIntervalSeconds", _dnsWebService._clusterManager.ConfigRetryIntervalSeconds);
 
+                    jsonWriter.WriteStartArray("managedOptionPaths");
+                    foreach (string name in _dnsWebService._clusterManager.ManagedOptionNames)
+                        jsonWriter.WriteStringValue("/cluster/" + name);
+                    jsonWriter.WriteEndArray();
+
                     WriteClusterNodes(jsonWriter);
                 }
 
