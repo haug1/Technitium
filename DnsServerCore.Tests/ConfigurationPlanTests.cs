@@ -5330,9 +5330,12 @@ namespace DnsServerCore.Tests
 
             JsonElement replicaExport = await replica.CallAsync("settings/config/export", replica.AdminToken);
             LoopbackWebService.AssertOk(replicaExport);
-            JsonElement replicaZones = replicaExport.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            JsonElement replicaResponse = replicaExport.GetProperty("response");
+            JsonElement replicaZones = replicaResponse.GetProperty("manifest").GetProperty("zones");
             Assert.True(replicaZones.TryGetProperty("relay-catalog.test", out _));
             Assert.False(replicaZones.TryGetProperty("relay-member.test", out _));
+            Assert.DoesNotContain(replicaResponse.GetProperty("missingInputs").EnumerateArray(),
+                path => path.ValueEquals("/zones/relay-member.test"));
         }
 
         [Fact]

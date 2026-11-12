@@ -104,7 +104,10 @@ namespace DnsServerCore.Tests
 
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
-            JsonElement cluster = export.GetProperty("response").GetProperty("manifest").GetProperty("cluster");
+            JsonElement response = export.GetProperty("response");
+            JsonElement cluster = response.GetProperty("manifest").GetProperty("cluster");
+            Assert.DoesNotContain(response.GetProperty("missingInputs").EnumerateArray(),
+                path => path.ValueEquals("/zones/cluster.test") || path.ValueEquals("/zones/cluster-catalog.cluster.test"));
             Assert.Equal("Primary", cluster.GetProperty("bootstrap").GetProperty("role").GetString());
             string bootstrapManifest = JsonSerializer.Serialize(new { schemaVersion = 1, cluster });
             await using var restored = await LoopbackWebService.StartAsync("restored.cluster.test", enableTls: true, startupManifest: bootstrapManifest);

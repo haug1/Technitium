@@ -25,13 +25,17 @@ namespace DnsServerCore.Configuration
                 if (!canView(zone.Name))
                     continue;
 
+                string catalog = zone.CatalogZoneName;
+                AuthZoneType? catalogType = catalog is null ? null : dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type;
+                if (isClusterInfrastructure(zone.Name) || catalogType == AuthZoneType.SecondaryCatalog)
+                    continue;
+
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
-                if (isClusterInfrastructure(zone.Name) ||
-                    (zone.ApexZone is not (PrimaryZone or ForwarderZone) &&
+                if ((zone.ApexZone is not (PrimaryZone or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
-                    (zone.CatalogZoneName is string catalog && (!AuthZoneManager.SupportsManifestCatalogMembership(zone.Type) ||
-                        isClusterInfrastructure(catalog) || !canView(catalog) || dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type != AuthZoneType.Catalog)))
+                    (catalog is not null && (!AuthZoneManager.SupportsManifestCatalogMembership(zone.Type) ||
+                        isClusterInfrastructure(catalog) || !canView(catalog) || catalogType != AuthZoneType.Catalog)))
                 {
                     missingInputs.Add(path);
                     continue;
