@@ -286,6 +286,49 @@ def verify_propagation(primary, secondary, graceful):
     wait_for(lambda: ok(secondary.call("admin/cluster/state"))["configRefreshIntervalSeconds"] == 125,
              "the Secondary to authenticate and sync from the new Primary HTTPS port")
 
+    donor = Node(primary.binary, primary.folder.parent / "certificate-fixture", "certificate.cluster.test",
+                 allocate_ports()[:3], primary.password)
+    try:
+        donor.start()
+        replacement = donor.folder / "self-signed-cert.pfx"
+        rotation = {"schemaVersion": 1, "web": {"useSelfSignedCertificate": False,
+                    "certificate": {"path": str(replacement)}},
+                    "cluster": {"configRefreshSeconds": 130, "configRetrySeconds": 30}}
+        plan = ok(primary.call("settings/config/plan", manifest=rotation))
+        assert any(change["path"] == "/web/certificate/path" for change in plan["changes"]), plan
+        operation = ok(primary.call("settings/config/apply", manifest=rotation, revision=plan["revision"]))["operationId"]
+        wait_for(primary_rebound, "the Primary to activate its replacement certificate")
+        assert ssl.get_server_certificate(("127.0.0.1", new_primary_tls_port), timeout=5) != primary_certificate
+        wait_for(lambda: ok(secondary.call("admin/cluster/state"))["configRefreshIntervalSeconds"] == 130,
+                 "the Secondary to authenticate the replacement certificate")
+    finally:
+        donor.stop()
+
+    donor = Node(primary.binary, primary.folder.parent / "secondary-certificate-fixture", "replacement.cluster.test",
+                 allocate_ports()[:3], primary.password)
+    try:
+        donor.start()
+        owner = f"_{new_tls_port}._tcp.secondary.cluster.test"
+
+        def advertised_certificate():
+            result = ok(primary.call(f"zones/records/get?zone=cluster.test&domain={owner}"))
+            return [record["rData"] for record in result["records"] if record["type"] == "TLSA"]
+
+        previous_records = advertised_certificate()
+        assert len(previous_records) == 1, previous_records
+        rotation = {"schemaVersion": 1, "web": {
+            **web["web"], "useSelfSignedCertificate": False,
+            "certificate": {"path": str(donor.folder / "self-signed-cert.pfx")},
+        }}
+        plan = ok(secondary.call("settings/config/plan", manifest=rotation))
+        operation = ok(secondary.call("settings/config/apply", manifest=rotation, revision=plan["revision"]))["operationId"]
+        assert wait_for(lambda: web_operation(operation), "the Secondary certificate replacement") == "applied"
+        assert ssl.get_server_certificate(("127.0.0.1", new_tls_port), timeout=5) != previous_certificate
+        wait_for(lambda: (records := advertised_certificate()) and records != previous_records,
+                 "the Primary to publish the Secondary replacement certificate")
+    finally:
+        donor.stop()
+
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
     primary.stop()
@@ -326,7 +369,7 @@ def verify_propagation(primary, secondary, graceful):
 
 
 def assert_promoted_policy(state):
-    assert state["configRefreshIntervalSeconds"] == 125, state
+    assert state["configRefreshIntervalSeconds"] == 130, state
     assert state["configRetryIntervalSeconds"] == 30, state
     assert set(state["managedOptionPaths"]) == {
         "/cluster/configRefreshSeconds", "/cluster/configRetrySeconds", "/cluster/node/addresses",

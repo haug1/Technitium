@@ -538,6 +538,8 @@ namespace DnsServerCore.Cluster
             catch
             {
                 _state = ClusterNodeState.Unreachable;
+                if (_type == ClusterNodeType.Primary)
+                    _clusterManager.RefreshPrimaryTrustRecords();
                 throw;
             }
         }

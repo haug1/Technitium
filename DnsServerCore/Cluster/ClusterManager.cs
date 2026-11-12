@@ -1162,11 +1162,12 @@ namespace DnsServerCore.Cluster
         internal sealed record ClusterRecordChange(string Zone, string Owner, DnsResourceRecordType Type,
             IReadOnlyList<DnsResourceRecord> Previous, IReadOnlyList<DnsResourceRecord> Desired, DateTime Revision);
 
-        internal ClusterRecordChange[] PreparePrimaryNodeRecords(ClusterNode self, IReadOnlyList<IPAddress> desired, Uri endpoint)
+        internal ClusterRecordChange[] PreparePrimaryNodeRecords(ClusterNode self, IReadOnlyList<IPAddress> desired, Uri endpoint,
+            bool certificateChanged, X509Certificate2 previousCertificate, X509Certificate2 desiredCertificate)
         {
             bool addressesChanged = !ConfigurationClusterOptions.SameAddresses(self.IPAddresses, desired);
             bool portChanged = self.Url.Port != endpoint.Port;
-            if (!addressesChanged && !portChanged)
+            if (!addressesChanged && !portChanged && !certificateChanged)
                 return [];
 
             var zones = _dnsWebService.DnsServer.AuthZoneManager;
@@ -1182,28 +1183,33 @@ namespace DnsServerCore.Cluster
                 AddForwardRecords(AddressFamily.InterNetworkV6, DnsResourceRecordType.AAAA);
             }
 
-            if (portChanged)
+            if (portChanged || certificateChanged)
             {
-                X509Certificate2 certificate = _dnsWebService.WebServiceTlsCertificate;
-                if (certificate is null)
-                    throw new InvalidDataException("/web/tlsPort: Cluster HTTPS requires a certificate.");
+                // A generated certificate is only available after staging, so preview can validate the zone without generating a key.
+                var previousAssociation = previousCertificate is null ? null : GetAssociation(previousCertificate);
+                X509Certificate2 effectiveCertificate = certificateChanged ? desiredCertificate : previousCertificate;
+                if (effectiveCertificate is not null)
+                {
+                    var desiredAssociation = GetAssociation(effectiveCertificate);
+                    if (portChanged)
+                        SetEndpointRecord(self.Url.Port, previousAssociation, null);
+                    SetEndpointRecord(endpoint.Port, portChanged ? null : previousAssociation, desiredAssociation);
+                }
 
-                var association = new DnsTLSARecordData(DnsTLSACertificateUsage.DANE_EE, DnsTLSASelector.SPKI,
-                    DnsTLSAMatchingType.SHA2_256, certificate);
-                SetEndpointRecord(self.Url.Port, false);
-                SetEndpointRecord(endpoint.Port, true);
+                static DnsTLSARecordData GetAssociation(X509Certificate2 certificate) =>
+                    new(DnsTLSACertificateUsage.DANE_EE, DnsTLSASelector.SPKI, DnsTLSAMatchingType.SHA2_256, certificate);
 
-                void SetEndpointRecord(int port, bool wanted)
+                void SetEndpointRecord(int port, DnsTLSARecordData remove, DnsTLSARecordData add)
                 {
                     string owner = $"_{port}._tcp.{self.Name}";
                     IReadOnlyList<DnsResourceRecord> current = zones.GetRecords(zone.Name, owner, DnsResourceRecordType.TLSA);
-                    if (wanted == current.Any(record => record.RDATA.Equals(association)))
+                    if (Equals(remove, add))
                         return;
-
-                    IReadOnlyList<DnsResourceRecord> next = wanted
-                        ? [.. current, CreateRecord(owner, DnsResourceRecordType.TLSA, current.FirstOrDefault()?.TTL ?? ttl, association)]
-                        : current.Where(record => !record.RDATA.Equals(association)).ToArray();
-                    changes.Add(new ClusterRecordChange(zone.Name, owner, DnsResourceRecordType.TLSA, current.ToArray(), next, zone.LastModified));
+                    var next = current.Where(record => !record.RDATA.Equals(remove)).ToList();
+                    if (add is not null && !next.Any(record => record.RDATA.Equals(add)))
+                        next.Add(CreateRecord(owner, DnsResourceRecordType.TLSA, current.FirstOrDefault()?.TTL ?? ttl, add));
+                    if (!current.SequenceEqual(next))
+                        changes.Add(new ClusterRecordChange(zone.Name, owner, DnsResourceRecordType.TLSA, current.ToArray(), next, zone.LastModified));
                 }
             }
 
@@ -1264,7 +1270,7 @@ namespace DnsServerCore.Cluster
 
         internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
         {
-            if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.EndpointChanged && !change.OwnershipChanged))
+            if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.EndpointChanged && !change.CertificateChanged && !change.OwnershipChanged))
             {
                 persist(null);
                 return;
@@ -1335,9 +1341,9 @@ namespace DnsServerCore.Cluster
 
             if (change.ValuesChanged)
                 UpdateHeartbeatTimerForAllClusterNodes();
-            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged || change.EndpointChanged || change.OwnershipChanged))
+            if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged || change.EndpointChanged || change.CertificateChanged || change.OwnershipChanged))
                 TriggerNotifyAllSecondaryNodes();
-            else if (change.AddressesChanged || change.EndpointChanged)
+            else if (change.AddressesChanged || change.EndpointChanged || change.CertificateChanged)
                 TriggerClusterUpdateForSecondaryNodeChanges();
         }
 
@@ -2084,14 +2090,24 @@ namespace DnsServerCore.Cluster
             _dnsWebService.DnsServer.AuthZoneManager.SaveZoneFile(clusterSecondaryCatalogZoneInfo.Name);
             SaveConfigFile();
 
-            // A new HTTPS port needs its TLSA record before the next authenticated sync.
-            if (httpsPortChanged && _dnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(_clusterDomain) is { Type: AuthZoneType.Secondary } clusterZone)
-                clusterZone.TriggerResync();
+            RefreshPrimaryTrustRecords(force: httpsPortChanged);
 
             //trigger config and zone refresh
             _ = InitializeConfigRefreshAsync(CONFIG_REFRESH_TIMER_INTERVAL);
 
             return primaryNode;
+        }
+
+        internal void RefreshPrimaryTrustRecords(bool force = false)
+        {
+            if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Secondary ||
+                _dnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(_clusterDomain) is not { Type: AuthZoneType.Secondary } zone)
+                return;
+
+            if (force)
+                zone.TriggerResync();
+            else
+                zone.TriggerRefresh();
         }
 
         public void TriggerRefreshForConfig(IReadOnlyCollection<string> configRefreshIncludeZones = null)

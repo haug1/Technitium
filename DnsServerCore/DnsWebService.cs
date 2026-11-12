@@ -3109,7 +3109,8 @@ namespace DnsServerCore
                 await StartWebServiceAsync(false, listeners, sso);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
                 await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners,
-                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso, apps: apps);
+                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso, apps: apps,
+                    previousClusterCertificate: previousTlsOptions?.ServerCertificateContext.TargetCertificate);
             }
             catch
             {
@@ -3241,7 +3242,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null, ConfigurationSso.Settings sso = null, ConfigurationApplications.Entry[] apps = null)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null, ConfigurationSso.Settings sso = null, ConfigurationApplications.Entry[] apps = null, X509Certificate2 previousClusterCertificate = null)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3265,7 +3266,8 @@ namespace DnsServerCore
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
                     ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users, staticSessions,
                     sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
-                var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager);
+                var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager,
+                    webCertificate is { Changed: true }, previousClusterCertificate, WebServiceTlsCertificate);
                 Action writeCluster = null;
                 var clusterFiles = new List<string>(2);
                 if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
@@ -3591,7 +3593,8 @@ namespace DnsServerCore
                             await _dhcpServer.EnterManifestGateAsync();
                             try
                             {
-                                await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged, sso: sso);
+                                await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged, sso: sso,
+                                    previousClusterCertificate: previousTlsOptions?.ServerCertificateContext.TargetCertificate);
                             }
                             finally
                             {

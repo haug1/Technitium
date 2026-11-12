@@ -1116,12 +1116,14 @@ namespace DnsServerCore
                         });
                     }
                     else if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0 ||
-                        ConfigurationClusterOptions.ChangesWebEndpoint(manifest, _dnsWebService._clusterManager)))
+                        ConfigurationClusterOptions.ChangesWebEndpoint(manifest, _dnsWebService._clusterManager) ||
+                        (_dnsWebService._clusterManager.ClusterInitialized && webCertificate is { Changed: true })))
                     {
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Modify))
                             throw new DnsWebServiceException("Access was denied.");
                         ConfigurationClusterOptions.WriteSnapshot(writer,
-                            ConfigurationClusterOptions.Prepare(manifest, _dnsWebService._clusterManager).Value);
+                            ConfigurationClusterOptions.Prepare(manifest, _dnsWebService._clusterManager, webCertificate is { Changed: true },
+                                _dnsWebService.WebServiceTlsCertificate, webCertificate?.Certificate?.Context.TargetCertificate).Value);
                     }
                     writer.WritePropertyName("manifestApplicationOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths);

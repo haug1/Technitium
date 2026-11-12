@@ -5303,7 +5303,7 @@ The response contains a `revision` and a `changes` array. Each change contains a
 
 Outbound proxy preview compares the effective proxy and forwarder configuration. A proxy password environment reference is resolved on the server and requires Settings modify permission. The response reports the password path when its value would change. The revision changes when the referenced value changes. Standalone servers can apply proxy settings at startup or through the configuration API. Apply verifies the referenced password against the preview revision before persisting changes.
 
-Cluster nodes can preview and apply local web listener settings. Candidate `web.localAddresses` must cover the current and declared cluster addresses. Web TLS must stay enabled. A cluster node can declare a fixed `web.tlsPort`, which requires Administration Modify permission when its advertised URL changes. A Primary updates the signed TLSA records as part of the same apply.
+Cluster nodes can preview and apply local web listener settings. Candidate `web.localAddresses` must cover the current and declared cluster addresses. Web TLS must stay enabled. A cluster node can declare a fixed `web.tlsPort`, which requires Administration Modify permission when its advertised URL changes. A Primary updates the signed TLSA records as part of the same apply when its HTTPS port or certificate changes. A Secondary publishes its replacement certificate after commit.
 
 ### Export Declarative Configuration
 

@@ -864,8 +864,6 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("Applying explicit allow and block lists to a cluster is not implemented.");
             if (ConfigurationTsig.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/dns/tsigKeys: Applying TSIG keys to a cluster is not implemented.");
-            if (ConfigurationWebCertificate.IsDeclared(manifest))
-                throw new InvalidDataException("/web/certificate: Applying web certificate settings to a cluster is not implemented.");
             CheckClusterWebListenerSupport(manifest, cluster);
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");

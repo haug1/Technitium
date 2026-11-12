@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DnsServerCore.Cluster;
@@ -16,7 +17,7 @@ namespace DnsServerCore.Configuration
         internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.ClusterRecordChange[] ZoneRecords, int[] IntervalPeers, Uri CurrentUrl, Uri DesiredUrl)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.ClusterRecordChange[] ZoneRecords, int[] IntervalPeers, Uri CurrentUrl, Uri DesiredUrl, bool CertificateChanged)
         {
             internal bool ValuesChanged => Current != Desired;
             internal bool EndpointChanged => CurrentUrl != DesiredUrl;
@@ -144,9 +145,10 @@ namespace DnsServerCore.Configuration
             cluster.ClusterInitialized && ConfigurationPlan.GetWebListeners(manifest).TlsPort is int port &&
             cluster.GetSelfNode().Url.Port != port;
 
-        internal static Candidate? Prepare(ConfigurationManifest manifest, ClusterManager cluster)
+        internal static Candidate? Prepare(ConfigurationManifest manifest, ClusterManager cluster, bool certificateChanged = false,
+            X509Certificate2 previousCertificate = null, X509Certificate2 desiredCertificate = null)
         {
-            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0 && !ChangesWebEndpoint(manifest, cluster)))
+            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0 && !ChangesWebEndpoint(manifest, cluster) && !(cluster.ClusterInitialized && certificateChanged)))
                 return null;
 
             bool declared = manifest.Settings.TryGetProperty("cluster", out JsonElement section);
@@ -194,9 +196,10 @@ namespace DnsServerCore.Configuration
             if (ChangesWebEndpoint(manifest, cluster))
                 endpoint = ClusterNode.ValidateSelfNodeUrl(new UriBuilder(self.Url) { Port = ConfigurationPlan.GetWebListeners(manifest).TlsPort.Value }.Uri);
             var records = self.Type == ClusterNodeType.Primary
-                ? cluster.PreparePrimaryNodeRecords(self, addresses ?? currentAddresses, endpoint) : [];
+                ? cluster.PreparePrimaryNodeRecords(self, addresses ?? currentAddresses, endpoint, certificateChanged,
+                    previousCertificate ?? cluster.DnsWebService.WebServiceTlsCertificate, desiredCertificate) : [];
             return new Candidate(current, desired, self.Id, self.Type, currentOwnership, ownership,
-                currentAddresses, addresses ?? currentAddresses, records, peers, self.Url, endpoint);
+                currentAddresses, addresses ?? currentAddresses, records, peers, self.Url, endpoint, certificateChanged);
         }
 
         internal static bool SameAddresses(IReadOnlyList<IPAddress> current, IReadOnlyList<IPAddress> desired) =>
