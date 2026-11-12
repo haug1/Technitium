@@ -432,33 +432,56 @@ namespace DnsServerCore.Dns.Dnssec
             get { return _rolloverDays; }
             set
             {
-                if (_keyType == DnssecPrivateKeyType.ZoneSigningKey)
-                {
-                    if (value > 365)
-                        throw new ArgumentOutOfRangeException(nameof(RolloverDays), "Zone Signing Key (ZSK) automatic rollover days valid range is 0-365.");
-
-                    switch (_state)
-                    {
-                        case DnssecPrivateKeyState.Generated:
-                        case DnssecPrivateKeyState.Published:
-                        case DnssecPrivateKeyState.Ready:
-                        case DnssecPrivateKeyState.Active:
-                            if (_isRetiring)
-                                throw new InvalidOperationException("Zone Signing Key (ZSK) automatic rollover cannot be set since it is set to retire.");
-
-                            break;
-
-                        default:
-                            throw new InvalidOperationException("Zone Signing Key (ZSK) automatic rollover cannot be set due to invalid key state.");
-                    }
-                }
-                else
-                {
-                    if (value != 0)
-                        throw new NotSupportedException("Automatic rollover is not supported for Key Signing Keys (KSK).");
-                }
-
+                ValidateRolloverDays(value);
                 _rolloverDays = value;
+            }
+        }
+
+        internal void ValidateRolloverDays(ushort value)
+        {
+            if (_keyType == DnssecPrivateKeyType.ZoneSigningKey)
+            {
+                if (value > 365)
+                    throw new ArgumentOutOfRangeException(nameof(RolloverDays), "Zone Signing Key (ZSK) automatic rollover days valid range is 0-365.");
+
+                switch (_state)
+                {
+                    case DnssecPrivateKeyState.Generated:
+                    case DnssecPrivateKeyState.Published:
+                    case DnssecPrivateKeyState.Ready:
+                    case DnssecPrivateKeyState.Active:
+                        if (_isRetiring)
+                            throw new InvalidOperationException("Zone Signing Key (ZSK) automatic rollover cannot be set since it is set to retire.");
+
+                        break;
+
+                    default:
+                        throw new InvalidOperationException("Zone Signing Key (ZSK) automatic rollover cannot be set due to invalid key state.");
+                }
+            }
+            else
+            {
+                if (value != 0)
+                    throw new NotSupportedException("Automatic rollover is not supported for Key Signing Keys (KSK).");
+            }
+        }
+
+        internal DnssecPrivateKey WithRolloverDays(ushort value)
+        {
+            using var buffer = new MemoryStream();
+            try
+            {
+                using var writer = new BinaryWriter(buffer, System.Text.Encoding.UTF8, leaveOpen: true);
+                WriteTo(writer);
+                buffer.Position = 0;
+                using var reader = new BinaryReader(buffer, System.Text.Encoding.UTF8, leaveOpen: true);
+                DnssecPrivateKey copy = ReadFrom(reader);
+                copy.RolloverDays = value;
+                return copy;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
             }
         }
 

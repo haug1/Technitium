@@ -1281,8 +1281,13 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     if (node is SubDomainZone subdomain)
                                         subdomain.AutoUpdateState();
                                 }
-                                if (signingChanges.ContainsKey(name))
-                                    ((PrimaryZone)live).ActivateManifestSigning((PrimaryZone)stage.Zone);
+                                if (signingChanges.TryGetValue(name, out var signing))
+                                {
+                                    var primaryZone = (PrimaryZone)live;
+                                    primaryZone.ActivateManifestSigning((PrimaryZone)stage.Zone);
+                                    foreach (var rollover in signing.Rollovers ?? [])
+                                        primaryZone.UpdatePrivateKey(rollover.Tag, rollover.After);
+                                }
                                 if (current is not null)
                                 {
                                     live.ApplyManifestRecordHistory(stage.Zone);
@@ -1530,6 +1535,12 @@ namespace DnsServerCore.Dns.ZoneManagers
         private static HashSet<(string Owner, DnsResourceRecordType Type)> StageManifestSigning(
             PrimaryZone zone, List<DnsResourceRecord> records, ConfigurationZoneDnssec.Signing signing, bool refreshRecords = false)
         {
+            foreach (var rollover in signing?.Rollovers ?? [])
+                zone.StageRolloverDays(rollover.Tag, rollover.After);
+
+            if (signing is { Rollovers.Length: > 0, ChangeProof: false, ChangeTtl: false } && !refreshRecords)
+                return [];
+
             var tree = new AuthZoneTree();
             tree.TryAdd(zone);
             foreach (var owner in DnsResourceRecord.GroupRecords(records))

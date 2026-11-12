@@ -3259,6 +3259,60 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManifestUpdatesSigningKeyRolloverWithoutChangingTheKeyOrSoaSerial()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string name = "rollover.test";
+            LoopbackWebService.AssertOk(await server.CallAsync($"zones/create?zone={name}&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                $"zones/dnssec/sign?zone={name}&algorithm=ECDSA&curve=P256&zskRolloverDays=30", server.AdminToken));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"rollover.test":{"dnssec":{"keys":{
+                  "zsk":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P256","rolloverDays":90}
+                }}}}}
+                """;
+            var original = await GetKeyAsync();
+            Assert.Equal(30, original.GetProperty("rolloverDays").GetInt32());
+            var soa = Assert.IsType<DnsSOARecordData>(
+                Assert.Single((await server.QueryAsync(name, DnsResourceRecordType.SOA)).Answer).RDATA);
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            Assert.Equal(30, (await GetKeyAsync()).GetProperty("rolloverDays").GetInt32());
+            string blockedPath = Path.Combine(server.ConfigurationDirectory, "zones", name + ".tmp");
+            Directory.CreateDirectory(blockedPath);
+            try
+            {
+                Assert.Equal("error", (await ApplyAsync(server, manifest, revision)).GetProperty("status").GetString());
+                Assert.Equal(30, (await GetKeyAsync()).GetProperty("rolloverDays").GetInt32());
+            }
+            finally
+            {
+                Directory.Delete(blockedPath);
+            }
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            var live = await GetKeyAsync();
+            Assert.Equal(90, live.GetProperty("rolloverDays").GetInt32());
+            Assert.Equal(original.GetProperty("stateChangedOn").GetDateTime(), live.GetProperty("stateChangedOn").GetDateTime());
+
+            await server.RestartAsync();
+            var updated = await GetKeyAsync();
+            Assert.Equal(90, updated.GetProperty("rolloverDays").GetInt32());
+            Assert.Equal(original.GetProperty("keyTag").GetUInt16(), updated.GetProperty("keyTag").GetUInt16());
+            Assert.InRange((original.GetProperty("stateChangedOn").GetDateTime() -
+                updated.GetProperty("stateChangedOn").GetDateTime()).Duration(), TimeSpan.Zero, TimeSpan.FromSeconds(1));
+            Assert.Equal(soa.Serial, Assert.IsType<DnsSOARecordData>(
+                Assert.Single((await server.QueryAsync(name, DnsResourceRecordType.SOA)).Answer).RDATA).Serial);
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            async Task<JsonElement> GetKeyAsync()
+            {
+                JsonElement result = await server.CallAsync($"zones/dnssec/properties/get?zone={name}", server.AdminToken);
+                LoopbackWebService.AssertOk(result);
+                return Assert.Single(result.GetProperty("response").GetProperty("dnssecPrivateKeys").EnumerateArray(),
+                    key => key.GetProperty("keyType").ValueEquals("ZoneSigningKey"));
+            }
+        }
+
+        [Fact]
         public async Task ManifestChangesDenialProofAndDisablesSigningWithoutLosingOperatorRecords()
         {
             await using var server = await LoopbackWebService.StartAsync();

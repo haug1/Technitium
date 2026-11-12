@@ -16,7 +16,7 @@ namespace DnsServerCore.Configuration
 {
     internal static class ConfigurationZoneDnssec
     {
-        internal sealed record Key(DnssecPrivateKeyType Role, DnssecAlgorithm Algorithm, int Size, ushort RolloverDays, DnssecPrivateKey Imported, string Path)
+        internal sealed record Key(DnssecPrivateKeyType Role, DnssecAlgorithm Algorithm, int Size, ushort RolloverDays, DnssecPrivateKey Imported, string Path, bool HasRolloverDays)
         {
             internal DnssecPrivateKey Create()
             {
@@ -34,13 +34,15 @@ namespace DnsServerCore.Configuration
             }
 
             internal bool Matches(DnssecPrivateKey key) =>
-                key.KeyType == Role && key.Algorithm == Algorithm && key.RolloverDays == RolloverDays &&
+                key.KeyType == Role && key.Algorithm == Algorithm &&
                 (Size < 0 || key is DnssecRsaPrivateKey rsa && rsa.KeySize == Size) &&
                 (Imported is null || Imported.DnsKey.Equals(key.DnsKey));
         }
 
         internal sealed record Signing(uint Ttl, bool UseNsec3, ushort Iterations, int SaltLength, Key[] Keys,
-            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false);
+            bool Disable = false, bool ChangeProof = false, bool ChangeTtl = false, RolloverChange[] Rollovers = null);
+
+        internal sealed record RolloverChange(ushort Tag, ushort Before, ushort After);
 
         internal static Signing Prepare(ConfigurationManifest manifest, JsonElement declaration, AuthZoneType type, AuthZoneInfo current, string path)
         {
@@ -81,20 +83,40 @@ namespace DnsServerCore.Configuration
             Key[] parsed = keys.ValueKind == JsonValueKind.Object
                 ? keys.EnumerateObject().Select(key => ReadKey(manifest, key.Value, ConfigurationPlan.AppendPath(path + "/keys", key.Name))).ToArray()
                 : [];
-            if (parsed.Length > 0 && (!parsed.Any(key => key.Role == DnssecPrivateKeyType.KeySigningKey) ||
-                !parsed.Any(key => key.Role == DnssecPrivateKeyType.ZoneSigningKey)))
-                throw new InvalidDataException($"{path}/keys: Specify both a key signing key and a zone signing key.");
-
             if (signed)
             {
                 var remaining = (current.DnssecPrivateKeys ?? []).Where(key => !key.IsRetiring).ToList();
-                if (!parsed.OrderBy(key => key.Imported is null).All(key => RemoveMatch(remaining, key)))
-                    throw new InvalidDataException($"{path}/keys: Replacing the signing keys of an existing signed zone is not supported yet.");
+                var rollovers = new List<RolloverChange>();
+                foreach (Key expected in parsed.OrderBy(key => key.Imported is null))
+                {
+                    var matches = remaining.Where(expected.Matches).ToList();
+                    if (matches.Count == 0)
+                        throw new InvalidDataException($"{expected.Path}: No existing signing key matches the declaration.");
+
+                    // Keep an already matching interval, or require an unambiguous key for an update.
+                    DnssecPrivateKey key = expected.HasRolloverDays
+                        ? matches.Find(candidate => candidate.RolloverDays == expected.RolloverDays) : matches[0];
+                    if (key is null && matches.Count != 1)
+                        throw new InvalidDataException($"{expected.Path}/privateKey: Supply a private-key reference to identify the key to update.");
+                    key ??= matches[0];
+                    remaining.Remove(key);
+                    if (!expected.HasRolloverDays || key.RolloverDays == expected.RolloverDays)
+                        continue;
+                    try
+                    {
+                        key.ValidateRolloverDays(expected.RolloverDays);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        throw new InvalidDataException($"{expected.Path}/rolloverDays: {ex.Message}");
+                    }
+                    rollovers.Add(new(key.KeyTag, key.RolloverDays, expected.RolloverDays));
+                }
 
                 bool changeTtl = ttl != current.DnsKeyTtl;
                 bool changeProof = useNsec3 != currentNsec3 || (useNsec3 &&
                     (iterations != (parameters?.Iterations ?? 0) || saltLength != (parameters?.Salt.Length ?? 0)));
-                if (!changeProof && !changeTtl)
+                if (!changeProof && !changeTtl && rollovers.Count == 0)
                     return null;
                 if (changeTtl)
                 {
@@ -107,10 +129,11 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}/dnsKeyTtl: {ex.Message}");
                     }
                 }
-                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl);
+                return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl, Rollovers: rollovers.ToArray());
             }
 
-            if (parsed.Length == 0)
+            if (!parsed.Any(key => key.Role == DnssecPrivateKeyType.KeySigningKey) ||
+                !parsed.Any(key => key.Role == DnssecPrivateKeyType.ZoneSigningKey))
                 throw new InvalidDataException($"{path}/keys: Specify both a key signing key and a zone signing key.");
             if (parsed.Where(key => key.Imported is not null).GroupBy(key => key.Imported.KeyTag).Any(group => group.Count() > 1))
                 throw new InvalidDataException($"{path}/keys: Imported DNSSEC key tags must be distinct.");
@@ -172,15 +195,6 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        private static bool RemoveMatch(List<DnssecPrivateKey> keys, Key expected)
-        {
-            int index = keys.FindIndex(expected.Matches);
-            if (index < 0)
-                return false;
-            keys.RemoveAt(index);
-            return true;
-        }
-
         private static Key ReadKey(ConfigurationManifest manifest, JsonElement value, string path)
         {
             if (value.ValueKind != JsonValueKind.Object || Read(value, "role") is not JsonElement roleValue)
@@ -227,7 +241,7 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{path}/keySize: The referenced RSA key has a different size.");
             }
 
-            return new Key(role, algorithm, size, rollover, imported, path);
+            return new Key(role, algorithm, size, rollover, imported, path, value.TryGetProperty("rolloverDays", out _));
         }
 
         private static JsonElement? Read(JsonElement value, string property) =>

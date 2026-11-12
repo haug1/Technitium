@@ -705,6 +705,11 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
+        internal void StageRolloverDays(ushort keyTag, ushort rolloverDays)
+        {
+            _dnssecPrivateKeys[keyTag] = _dnssecPrivateKeys[keyTag].WithRolloverDays(rolloverDays);
+        }
+
         internal void UpdateStagedSigning(AuthZoneTree tree, bool disable, bool changeProof, bool useNsec3,
             ushort iterations, byte[] salt, bool changeTtl, uint ttl, bool refreshRecords = false)
         {

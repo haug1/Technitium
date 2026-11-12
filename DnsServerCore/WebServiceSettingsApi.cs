@@ -1435,6 +1435,11 @@ namespace DnsServerCore
                             foreach (var key in signing.Keys.Where(key => key.Imported is not null))
                                 writer.WriteStringValue(Convert.ToHexString(SHA256.HashData(key.Imported.DnsKey.PublicKey.RawPublicKey)));
                             writer.WriteEndArray();
+                            if (signing.Rollovers is { Length: > 0 })
+                            {
+                                writer.WritePropertyName("dnssecRollovers");
+                                JsonSerializer.Serialize(writer, signing.Rollovers);
+                            }
                         }
                         var primary = ConfigurationZonePrimary.Prepare(declaration.Value, type, zone, keys, zonePath);
                         if (primary != default)
