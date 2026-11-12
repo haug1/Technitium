@@ -633,6 +633,7 @@ namespace DnsServerCore
                     ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer, preview: true);
                     using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, dnsCertificate: dnsCertificate, webCertificate: webCertificate);
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
+                    ConfigurationDhcp.ValidatePersistableScopes(manifest, _dnsWebService._dhcpServer.Scopes, _dnsWebService._log, _dnsWebService._dhcpServer);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
                     Utf8JsonWriter response = context.GetCurrentJsonWriter();

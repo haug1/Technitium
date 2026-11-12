@@ -122,6 +122,11 @@ namespace DnsServerCore.Dhcp
         }
 
         public Scope(Stream s, LogManager log, DhcpServer dhcpServer)
+            : this(s, log, dhcpServer, resolveLocalDns: true)
+        {
+        }
+
+        private Scope(Stream s, LogManager log, DhcpServer dhcpServer, bool resolveLocalDns)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "SC")
                 throw new InvalidDataException("DhcpServer scope file format is invalid.");
@@ -216,7 +221,8 @@ namespace DnsServerCore.Dhcp
                             if (count == 255)
                             {
                                 _useThisDnsServer = true;
-                                FindThisDnsServerAddress();
+                                if (resolveLocalDns)
+                                    FindThisDnsServerAddress();
                             }
                             else
                             {
@@ -1602,6 +1608,32 @@ namespace DnsServerCore.Dhcp
             ConvertToDynamicLease(lease);
         }
 
+        internal Scope CloneForManifest()
+        {
+            using var data = new MemoryStream();
+            WriteTo(data);
+            data.Position = 0;
+            return new Scope(data, _log, _dhcpServer, resolveLocalDns: false);
+        }
+
+        internal void SetManifestDnsServers(bool useThisServer, IReadOnlyCollection<IPAddress> addresses)
+        {
+            _useThisDnsServer = useThisServer;
+            _dnsServers = useThisServer ? null : addresses;
+        }
+
+        internal void SetManifestReservation(byte[] hardwareAddress, IPAddress address, string hostName, string comments)
+        {
+            var identifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, hardwareAddress);
+            if (address is null)
+                _reservedLeases.TryRemove(identifier, out _);
+            else
+                _reservedLeases[identifier] = new Lease(LeaseType.Reserved, hostName, DhcpMessageHardwareAddressType.Ethernet,
+                    hardwareAddress, address, comments);
+        }
+
+        internal void ClearManifestReservations() => _reservedLeases.Clear();
+
         public void WriteTo(Stream s)
         {
             BinaryWriter bW = new BinaryWriter(s);
@@ -1798,21 +1830,19 @@ namespace DnsServerCore.Dhcp
                 }
             }
 
-            bW.Write(_reservedLeases.Count);
-
-            foreach (KeyValuePair<ClientIdentifierOption, Lease> reservedLease in _reservedLeases)
+            KeyValuePair<ClientIdentifierOption, Lease>[] reserved = _reservedLeases.ToArray();
+            bW.Write(reserved.Length);
+            foreach (KeyValuePair<ClientIdentifierOption, Lease> reservedLease in reserved)
                 reservedLease.Value.WriteTo(bW);
 
             bW.Write(_allowOnlyReservedLeases);
             bW.Write(_blockLocallyAdministeredMacAddresses);
             bW.Write(_ignoreClientIdentifierOption);
 
-            {
-                bW.Write(_leases.Count);
-
-                foreach (KeyValuePair<ClientIdentifierOption, Lease> lease in _leases)
-                    lease.Value.WriteTo(bW);
-            }
+            KeyValuePair<ClientIdentifierOption, Lease>[] leases = _leases.ToArray();
+            bW.Write(leases.Length);
+            foreach (KeyValuePair<ClientIdentifierOption, Lease> lease in leases)
+                lease.Value.WriteTo(bW);
         }
 
         public override bool Equals(object obj)

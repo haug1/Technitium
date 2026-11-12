@@ -239,6 +239,186 @@ namespace DnsServerCore.Configuration
             }
         }
 
+        internal static void ValidatePersistableScopes(ConfigurationManifest manifest,
+            IReadOnlyDictionary<string, Scope> current, LogManager log, DhcpServer dhcpServer)
+        {
+            if (!manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) ||
+                !dhcp.TryGetProperty("scopes", out JsonElement scopes) || scopes.ValueKind == JsonValueKind.Null)
+                return;
+
+            foreach (JsonProperty declaration in scopes.EnumerateObject())
+            {
+                if (declaration.Value.ValueKind == JsonValueKind.Null)
+                    continue;
+                current.TryGetValue(declaration.Name, out Scope existing);
+                using Scope candidate = PrepareScope(declaration.Name, declaration.Value, existing, log, dhcpServer);
+            }
+        }
+
+        internal static Scope PrepareScope(string name, JsonElement settings, Scope existing, LogManager log, DhcpServer dhcpServer)
+        {
+            string path = ConfigurationPlan.AppendPath(ScopesPath, name);
+            IPAddress start = ReadAddress(settings, "startingAddress") ?? existing?.StartingAddress;
+            IPAddress end = ReadAddress(settings, "endingAddress") ?? existing?.EndingAddress;
+            IPAddress mask = ReadAddress(settings, "subnetMask") ?? existing?.SubnetMask;
+            bool enabled = settings.TryGetProperty("enabled", out JsonElement enabledValue)
+                ? enabledValue.ValueKind != JsonValueKind.False : existing?.Enabled ?? true;
+            Scope candidate = null;
+            try
+            {
+                candidate = existing is null
+                    ? new Scope(name, enabled, start, end, mask, log, dhcpServer) { IgnoreClientIdentifierOption = true }
+                    : existing.CloneForManifest();
+                if (existing is not null)
+                {
+                    if (!start.Equals(existing.StartingAddress) || !end.Equals(existing.EndingAddress) || !mask.Equals(existing.SubnetMask))
+                        candidate.ChangeNetwork(start, end, mask);
+                    candidate.SetEnabled(enabled);
+                }
+
+                ApplyOptions(candidate, ReadDeclaredOptions(settings, path), path);
+                if (settings.TryGetProperty("exclusions", out JsonElement exclusions))
+                    candidate.Exclusions = ReadExclusions(exclusions, path + "/exclusions", start, end).Select(range =>
+                        new Exclusion(IPAddressExtensions.ConvertNumberToIp(range.Start), IPAddressExtensions.ConvertNumberToIp(range.End))).ToArray();
+                if (settings.TryGetProperty("reservations", out JsonElement reservations))
+                    ApplyReservations(candidate, reservations, path + "/reservations");
+
+                candidate.WriteTo(Stream.Null);
+                return candidate;
+            }
+            catch (Exception ex)
+            {
+                candidate?.Dispose();
+                if (ex is ArgumentException or OverflowException or DhcpServerException)
+                    throw new InvalidDataException($"{path}: The scope settings cannot be stored in the DHCP configuration.");
+                throw;
+            }
+        }
+
+        private static void ApplyReservations(Scope scope, JsonElement declarations, string path)
+        {
+            if (declarations.ValueKind == JsonValueKind.Null)
+            {
+                scope.ClearManifestReservations();
+                return;
+            }
+
+            var existing = scope.ReservedLeases.ToLookup(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal);
+            foreach (JsonProperty entry in declarations.EnumerateObject())
+            {
+                string entryPath = ConfigurationPlan.AppendPath(path, entry.Name);
+                string key = ReadHardwareAddress(entry.Name, entryPath);
+                byte[] mac = Lease.ParseHardwareAddress(key);
+                var identifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, mac);
+                Lease previous = null;
+                foreach (Lease reservation in existing[key])
+                {
+                    if (!reservation.ClientIdentifier.Equals(identifier) || previous is not null)
+                        throw new InvalidDataException($"{entryPath}: The existing reservation cannot be identified by an Ethernet MAC address alone.");
+                    previous = reservation;
+                }
+
+                if (entry.Value.ValueKind == JsonValueKind.Null)
+                {
+                    scope.SetManifestReservation(mac, null, null, null);
+                    continue;
+                }
+                IPAddress address = ReadAddress(entry.Value, "address") ?? previous?.Address;
+                string hostName = entry.Value.TryGetProperty("hostName", out JsonElement host) ? host.GetString() : previous?.HostName;
+                string comments = entry.Value.TryGetProperty("comments", out JsonElement comment) ? comment.GetString() : previous?.Comments;
+                scope.SetManifestReservation(mac, address, hostName, comments);
+            }
+        }
+
+        private static void ApplyOptions(Scope scope, JsonObject options, string path)
+        {
+            JsonObject lease = options["leaseTime"]?.AsObject();
+            scope.LeaseTimeDays = (ushort)Number(lease, "days", scope.LeaseTimeDays);
+            scope.LeaseTimeHours = (byte)Number(lease, "hours", scope.LeaseTimeHours);
+            scope.LeaseTimeMinutes = (byte)Number(lease, "minutes", scope.LeaseTimeMinutes);
+            scope.OfferDelayTime = (ushort)Number(options, "offerDelayMs", scope.OfferDelayTime);
+            JsonObject ping = options["pingCheck"]?.AsObject();
+            scope.PingCheckEnabled = Flag(ping, "enabled", scope.PingCheckEnabled);
+            scope.PingCheckTimeout = (ushort)Number(ping, "timeoutMs", scope.PingCheckTimeout);
+            scope.PingCheckRetries = (byte)Number(ping, "retries", scope.PingCheckRetries);
+            scope.DomainName = Text(options, "domainName", scope.DomainName);
+            if (options.TryGetPropertyValue("domainSearchList", out JsonNode domains))
+                scope.DomainSearchList = Strings(domains);
+            JsonObject updates = options["dnsUpdates"]?.AsObject();
+            scope.DnsUpdates = Flag(updates, "enabled", scope.DnsUpdates);
+            scope.DnsOverwriteForDynamicLease = Flag(updates, "overwriteDynamicRecords", scope.DnsOverwriteForDynamicLease);
+            scope.DnsTtl = Number(updates, "ttl", scope.DnsTtl);
+            JsonObject boot = options["boot"]?.AsObject();
+            scope.ServerAddress = Address(boot, "serverAddress", scope.ServerAddress);
+            scope.ServerHostName = Text(boot, "serverHostName", scope.ServerHostName);
+            scope.BootFileName = Text(boot, "fileName", scope.BootFileName);
+            scope.RouterAddress = Address(options, "routerAddress", scope.RouterAddress);
+
+            if (options["dns"] is JsonObject dns)
+            {
+                bool local = Flag(dns, "useThisServer", scope.UseThisDnsServer);
+                var servers = dns.TryGetPropertyValue("servers", out JsonNode dnsServers) ? Addresses(dnsServers) : scope.DnsServers;
+                if (!local && servers?.Count >= byte.MaxValue)
+                    throw new InvalidDataException($"{path}/dns/servers: At most 254 explicit DNS servers can be stored.");
+                scope.SetManifestDnsServers(local, servers);
+            }
+            if (options.TryGetPropertyValue("winsServers", out JsonNode wins))
+                scope.WinsServers = Addresses(wins);
+            if (options["ntp"] is JsonObject ntp)
+            {
+                if (ntp.TryGetPropertyValue("servers", out JsonNode servers))
+                    scope.NtpServers = Addresses(servers);
+                if (ntp.TryGetPropertyValue("serverDomainNames", out JsonNode names))
+                    scope.NtpServerDomainNames = Strings(names);
+            }
+            if (options.TryGetPropertyValue("staticRoutes", out JsonNode routes))
+                scope.StaticRoutes = routes?.AsArray().Select(route => new ClasslessStaticRouteOption.Route(
+                    IPAddress.Parse(route["destination"].GetValue<string>()), IPAddress.Parse(route["subnetMask"].GetValue<string>()),
+                    IPAddress.Parse(route["router"].GetValue<string>()))).ToArray();
+            if (options.TryGetPropertyValue("vendorInfo", out JsonNode vendor))
+            {
+                var effective = new Dictionary<string, VendorSpecificInformationOption>(StringComparer.Ordinal);
+                if (vendor is not null)
+                {
+                    if (scope.VendorInfo is not null)
+                    {
+                        foreach (var (identifier, option) in scope.VendorInfo)
+                            effective.Add(identifier, option);
+                    }
+                    foreach (var (identifier, option) in vendor.AsObject())
+                    {
+                        if (option is null)
+                            effective.Remove(identifier);
+                        else
+                            effective[identifier] = new VendorSpecificInformationOption(option.GetValue<string>());
+                    }
+                }
+                scope.VendorInfo = effective;
+            }
+            if (options.TryGetPropertyValue("capwapAcIpAddresses", out JsonNode capwap))
+                scope.CAPWAPAcIpAddresses = Addresses(capwap);
+            if (options.TryGetPropertyValue("tftpServerAddresses", out JsonNode tftp))
+                scope.TftpServerAddresses = Addresses(tftp);
+            if (options.TryGetPropertyValue("genericOptions", out JsonNode generic))
+                scope.GenericOptions = generic?.AsArray().Select(option => new DhcpOption((DhcpOptionCode)Number(option.AsObject(), "code", 0),
+                    option["value"].GetValue<string>())).ToArray();
+
+            scope.AllowOnlyReservedLeases = Flag(options, "allowOnlyReservedLeases", scope.AllowOnlyReservedLeases);
+            scope.BlockLocallyAdministeredMacAddresses = Flag(options, "blockLocallyAdministeredMacAddresses", scope.BlockLocallyAdministeredMacAddresses);
+            scope.IgnoreClientIdentifierOption = Flag(options, "ignoreClientIdentifierOption", scope.IgnoreClientIdentifierOption);
+
+            static bool Flag(JsonObject parent, string name, bool fallback) => parent?[name]?.GetValue<bool>() ?? fallback;
+            static uint Number(JsonObject parent, string name, uint fallback) => parent?[name] is JsonNode value
+                ? decimal.ToUInt32(JsonSerializer.SerializeToElement(value).GetDecimal()) : fallback;
+            static string Text(JsonObject parent, string name, string fallback) =>
+                parent is not null && parent.TryGetPropertyValue(name, out JsonNode value) ? value?.GetValue<string>() : fallback;
+            static IPAddress Address(JsonObject parent, string name, IPAddress fallback) =>
+                parent is not null && parent.TryGetPropertyValue(name, out JsonNode value)
+                    ? value is null ? null : IPAddress.Parse(value.GetValue<string>()) : fallback;
+            static string[] Strings(JsonNode value) => value?.AsArray().Select(item => item.GetValue<string>()).ToArray();
+            static IPAddress[] Addresses(JsonNode value) => Strings(value)?.Select(IPAddress.Parse).ToArray();
+        }
+
         private static void PreviewRemoval(string name, JsonElement current, List<ConfigurationChange> changes)
         {
             string path = ConfigurationPlan.AppendPath(ScopesPath, name);

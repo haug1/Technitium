@@ -2494,6 +2494,34 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpPreviewRejectsAnExplicitDnsListThatCannotBeStored()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.60&subnetMask=255.255.255.0",
+                server.AdminToken));
+
+            var servers = new JsonArray();
+            for (int index = 0; index < 255; index++)
+                servers.Add("192.0.2." + index);
+            JsonNode manifest = JsonNode.Parse("""{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"dns":{}}}}}""")!;
+            manifest["dhcp"]!["scopes"]!["Lab"]!["dns"]!["servers"] = servers;
+            using var content = new StringContent(manifest.ToJsonString(), Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Lab/dns/servers", rejected.GetProperty("errorMessage").GetString());
+
+            manifest["dhcp"]!["scopes"]!["Lab"]!["dns"]!["useThisServer"] = true;
+            JsonElement preview = await PreviewAsync(server, manifest.ToJsonString());
+            Assert.Equal("/dhcp/scopes/Lab/dns/useThisServer",
+                Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("path").GetString());
+
+            JsonElement live = await server.CallAsync("dhcp/scopes/get?name=Lab", server.AdminToken);
+            LoopbackWebService.AssertOk(live);
+            Assert.False(live.GetProperty("response").GetProperty("useThisDnsServer").GetBoolean());
+        }
+
+        [Fact]
         public async Task DhcpOptionPreviewRoundTripsInspectionExportAndReportsLeafChanges()
         {
             await using var server = await LoopbackWebService.StartAsync();
