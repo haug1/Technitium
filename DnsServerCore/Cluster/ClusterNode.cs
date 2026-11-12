@@ -231,6 +231,8 @@ namespace DnsServerCore.Cluster
 
                 if (_type == ClusterNodeType.Primary)
                     _clusterManager.UpdateClusterFromPrimaryNode(clusterInfo); //update cluster nodes from primary node response
+                else
+                    await _clusterManager.NotifyIfPrimaryEndpointStaleAsync(this, clusterInfo);
 
                 //update version & up since time
                 foreach (ClusterInfo.ClusterNodeInfo clusterNodeInfo in clusterInfo.ClusterNodes)

@@ -1664,6 +1664,23 @@ namespace DnsServerCore.Cluster
             _dnsWebService.DnsServer.AuthZoneManager.SaveZoneFile(clusterCatalogZoneInfo.Name);
         }
 
+        internal async Task NotifyIfPrimaryEndpointStaleAsync(ClusterNode secondary, ClusterInfo state)
+        {
+            IReadOnlyDictionary<int, ClusterNode> nodes = _clusterNodes;
+            if (nodes is null || !nodes.TryGetValue(secondary.Id, out ClusterNode member) || !ReferenceEquals(member, secondary) ||
+                !string.Equals(_clusterDomain, state.ClusterDomain, StringComparison.OrdinalIgnoreCase) || state.ClusterNodes is null)
+                return;
+
+            ClusterNode primary = nodes.Values.FirstOrDefault(node => node.Type == ClusterNodeType.Primary && node.State == ClusterNodeState.Self);
+            if (primary is null || !state.ClusterNodes.Any(node => node.Id == secondary.Id && node.Type == "Secondary" && node.State == "Self"))
+                return;
+
+            ClusterInfo.ClusterNodeInfo advertisedPrimary = state.ClusterNodes.FirstOrDefault(node => node.Id == primary.Id && node.Type == "Primary");
+            if (advertisedPrimary is not null && (advertisedPrimary.Url != primary.Url ||
+                !primary.IPAddresses.Select(address => address.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(advertisedPrimary.IPAddresses)))
+                await secondary.NotifySecondaryNodeAsync(primary);
+        }
+
         public void TriggerNotifyAllSecondaryNodesIfPrimarySelfNode()
         {
             if (GetSelfNode().Type == ClusterNodeType.Primary)

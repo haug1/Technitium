@@ -164,6 +164,10 @@ def verify(current, previous, folder, propagation, graceful):
         primary.stop()
 
 
+def log_message_count(node, message):
+    return sum(log.read_text(encoding="utf-8").count(message) for log in (node.folder / "logs").glob("*.log"))
+
+
 def verify_propagation(primary, secondary, graceful):
     catalog = "cluster-catalog.cluster.test"
     web_port = ok(secondary.call("settings/get"))["webServiceHttpPort"]
@@ -248,8 +252,10 @@ def verify_propagation(primary, secondary, graceful):
     wait_for(secondary_interval_updated, "the Secondary to receive the 120-second interval")
     new_primary_tls_port = allocate_ports()[0]
     primary_certificate = ssl.get_server_certificate(("127.0.0.1", primary.tls_port), timeout=5)
-    primary_move = {"schemaVersion": 1, "web": {"tlsPort": new_primary_tls_port},
-                    "cluster": {"configRefreshSeconds": 125, "configRetrySeconds": 30}}
+    primary_move = {"schemaVersion": 1, "web": {"tlsPort": new_primary_tls_port}, "cluster": intervals["cluster"]}
+    missed_notification = "DNS Server failed to notify Secondary node"
+    previous_failures = log_message_count(primary, missed_notification)
+    secondary.stop()
     plan = ok(primary.call("settings/config/plan", manifest=primary_move))
     operation = ok(primary.call("settings/config/apply", manifest=primary_move, revision=plan["revision"]))["operationId"]
 
@@ -265,26 +271,30 @@ def verify_propagation(primary, secondary, graceful):
     wait_for(primary_rebound, "the Primary HTTPS listener to rebind")
     assert ssl.get_server_certificate(("127.0.0.1", new_primary_tls_port), timeout=5) == primary_certificate
 
-    def secondary_reconnected():
+    wait_for(lambda: log_message_count(primary, missed_notification) > previous_failures, "a missed port-change notification")
+    secondary.start()
+
+    def secondary_has_primary_port():
         state = ok(secondary.call("admin/cluster/state"))
         node, = (node for node in state["clusterNodes"] if node["type"] == "Primary")
-        return urllib.parse.urlsplit(node["url"]).port == new_primary_tls_port and state["configRefreshIntervalSeconds"] == 125
+        return urllib.parse.urlsplit(node["url"]).port == new_primary_tls_port
 
-    wait_for(secondary_reconnected, "the Secondary to authenticate and sync from the new Primary HTTPS port")
+    wait_for(secondary_has_primary_port, "the Primary heartbeat to repair the Secondary's stale endpoint", timeout=60)
+    intervals["cluster"]["configRefreshSeconds"] = 125
+    plan = wait_for(plan_if_supported, "the restarted Secondary to advertise interval support")
+    ok(primary.call("settings/config/apply", manifest=intervals, revision=plan["revision"]))
+    wait_for(lambda: ok(secondary.call("admin/cluster/state"))["configRefreshIntervalSeconds"] == 125,
+             "the Secondary to authenticate and sync from the new Primary HTTPS port")
 
-    def publication_failures():
-        return sum(log.read_text(encoding="utf-8").count(
-            "DNS Server failed to update this Secondary node's details on the Primary node.")
-            for log in (secondary.folder / "logs").glob("*.log"))
-
-    previous_failures = publication_failures()
+    publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
+    previous_failures = log_message_count(secondary, publication_failure)
     primary.stop()
     addresses = {"schemaVersion": 1, "web": web["web"],
                  "cluster": {"node": {"addresses": ["127.0.0.1", "127.0.0.2"]}}}
     revision = ok(secondary.call("settings/config/plan", manifest=addresses))["revision"]
     ok(secondary.call("settings/config/apply", manifest=addresses, revision=revision))
 
-    wait_for(lambda: publication_failures() > previous_failures, "a publication failure while the Primary is stopped")
+    wait_for(lambda: log_message_count(secondary, publication_failure) > previous_failures, "a publication failure while the Primary is stopped")
     primary.start()
 
     def primary_received_addresses():
