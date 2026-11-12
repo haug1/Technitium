@@ -26,7 +26,7 @@ jobs:
         working-directory: TechnitiumLibrary
         shell: bash
         run: |
-          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
+          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Net.Firewall TechnitiumLibrary.Security.OTP; do
             dotnet build "$project/$project.csproj" -c Release
           done
       - name: Run manifest validation tests on Windows
@@ -35,3 +35,10 @@ jobs:
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer
         run: dotnet run --no-build --project DnsServerApp/DnsServerApp.csproj -- config validate configuration/examples/minimal.json
+      - name: Build the Windows service host
+        working-directory: DnsServer
+        run: dotnet build DnsServerWindowsService/DnsServerWindowsService.csproj
+      - name: Verify console and Windows service startup
+        working-directory: DnsServer
+        shell: pwsh
+        run: ./DnsServerCore.Tests/windows_manifest_startup.ps1
