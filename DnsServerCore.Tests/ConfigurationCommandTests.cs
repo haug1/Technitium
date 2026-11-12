@@ -73,13 +73,53 @@ namespace DnsServerCore.Tests
             {
                 string origin = server.Client.BaseAddress!.AbsoluteUri;
                 var plan = await RunAsync(server, "plan", file, origin);
-                const string prefix = "Revision ";
-                string revision = Assert.Single(plan.Output.Split('\n'), line => line.StartsWith(prefix, StringComparison.Ordinal))[prefix.Length..].Trim();
+                string revision = ReadOutputValue(plan.Output, "Revision ");
                 Assert.Contains("Configuration applied.", (await RunAsync(server, "apply", file, origin, revision)).Output);
             }
         }
 
-        private static async Task<(string Output, string Error)> RunAsync(LoopbackWebService server, params string[] args)
+        [Fact]
+        public async Task ConsoleRejectsStalePreviewAndWaitsAcrossWebRestart()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            string origin = server.Client.BaseAddress!.AbsoluteUri;
+            int port = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+            string destination = $"http://127.0.0.1:{port}";
+            string path = Path.Combine(server.ConfigurationDirectory, "cli-restart.json");
+            var manifest = new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["web"] = new JsonObject { ["httpPort"] = port },
+                ["logging"] = new JsonObject { ["retentionDays"] = 42 }
+            };
+            await File.WriteAllTextAsync(path, manifest.ToJsonString());
+
+            var plan = await RunAsync(server, "plan", path, origin);
+            Assert.Contains("Update /web/httpPort (web service restart)", plan.Output);
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?maxLogFileDays=7", server.AdminToken));
+            string stale = ReadOutputValue(plan.Output, "Revision ");
+            var rejected = await RunAsync(server, 1, "apply", path, origin, stale);
+            Assert.Contains("preview is stale", rejected.Error);
+            Assert.Equal(7, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            Assert.Equal(server.Client.BaseAddress.Port, (await server.GetSettingsAsync()).GetProperty("webServiceHttpPort").GetInt32());
+
+            plan = await RunAsync(server, "plan", path, origin);
+            string revision = ReadOutputValue(plan.Output, "Revision ");
+            var applied = await RunAsync(server, "apply", path, origin, revision, "--wait", destination);
+            Assert.Contains("Configuration applied.", applied.Output);
+            string operation = ReadOutputValue(applied.Output, "Configuration apply is pending. Operation ");
+            Assert.Contains("Configuration applied.", (await RunAsync(server, "status", destination, operation)).Output);
+            Assert.Contains("No setting changes.", (await RunAsync(server, "plan", path, destination)).Output);
+        }
+
+        private static string ReadOutputValue(string output, string prefix) =>
+            Assert.Single(output.Split('\n'), line => line.StartsWith(prefix, StringComparison.Ordinal))[prefix.Length..].Trim();
+
+        private static Task<(string Output, string Error)> RunAsync(LoopbackWebService server, params string[] args) =>
+            RunAsync(server, 0, args);
+
+        private static async Task<(string Output, string Error)> RunAsync(LoopbackWebService server, int expectedExitCode, params string[] args)
         {
             string dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
             var start = new ProcessStartInfo(dotnet)
@@ -113,7 +153,7 @@ namespace DnsServerCore.Tests
             string error = await errorTask;
             Assert.DoesNotContain(server.AdminToken, output);
             Assert.DoesNotContain(server.AdminToken, error);
-            Assert.True(process.ExitCode == 0, error);
+            Assert.True(process.ExitCode == expectedExitCode, error);
             return (output, error);
         }
     }

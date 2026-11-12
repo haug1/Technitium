@@ -241,6 +241,13 @@ namespace DnsServerApp
             using Stream responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using JsonDocument document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
             JsonElement root = document.RootElement;
+            const string stalePreviewMessage = "The configuration preview is stale. Create a new preview before applying.";
+            if (revision is not null && root.ValueKind == JsonValueKind.Object &&
+                root.TryGetProperty("status", out JsonElement errorStatus) && errorStatus.ValueKind == JsonValueKind.String &&
+                errorStatus.ValueEquals("error") && root.TryGetProperty("errorMessage", out JsonElement error) &&
+                error.ValueKind == JsonValueKind.String && error.ValueEquals(stalePreviewMessage))
+                throw new InvalidDataException(stalePreviewMessage);
+
             if ((root.ValueKind != JsonValueKind.Object) || !root.TryGetProperty("status", out JsonElement status)
                 || (status.ValueKind != JsonValueKind.String)
                 || !status.ValueEquals("ok") || !root.TryGetProperty("response", out JsonElement current))
