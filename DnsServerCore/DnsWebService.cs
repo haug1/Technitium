@@ -2762,40 +2762,20 @@ namespace DnsServerCore
 
         private void LoadWebServiceTlsCertificate(string tlsCertificatePath, string tlsCertificatePassword)
         {
-            FileInfo fileInfo = new FileInfo(tlsCertificatePath);
-
-            if (!fileInfo.Exists)
-                throw new ArgumentException("Web Service TLS certificate file does not exists: " + tlsCertificatePath);
-
-            switch (Path.GetExtension(tlsCertificatePath).ToLowerInvariant())
-            {
-                case ".pfx":
-                case ".p12":
-                    break;
-
-                default:
-                    throw new ArgumentException("Web Service TLS certificate file must be PKCS #12 formatted with .pfx or .p12 extension: " + tlsCertificatePath);
-            }
-
-            X509Certificate2Collection certificateCollection = X509CertificateLoader.LoadPkcs12CollectionFromFile(tlsCertificatePath, tlsCertificatePassword, X509KeyStorageFlags.PersistKeySet);
-            X509Certificate2 serverCertificate = null;
-
-            foreach (X509Certificate2 certificate in certificateCollection)
-            {
-                if (certificate.HasPrivateKey)
-                {
-                    serverCertificate = certificate;
-                    break;
-                }
-            }
-
-            if (serverCertificate is null)
-                throw new ArgumentException("Web Service TLS certificate file must contain a certificate with private key.");
-
-            ConfigureWebTlsOptions(SslStreamCertificateContext.Create(serverCertificate, certificateCollection, false));
-            _webServiceCertificateLastModifiedOn = fileInfo.LastWriteTimeUtc;
+            Pkcs12Certificate certificate = Pkcs12Certificate.Read(tlsCertificatePath, tlsCertificatePassword, X509KeyStorageFlags.PersistKeySet);
+            ConfigureWebTlsOptions(certificate.Context);
+            _webServiceCertificateLastModifiedOn = certificate.LastModified;
+            _webServiceCertificateFileHash = certificate.FileHash;
 
             _log.Write("Web Service TLS certificate was loaded: " + tlsCertificatePath);
+        }
+
+        private string _webServiceCertificateFileHash;
+
+        private ConfigurationWebCertificate.State CaptureWebCertificate()
+        {
+            return new ConfigurationWebCertificate.State(_webServiceUseSelfSignedTlsCertificate,
+                _webServiceTlsCertificatePath, _webServiceTlsCertificatePassword, _webServiceCertificateFileHash);
         }
 
         private void ConfigureWebTlsOptions(SslStreamCertificateContext certificate)
@@ -2820,6 +2800,7 @@ namespace DnsServerCore
         private void RemoveWebServiceTlsCertificate()
         {
             _webServiceSslServerAuthenticationOptions = null;
+            _webServiceCertificateFileHash = null;
 
             _webServiceTlsCertificatePath = null;
             _webServiceTlsCertificatePassword = null;
@@ -2914,12 +2895,13 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/tlsUnixSocket/enabled: A certificate is required by the configuration manifest.");
         }
 
-        private void ValidateManifestWebListeners(WebListeners listeners)
+        private void ValidateManifestWebListeners(WebListeners listeners, bool? candidateHasCertificate = null)
         {
+            bool hasCertificate = candidateHasCertificate ?? (_webServiceSslServerAuthenticationOptions is not null);
             ValidateManifestWebUnixSocket(listeners.HttpSocket, _webServiceEnableHttpUnixSocket, _webServiceHttpUnixSocket, "/web/httpUnixSocket");
             ValidateManifestWebUnixSocket(listeners.TlsSocket, _webServiceEnableTlsUnixSocket, _webServiceTlsUnixSocket, "/web/tlsUnixSocket");
             if (listeners.TlsSocket.HasValues && (listeners.TlsSocket.Enabled ?? _webServiceEnableTlsUnixSocket) &&
-                _webServiceSslServerAuthenticationOptions is null)
+                !hasCertificate)
                 throw new InvalidDataException("/web/tlsUnixSocket/enabled: Configure a web TLS certificate before enabling the socket.");
             string httpSocketPath = listeners.HttpSocket.Path ?? _webServiceHttpUnixSocket;
             string tlsSocketPath = listeners.TlsSocket.Path ?? _webServiceTlsUnixSocket;
@@ -2927,6 +2909,10 @@ namespace DnsServerCore
                 (listeners.HttpSocket.Enabled ?? _webServiceEnableHttpUnixSocket) && (listeners.TlsSocket.Enabled ?? _webServiceEnableTlsUnixSocket) &&
                 httpSocketPath is not null && httpSocketPath == tlsSocketPath)
                 throw new InvalidDataException("/web/tlsUnixSocket/path: HTTP and HTTPS sockets require distinct paths.");
+
+            if (candidateHasCertificate == false &&
+                ((listeners.TlsEnabled ?? _webServiceEnableTls) || (listeners.TlsSocket.Enabled ?? _webServiceEnableTlsUnixSocket)))
+                throw new InvalidDataException("/web/certificate: Disable web TLS and its Unix socket before removing their certificate.");
 
             if (!listeners.TlsEnabled.HasValue && !listeners.Http3Enabled.HasValue && !listeners.RedirectToTls.HasValue)
                 return;
@@ -2938,7 +2924,7 @@ namespace DnsServerCore
                 throw new InvalidDataException("/web/http3Enabled: HTTP/3 requires web TLS.");
             if (listeners.RedirectToTls == true && !tls)
                 throw new InvalidDataException("/web/redirectHttpToTls: Redirecting HTTP to HTTPS requires web TLS.");
-            if (tls && (listeners.TlsEnabled.HasValue || http3 || redirect) && _webServiceSslServerAuthenticationOptions is null)
+            if (tls && (listeners.TlsEnabled.HasValue || http3 || redirect) && !hasCertificate)
                 throw new InvalidDataException("/web/tlsEnabled: Configure a web TLS certificate before enabling TLS.");
             if (tls && http3)
                 DnsServer.ValidateQuicSupport("HTTP/3");
@@ -3132,6 +3118,7 @@ namespace DnsServerCore
 
             SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
             DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
+            string previousCertificateFileHash = _webServiceCertificateFileHash;
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
@@ -3143,6 +3130,7 @@ namespace DnsServerCore
                 {
                     _webServiceSslServerAuthenticationOptions = previousTlsOptions;
                     _webServiceCertificateLastModifiedOn = previousCertificateLastModified;
+                    _webServiceCertificateFileHash = previousCertificateFileHash;
                 }
 
                 throw;

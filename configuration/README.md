@@ -58,6 +58,8 @@ DNS certificate preview requires Settings modify permission when a path or passw
 
 The DNS listener policy applies live. Use `dns.listeners.reverseProxyAcl` for ordered proxy trust rules and `dns.listeners.useClientSubnetAsSource` to use ECS as the client source for trusted DNS peers. The `dns.listeners.http.realIpHeader` and `dns.listeners.http.helpRedirect` fields control HTTP proxy requests and the DoH help redirect. An empty or null DNS reverse-proxy ACL trusts no IP-based proxies. A null real-IP header restores `X-Real-IP`.
 
+Web console certificate settings can be previewed with Settings modify permission. Preview checks `web.certificate.path` and its optional password reference against the candidate HTTPS settings. Use `--include-preview-only` to inspect the certificate path and `web.useSelfSignedCertificate`. Applying these web certificate settings is pending.
+
 ## Previewing changes
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config plan path/to/technitium.json https://dns.example.test` against a running instance. Set `TECHNITIUM_CONFIG_API_TOKEN` to a token with Settings view permission. The command accepts HTTP for loopback development instances.

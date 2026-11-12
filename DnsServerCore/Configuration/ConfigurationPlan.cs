@@ -148,6 +148,8 @@ namespace DnsServerCore.Configuration
             ["/dns/listeners/http/helpRedirect"] = Field("enableDnsOverHttpHelpRedirect", true, canApply: true),
             ["/dns/listeners/http/realIpHeader"] = Field("dnsOverHttpRealIpHeader", "X-Real-IP", canApply: true),
             ["/dns/listeners/reverseProxyAcl"] = Field("dnsReverseProxyNetworkACL", Array.Empty<string>(), canApply: true),
+            ["/web/useSelfSignedCertificate"] = Field("webServiceUseSelfSignedTlsCertificate", false, restartWebService: true),
+            [ConfigurationWebCertificate.Path + "/path"] = Field<string>("webServiceTlsCertificatePath", null),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
@@ -251,6 +253,8 @@ namespace DnsServerCore.Configuration
                     dnsCertificate.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestDnsCertificate", out JsonElement certificate))
                     certificate.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestWebCertificate", out JsonElement webCertificate))
+                    webCertificate.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestProxyPassword", out JsonElement proxyPassword))
                     proxyPassword.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
@@ -1110,6 +1114,12 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path == ConfigurationWebCertificate.Path)
+            {
+                ConfigurationWebCertificate.Compare(desired, currentSettings, changes);
+                return;
+            }
+
             if (path == ConfigurationDnsCertificate.Path)
             {
                 ConfigurationDnsCertificate.Compare(desired, currentSettings,

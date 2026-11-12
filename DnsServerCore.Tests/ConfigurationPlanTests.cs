@@ -726,6 +726,58 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task WebCertificatePreviewValidatesTheFileAndTracksItsRevision()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_WEB_CERTIFICATE_PASSWORD";
+            const string password = "fixture-web-pfx-password";
+            const string manifest = """
+                {"schemaVersion":1,"web":{"tlsEnabled":true,
+                  "certificate":{"path":"console.pfx","password":{"environment":"TECHNITIUM_TEST_WEB_CERTIFICATE_PASSWORD"}}}}
+                """;
+            string? original = Environment.GetEnvironmentVariable(variable);
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, password);
+                string path = Path.Combine(server.ConfigurationDirectory, "console.pfx");
+                WriteCertificate(path);
+                JsonElement first = await PreviewAsync(server, manifest);
+                Assert.DoesNotContain(password, first.GetRawText());
+                Assert.Contains(first.GetProperty("changes").EnumerateArray(),
+                    change => change.GetProperty("path").GetString() == "/web/certificate/path" &&
+                        change.GetProperty("restartWebService").GetBoolean());
+
+                WriteCertificate(path);
+                JsonElement rotated = await PreviewAsync(server, manifest);
+                Assert.NotEqual(first.GetProperty("revision").GetString(), rotated.GetProperty("revision").GetString());
+
+                Environment.SetEnvironmentVariable(variable, "incorrect-fixture-password");
+                using var content = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/web/certificate", rejected.GetProperty("errorMessage").GetString());
+                Assert.DoesNotContain("incorrect-fixture-password", rejected.GetRawText());
+
+                JsonElement settings = await server.GetSettingsAsync();
+                Assert.False(settings.GetProperty("webServiceEnableTls").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, settings.GetProperty("webServiceTlsCertificatePath").ValueKind);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, original);
+            }
+
+            static void WriteCertificate(string path)
+            {
+                using var key = System.Security.Cryptography.RSA.Create(2048);
+                var request = new CertificateRequest("CN=console.test", key, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                    System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+                using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+                File.WriteAllBytes(path, certificate.Export(X509ContentType.Pkcs12, password));
+            }
+        }
+
+        [Fact]
         public async Task DnsCertificateApplyVerifiesThePreviewAndPreservesTheWorkingCertificate()
         {
             await using var server = await LoopbackWebService.StartAsync();

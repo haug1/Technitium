@@ -3062,40 +3062,8 @@ namespace DnsServerCore.Dns
 
         private static DnsCertificate ReadDnsCertificate(string tlsCertificatePath, string storedPath, string tlsCertificatePassword, X509KeyStorageFlags keyStorage)
         {
-            FileInfo fileInfo = new FileInfo(tlsCertificatePath);
-
-            if (!fileInfo.Exists)
-                throw new ArgumentException("DNS Server TLS certificate file does not exists: " + tlsCertificatePath);
-
-            switch (Path.GetExtension(tlsCertificatePath).ToLowerInvariant())
-            {
-                case ".pfx":
-                case ".p12":
-                    break;
-
-                default:
-                    throw new ArgumentException("DNS Server TLS certificate file must be PKCS #12 formatted with .pfx or .p12 extension: " + tlsCertificatePath);
-            }
-
-            byte[] data = File.ReadAllBytes(tlsCertificatePath);
-            X509Certificate2Collection certificateCollection = X509CertificateLoader.LoadPkcs12Collection(data, tlsCertificatePassword, keyStorage);
-            X509Certificate2 serverCertificate = null;
-
-            foreach (X509Certificate2 certificate in certificateCollection)
-            {
-                if (certificate.HasPrivateKey)
-                {
-                    serverCertificate = certificate;
-                    break;
-                }
-            }
-
-            if (serverCertificate is null)
-                throw new ArgumentException("DNS Server TLS certificate file must contain a certificate with private key.");
-
-            SslStreamCertificateContext certificateContext = SslStreamCertificateContext.Create(serverCertificate, certificateCollection,
-                offline: keyStorage == X509KeyStorageFlags.EphemeralKeySet);
-            return new DnsCertificate(storedPath, tlsCertificatePassword, certificateContext, fileInfo.LastWriteTimeUtc, Convert.ToHexString(SHA256.HashData(data)));
+            Pkcs12Certificate certificate = Pkcs12Certificate.Read(tlsCertificatePath, tlsCertificatePassword, keyStorage);
+            return new DnsCertificate(storedPath, tlsCertificatePassword, certificate.Context, certificate.LastModified, certificate.FileHash);
         }
 
         private void SetDnsCertificateState(DnsCertificate certificate)

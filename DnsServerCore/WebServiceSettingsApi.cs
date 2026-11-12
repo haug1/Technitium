@@ -594,10 +594,17 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
-                    _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest));
+                    ConfigurationWebCertificate.Preview? webCertificate = null;
+                    if (ConfigurationWebCertificate.IsDeclared(manifest))
+                    {
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                            throw new DnsWebServiceException("Access was denied.");
+                        webCertificate = ConfigurationWebCertificate.PreparePreview(manifest, _dnsWebService.CaptureWebCertificate(), _dnsWebService._log);
+                    }
+                    _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest), webCertificate?.HasCertificate);
                     CheckDnsCertificatePreviewPermission(manifest, sessionUser);
                     ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer, preview: true);
-                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, dnsCertificate: dnsCertificate);
+                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, dnsCertificate: dnsCertificate, webCertificate: webCertificate);
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
@@ -783,7 +790,7 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default)
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Preview? webCertificate = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
@@ -792,6 +799,8 @@ namespace DnsServerCore
                     WriteDnsSettings(writer, includeSecrets: false);
                     writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     ConfigurationDnsCertificate.WriteSnapshot(writer, _dnsWebService._dnsServer.CaptureDnsCertificate(), dnsCertificate, _configurationRevisionKey);
+                    if (webCertificate.HasValue)
+                        ConfigurationWebCertificate.WriteSnapshot(writer, webCertificate.Value, _configurationRevisionKey);
                     if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy))
                     {
                         string password = null;
