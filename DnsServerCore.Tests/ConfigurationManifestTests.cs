@@ -48,6 +48,8 @@ namespace DnsServerCore.Tests
         [InlineData("""{"schemaVersion":1,"logging":{"logQueries":true,"logQueries":false}}""", "/logging/logQueries", "Duplicate setting")]
         [InlineData("""{"schemaVersion":1,"zones":{"EXAMPLE.test":{},"example.test.":{}}}""", "/zones/example.test.", "Duplicate canonical DNS name")]
         [InlineData("""{"schemaVersion":1,"dns":{"tuning":{"clientTimeoutMs":999}}}""", "/dns/tuning/clientTimeoutMs", "outside the supported range")]
+        [InlineData("""{"schemaVersion":1,"web":{"tlsEnabled":false,"http3Enabled":true}}""", "/web/http3Enabled", "requires web TLS")]
+        [InlineData("""{"schemaVersion":1,"web":{"tlsEnabled":null,"redirectHttpToTls":true}}""", "/web/redirectHttpToTls", "requires web TLS")]
         public void RejectsInvalidManifestsWithFieldDiagnostics(string json, string field, string diagnostic)
         {
             string path = WriteManifest(json);

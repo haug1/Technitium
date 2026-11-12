@@ -2926,10 +2926,7 @@ namespace DnsServerCore
             bool tls = listeners.TlsEnabled ?? _webServiceEnableTls;
             bool http3 = listeners.Http3Enabled ?? _webServiceEnableHttp3;
             bool redirect = listeners.RedirectToTls ?? _webServiceHttpToTlsRedirect;
-            if (listeners.Http3Enabled == true && !tls)
-                throw new InvalidDataException("/web/http3Enabled: HTTP/3 requires web TLS.");
-            if (listeners.RedirectToTls == true && !tls)
-                throw new InvalidDataException("/web/redirectHttpToTls: Redirecting HTTP to HTTPS requires web TLS.");
+            ConfigurationManifest.ValidateWebTlsDependencies(tls, listeners.Http3Enabled == true, listeners.RedirectToTls == true);
             if (tls && (listeners.TlsEnabled.HasValue || http3 || redirect) && !hasCertificate)
                 throw new InvalidDataException("/web/tlsEnabled: Configure a web TLS certificate before enabling TLS.");
             if (tls && http3)

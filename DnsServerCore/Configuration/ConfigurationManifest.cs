@@ -167,6 +167,11 @@ namespace DnsServerCore.Configuration
 
             if (root.TryGetProperty("web", out JsonElement web))
             {
+                bool? tlsEnabled = web.TryGetProperty("tlsEnabled", out JsonElement tls)
+                    ? tls.ValueKind == JsonValueKind.True : null;
+                ValidateWebTlsDependencies(tlsEnabled,
+                    web.TryGetProperty("http3Enabled", out JsonElement http3) && http3.ValueKind == JsonValueKind.True,
+                    web.TryGetProperty("redirectHttpToTls", out JsonElement redirect) && redirect.ValueKind == JsonValueKind.True);
                 if (web.TryGetProperty("realIpHeader", out JsonElement realIp))
                     ReadWebHeader(realIp, realIp: true);
                 if (web.TryGetProperty("frameAncestors", out JsonElement frameAncestors))
@@ -183,6 +188,16 @@ namespace DnsServerCore.Configuration
                 ReadBlockListSources(sources);
 
             return new ConfigurationManifest(filePath, root.Clone());
+        }
+
+        internal static void ValidateWebTlsDependencies(bool? tlsEnabled, bool enableHttp3, bool redirectToTls)
+        {
+            if (tlsEnabled != false)
+                return;
+            if (enableHttp3)
+                throw new InvalidDataException("/web/http3Enabled: HTTP/3 requires web TLS.");
+            if (redirectToTls)
+                throw new InvalidDataException("/web/redirectHttpToTls: Redirecting HTTP to HTTPS requires web TLS.");
         }
 
         internal string GetServerDomain()
