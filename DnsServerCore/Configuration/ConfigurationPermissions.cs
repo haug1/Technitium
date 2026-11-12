@@ -47,14 +47,15 @@ namespace DnsServerCore.Configuration
 
             void AddScope(PermissionSection section, JsonElement value, string zone = null)
             {
-                if (value.ValueKind == JsonValueKind.Null)
+                if (value.ValueKind == JsonValueKind.Null || ReplacesGrants(value))
                 {
                     paths.Add(zone is null ? $"{Path}/{section}" : ZonePath(zone));
                     return;
                 }
                 foreach (JsonProperty map in value.EnumerateObject())
-                    foreach (JsonProperty grant in map.Value.EnumerateObject())
-                        paths.Add(GrantPath(section, map.NameEquals("groups"), grant.Name, zone));
+                    if (map.Name is "users" or "groups")
+                        foreach (JsonProperty grant in map.Value.EnumerateObject())
+                            paths.Add(GrantPath(section, map.NameEquals("groups"), grant.Name, zone));
             }
         }
 
@@ -205,13 +206,18 @@ namespace DnsServerCore.Configuration
                     return;
                 }
 
+                bool replace = ReplacesGrants(value);
                 if (value.TryGetProperty("users", out JsonElement userMap))
-                    ReadMap(section, false, userMap, currentUsers, zone);
+                    ReadMap(section, false, userMap, currentUsers, zone, replace);
+                else if (replace)
+                    RemoveOmittedGrants(section, false, currentUsers, zone, []);
                 if (value.TryGetProperty("groups", out JsonElement groupMap))
-                    ReadMap(section, true, groupMap, currentGroups, zone);
+                    ReadMap(section, true, groupMap, currentGroups, zone, replace);
+                else if (replace)
+                    RemoveOmittedGrants(section, true, currentGroups, zone, []);
             }
 
-            void ReadMap(PermissionSection section, bool group, JsonElement map, Dictionary<string, PermissionFlag> current, string zone)
+            void ReadMap(PermissionSection section, bool group, JsonElement map, Dictionary<string, PermissionFlag> current, string zone, bool replace)
             {
                 var names = new HashSet<string>(StringComparer.Ordinal);
                 foreach (JsonProperty entry in map.EnumerateObject())
@@ -242,6 +248,17 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}: The principal does not exist in the effective configuration.");
 
                     AddChange(section, group, name, current, desired, zone);
+                }
+                if (replace)
+                    RemoveOmittedGrants(section, group, current, zone, names);
+            }
+
+            void RemoveOmittedGrants(PermissionSection section, bool group, Dictionary<string, PermissionFlag> current, string zone, HashSet<string> names)
+            {
+                foreach (string name in current.Keys.Order(StringComparer.Ordinal))
+                {
+                    if (!names.Contains(name) && (!group || !IsRequiredGrant(section, name)))
+                        AddChange(section, group, name, current, null, zone);
                 }
             }
 
@@ -281,6 +298,9 @@ namespace DnsServerCore.Configuration
             group == Group.ADMINISTRATORS.ToLowerInvariant() ||
             (section == PermissionSection.Zones && group == Group.DNS_ADMINISTRATORS.ToLowerInvariant()) ||
             (section == PermissionSection.DhcpServer && group == Group.DHCP_ADMINISTRATORS.ToLowerInvariant());
+
+        private static bool ReplacesGrants(JsonElement value) =>
+            value.TryGetProperty("replace", out JsonElement replace) && replace.GetBoolean();
 
         internal static Dictionary<string, PermissionFlag> Defaults(PermissionSection section)
         {
@@ -326,6 +346,7 @@ namespace DnsServerCore.Configuration
         {
             return new JsonObject
             {
+                ["replace"] = true,
                 ["users"] = WriteGrants(permission?.UserPermissions.Select(entry => (entry.Key.Username, entry.Value)) ?? []),
                 ["groups"] = WriteGrants(permission?.GroupPermissions.Select(entry => (entry.Key.Name, entry.Value)) ?? [])
             };

@@ -24,7 +24,11 @@ namespace DnsServerCore.Tests
             await using var destination = await LoopbackWebService.StartAsync();
             string manifest = Path.Combine(source.ConfigurationDirectory, "cli-migration.json");
             await File.WriteAllTextAsync(manifest, """
-                {"schemaVersion":1,"logging":{"retentionDays":42},
+                {"schemaVersion":1,"logging":{"retentionDays":42},"statistics":{"retentionDays":73},
+                 "dns":{"authoritative":{"defaultRecordTtl":600}},"web":{"frameAncestors":"'self'"},
+                 "dhcp":{"scopes":{"Migration":{"enabled":false,"startingAddress":"192.0.2.10",
+                    "endingAddress":"192.0.2.50","subnetMask":"255.255.255.0",
+                    "reservations":{"02-00-00-00-00-11":{"address":"192.0.2.21","hostName":"fixture"}}}}},
                  "zones":{"cli-migration.test":{"type":"Primary","records":[
                    {"owner":"www.cli-migration.test","type":"A","ttl":60,"data":{"zoneFile":"192.0.2.82"}}
                  ]}}}
@@ -61,20 +65,15 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain(blockListUrl, firstExport.Error);
 
             JsonNode exported = JsonNode.Parse(firstExport.Output)!;
-            var migration = new JsonObject
-            {
-                ["schemaVersion"] = exported["schemaVersion"]!.DeepClone(),
-                ["logging"] = exported["logging"]!.DeepClone(),
-                ["blocklists"] = exported["blocklists"]!.DeepClone(),
-                ["auth"] = exported["auth"]!.DeepClone(),
-                ["zones"] = new JsonObject { ["cli-migration.test"] = exported["zones"]!["cli-migration.test"]!.DeepClone() }
-            };
-            JsonNode keys = exported["dns"]!["tsigKeys"]!.DeepClone();
+            var destinationSettings = await destination.GetSettingsAsync();
+            exported["dns"]!["localEndpoints"] = JsonNode.Parse(destinationSettings.GetProperty("dnsServerLocalEndPoints").GetRawText());
+            exported["web"]!["httpPort"] = destinationSettings.GetProperty("webServiceHttpPort").GetInt32();
+            exported["web"]!["tlsPort"] = destinationSettings.GetProperty("webServiceTlsPort").GetInt32();
+            JsonNode migration = exported.DeepClone();
             string variable = "TECHNITIUM_TEST_CLI_TSIG_" + Guid.NewGuid().ToString("N");
             string passwordVariable = variable + "_PASSWORD";
             string blockListVariable = variable + "_BLOCKLIST_URL";
-            keys[keyName]!["secret"] = new JsonObject { ["environment"] = variable };
-            migration["dns"] = new JsonObject { ["tsigKeys"] = keys };
+            migration["dns"]!["tsigKeys"]![keyName]!["secret"] = new JsonObject { ["environment"] = variable };
             migration["auth"]!["users"]!["migration-reader"]!["password"] = new JsonObject { ["environment"] = passwordVariable };
             migration["blocklists"]!["sources"] = new JsonArray(new JsonObject { ["environment"] = blockListVariable });
             string migrationPath = Path.Combine(destination.ConfigurationDirectory, "cli-migration.json");
@@ -98,8 +97,20 @@ namespace DnsServerCore.Tests
                 var answer = await destination.QueryAsync("www.cli-migration.test", DnsResourceRecordType.A,
                     new TsigKey(keyName, secret, TsigAlgorithm.HMAC_SHA256));
                 Assert.Equal("192.0.2.82", Assert.IsType<DnsARecordData>(Assert.Single(answer.Answer).RDATA).Address.ToString());
-                Assert.Contains("No setting changes.", (await RunAsync(destination, "plan", migrationPath,
-                    destination.Client.BaseAddress!.AbsoluteUri)).Output);
+                string destinationUrl = destination.Client.BaseAddress!.AbsoluteUri;
+                JsonNode migrated = JsonNode.Parse((await RunAsync(destination, "export", destinationUrl)).Output)!;
+                foreach (var (section, settingsExport) in exported.AsObject())
+                    Assert.True(JsonNode.DeepEquals(settingsExport, migrated[section]), $"Migrated section {section} differs.");
+                var grant = await destination.CallAsync(
+                    "admin/permissions/set?section=Settings&groupPermissions=" +
+                    Uri.EscapeDataString("MigrationReaders|true|false|false|DNS Administrators|true|true|false"), destination.AdminToken);
+                Assert.Equal("error", grant.GetProperty("status").GetString());
+                Assert.Contains("/auth/permissions/Settings/groups/dns administrators", grant.GetProperty("errorMessage").GetString());
+                var unchanged = await RunAsync(destination, "plan", migrationPath, destinationUrl);
+                Assert.Contains("No setting changes.", unchanged.Output);
+                var repeated = await RunAsync(destination, "apply", migrationPath, destinationUrl, ReadOutputValue(unchanged.Output, "Revision "));
+                Assert.Contains("Configuration applied.", repeated.Output);
+                Assert.DoesNotContain("Operation", repeated.Output);
             }
             finally
             {

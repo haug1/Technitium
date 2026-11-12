@@ -474,6 +474,7 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
+                      "replace": {"type": "boolean"},
                       "users": {
                         "type": "object",
                         "additionalProperties": {
@@ -933,6 +934,7 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "replace": {"type": "boolean"},
                 "users": {
                   "type": "object",
                   "additionalProperties": {
