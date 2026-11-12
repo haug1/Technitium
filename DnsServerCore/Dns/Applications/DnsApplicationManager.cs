@@ -589,7 +589,7 @@ namespace DnsServerCore.Dns.Applications
                 string appPath = ConfigurationApplications.AppPath(name);
                 if (!ConfigurationApplications.IsSafeName(name) || !declared.Contains(appPath) ||
                     (segments.Length != 1 || path != appPath) &&
-                    (segments.Length != 2 || segments[1] is not ("configuration" or "version") || path != appPath + "/" + segments[1]))
+                    (segments.Length != 2 || segments[1] is not ("configuration" or "version" or "packageSha256") || path != appPath + "/" + segments[1]))
                     throw new InvalidDataException("/apps/packages: Invalid cluster app ownership path.");
                 if (!transfers.TryGetValue(name, out ClusterAppTransfer transfer))
                 {

@@ -21,6 +21,9 @@ namespace DnsServerCore.Configuration
 
         internal static string AppPath(string name) => ConfigurationPlan.AppendPath(Path, name);
 
+        internal static bool HasPackageDigestPins(IEnumerable<string> paths) =>
+            paths.Any(path => path.LastIndexOf('/') > Path.Length && path.EndsWith("/packageSha256", StringComparison.Ordinal));
+
         internal static string[] GetOwnedPaths(ConfigurationManifest manifest)
         {
             if (!IsDeclared(manifest))

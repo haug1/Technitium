@@ -76,6 +76,7 @@ namespace DnsServerCore
                 jsonWriter.WriteBoolean("supportsDeclarativeUsers", true);
                 jsonWriter.WriteBoolean("supportsDeclarativePermissions", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeApps", true);
+                jsonWriter.WriteBoolean("supportsDeclarativeAppDigests", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeClusterHandoff", true);
 
                 if (_dnsWebService._clusterManager.ClusterInitialized)
@@ -355,9 +356,10 @@ namespace DnsServerCore
                 bool supportsDeclarativeUsers = request.GetQueryOrForm("supportsDeclarativeUsers", bool.Parse, false);
                 bool supportsDeclarativePermissions = request.GetQueryOrForm("supportsDeclarativePermissions", bool.Parse, false);
                 bool supportsDeclarativeApps = request.GetQueryOrForm("supportsDeclarativeApps", bool.Parse, false);
+                bool supportsDeclarativeAppDigests = request.GetQueryOrForm("supportsDeclarativeAppDigests", bool.Parse, false);
                 ClusterNode secondaryNode = _dnsWebService._clusterManager.JoinCluster(secondaryNodeId, secondaryNodeUrl,
                     secondaryNodeIpAddresses, secondaryNodeCertificate, supportsDeclarativeOptions, supportsDeclarativeBlockLists,
-                    supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits, supportsDeclarativeProxy, supportsDeclarativeDnsTuning, supportsDeclarativeTsig, supportsDeclarativeLdap, supportsDeclarativeSso, supportsDeclarativeGroups, supportsDeclarativeUsers, supportsDeclarativePermissions, supportsDeclarativeApps);
+                    supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits, supportsDeclarativeProxy, supportsDeclarativeDnsTuning, supportsDeclarativeTsig, supportsDeclarativeLdap, supportsDeclarativeSso, supportsDeclarativeGroups, supportsDeclarativeUsers, supportsDeclarativePermissions, supportsDeclarativeApps, supportsDeclarativeAppDigests);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Secondary node '" + secondaryNode.ToString() + "' joined the Cluster (" + _dnsWebService._clusterManager.ClusterDomain + ") successfully.");
 

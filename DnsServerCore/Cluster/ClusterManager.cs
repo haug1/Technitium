@@ -870,7 +870,7 @@ namespace DnsServerCore.Cluster
             return Convert.ToHexString(SHA256.HashData(payload));
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false, bool supportsDeclarativeProxy = false, bool supportsDeclarativeDnsTuning = false, bool supportsDeclarativeTsig = false, bool supportsDeclarativeLdap = false, bool supportsDeclarativeSso = false, bool supportsDeclarativeGroups = false, bool supportsDeclarativeUsers = false, bool supportsDeclarativePermissions = false, bool supportsDeclarativeApps = false)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists = false, bool supportsDeclarativeDnsPolicy = false, bool supportsDeclarativeResolverPolicy = false, bool supportsDeclarativeRateLimits = false, bool supportsDeclarativeProxy = false, bool supportsDeclarativeDnsTuning = false, bool supportsDeclarativeTsig = false, bool supportsDeclarativeLdap = false, bool supportsDeclarativeSso = false, bool supportsDeclarativeGroups = false, bool supportsDeclarativeUsers = false, bool supportsDeclarativePermissions = false, bool supportsDeclarativeApps = false, bool supportsDeclarativeAppDigests = false)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
@@ -921,6 +921,10 @@ namespace DnsServerCore.Cluster
             if (_dnsWebService.DnsServer.DnsApplicationManager.ManagedPaths.Count > 0 && !supportsDeclarativeApps)
                 throw new DnsServerException("/apps/packages: The Secondary must support declarative apps before joining.");
 
+            if (!supportsDeclarativeAppDigests &&
+                ConfigurationApplications.HasPackageDigestPins(_dnsWebService.DnsServer.DnsApplicationManager.ManagedPaths))
+                throw new DnsServerException("/apps/packages: The Secondary must support declarative app package digests before joining.");
+
             string secondaryNodeDomain = secondaryNodeUrl.Host.ToLowerInvariant();
 
             if (!secondaryNodeDomain.EndsWith("." + _clusterDomain, StringComparison.OrdinalIgnoreCase))
@@ -952,7 +956,8 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeGroups = supportsDeclarativeGroups,
                 SupportsDeclarativeUsers = supportsDeclarativeUsers,
                 SupportsDeclarativePermissions = supportsDeclarativePermissions,
-                SupportsDeclarativeApps = supportsDeclarativeApps
+                SupportsDeclarativeApps = supportsDeclarativeApps,
+                SupportsDeclarativeAppDigests = supportsDeclarativeAppDigests
             };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
@@ -1380,13 +1385,15 @@ namespace DnsServerCore.Cluster
             return peers.Select(peer => peer.Id).ToArray();
         }
 
-        internal int[] CheckDeclarativeAppPeers()
+        internal int[] CheckDeclarativeAppPeers(bool requirePackageDigests = false)
         {
             var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id).ToArray();
             foreach (ClusterNode peer in peers)
             {
                 if (!peer.SupportsDeclarativeApps)
                     throw new InvalidDataException($"/apps/packages: Node '{peer.Name}' has not advertised support for declarative apps.");
+                if (requirePackageDigests && !peer.SupportsDeclarativeAppDigests)
+                    throw new InvalidDataException($"/apps/packages: Node '{peer.Name}' has not advertised support for declarative app package digests.");
             }
             return peers.Select(peer => peer.Id).ToArray();
         }
@@ -2004,7 +2011,7 @@ namespace DnsServerCore.Cluster
 
                 //join cluster
                 primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
-                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, supportsDeclarativeProxy: true, supportsDeclarativeDnsTuning: true, supportsDeclarativeTsig: true, supportsDeclarativeLdap: true, supportsDeclarativeSso: true, supportsDeclarativeGroups: true, supportsDeclarativeUsers: true, supportsDeclarativePermissions: true, supportsDeclarativeApps: true, cancellationToken);
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, supportsDeclarativeBlockLists: true, supportsDeclarativeDomainLists: true, supportsDeclarativeDnsPolicy: true, supportsDeclarativeResolverPolicy: true, supportsDeclarativeRateLimits: true, supportsDeclarativeProxy: true, supportsDeclarativeDnsTuning: true, supportsDeclarativeTsig: true, supportsDeclarativeLdap: true, supportsDeclarativeSso: true, supportsDeclarativeGroups: true, supportsDeclarativeUsers: true, supportsDeclarativePermissions: true, supportsDeclarativeApps: true, cancellationToken, supportsDeclarativeAppDigests: true);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);

@@ -3235,12 +3235,13 @@ namespace DnsServerCore
                 DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
                 apps ??= ConfigurationApplications.Prepare(manifest, manager);
                 int[] appPeers = ConfigurationPlan.CheckClusterAppSupport(manifest, _clusterManager, apps);
+                string[] appOwnership = ConfigurationApplications.GetOwnedPaths(manifest);
                 Action checkAppPeers = appPeers is null ? null : () =>
                 {
-                    if (!_clusterManager.CheckDeclarativeAppPeers().SequenceEqual(appPeers))
+                    if (!_clusterManager.CheckDeclarativeAppPeers(ConfigurationApplications.HasPackageDigestPins(appOwnership)).SequenceEqual(appPeers))
                         throw new InvalidDataException("/apps/packages: Cluster membership changed during apply. Create a new preview.");
                 };
-                await ConfigurationApplications.ApplyAsync(manager, apps, secondary ? null : ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>
+                await ConfigurationApplications.ApplyAsync(manager, apps, secondary ? null : appOwnership, (writeApps, appFiles) =>
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),

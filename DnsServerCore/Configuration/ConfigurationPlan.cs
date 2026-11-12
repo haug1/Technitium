@@ -948,10 +948,11 @@ namespace DnsServerCore.Configuration
                 }
             }
 
-            if (!manager.OwnershipFromPrimary && manager.ManagedPaths.SequenceEqual(ConfigurationApplications.GetOwnedPaths(manifest)) &&
+            string[] desiredOwnership = ConfigurationApplications.GetOwnedPaths(manifest);
+            if (!manager.OwnershipFromPrimary && manager.ManagedPaths.SequenceEqual(desiredOwnership) &&
                 (entries is null || !entries.Any(entry => entry.Remove || entry.InstallName is not null || entry.Before != entry.After)))
                 return null;
-            return cluster.CheckDeclarativeAppPeers();
+            return cluster.CheckDeclarativeAppPeers(ConfigurationApplications.HasPackageDigestPins(desiredOwnership));
         }
 
         private static void CheckClusterPermissionRole(ConfigurationManifest manifest, ClusterManager cluster)

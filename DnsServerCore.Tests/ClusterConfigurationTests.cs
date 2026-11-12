@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using DnsServerCore.HttpApi;
 using System.Text;
@@ -494,6 +495,29 @@ namespace DnsServerCore.Tests
                 "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", primary.AdminToken);
             LoopbackWebService.AssertOk(initialized);
             JsonElement primaryNode = Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
+            string digest = Convert.ToHexString(SHA256.HashData(package.ToArray()));
+            string clear = $$"""{"schemaVersion":1,"apps":{"packages":{"Fixture":{"configuration":null,"packageSha256":"{{digest}}"} } } }""";
+            var primaryUrl = new Uri(primaryNode.GetProperty("url").GetString()!);
+            using (var certificate = X509CertificateLoader.LoadPkcs12FromFile(
+                Path.Combine(primary.ConfigurationDirectory, "self-signed-cert.pfx"), null))
+            using (var legacy = new HttpApiClient(new Uri($"https://127.0.0.1:{primaryUrl.Port}/"), ipv6Mode: default, ignoreCertificateErrors: true))
+            {
+                legacy.UseApiToken(primary.AdminToken);
+                const int legacyId = 1235;
+                await legacy.JoinClusterWithCapabilitiesAsync(legacyId, new Uri("https://legacy.cluster.test:53443/"),
+                    [IPAddress.Loopback], certificate, supportsDeclarativeClusterOptions: false, supportsDeclarativeBlockLists: false,
+                    supportsDeclarativeDomainLists: false, supportsDeclarativeDnsPolicy: false, supportsDeclarativeResolverPolicy: false,
+                    supportsDeclarativeRateLimits: false, supportsDeclarativeProxy: false, supportsDeclarativeDnsTuning: false,
+                    supportsDeclarativeTsig: false, supportsDeclarativeLdap: false, supportsDeclarativeSso: false,
+                    supportsDeclarativeGroups: false, supportsDeclarativeUsers: false, supportsDeclarativePermissions: false,
+                    supportsDeclarativeApps: true, cancellationToken: default);
+                using var blockedBody = new StringContent(clear, Encoding.UTF8, "application/json");
+                JsonElement blocked = await primary.CallAsync("settings/config/plan", primary.AdminToken, blockedBody);
+                Assert.Equal("error", blocked.GetProperty("status").GetString());
+                Assert.Contains("has not advertised support for declarative app package digests", blocked.GetProperty("errorMessage").GetString());
+                await legacy.DeleteSecondaryNodeAsync(legacyId);
+            }
+
             using var join = new FormUrlEncodedContent([
                 new("secondaryNodeIpAddresses", "127.0.0.1"),
                 new("primaryNodeUrl", primaryNode.GetProperty("url").GetString()!),
@@ -521,7 +545,6 @@ namespace DnsServerCore.Tests
             }),
                 "The Secondary did not transfer the cluster zone.");
 
-            const string clear = """{"schemaVersion":1,"apps":{"packages":{"Fixture":{"configuration":null}}}}""";
             using (var secondaryBody = new StringContent(clear, Encoding.UTF8, "application/json"))
             {
                 JsonElement denied = await secondary.CallAsync("settings/config/plan", token, secondaryBody);
@@ -533,6 +556,8 @@ namespace DnsServerCore.Tests
                 "The Secondary did not clear the installed app's configuration.");
             Assert.Contains((await ReadSecondaryAppAsync()).GetProperty("managedSettings").EnumerateArray(),
                 path => path.ValueEquals("/apps/packages/Fixture/configuration"));
+            Assert.Contains((await ReadSecondaryAppAsync()).GetProperty("managedSettings").EnumerateArray(),
+                path => path.ValueEquals("/apps/packages/Fixture/packageSha256"));
             using (var edit = new FormUrlEncodedContent([new("config", "local replacement")]))
             {
                 JsonElement denied = await secondary.CallAsync("apps/config/set?name=Fixture", token, edit);

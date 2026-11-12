@@ -510,7 +510,16 @@ namespace DnsServerCore.HttpApi
                 supportsDeclarativeSso, supportsDeclarativeGroups, supportsDeclarativeUsers, supportsDeclarativePermissions,
                 supportsDeclarativeApps: false, cancellationToken);
 
-        public async Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists, bool supportsDeclarativeDnsPolicy, bool supportsDeclarativeResolverPolicy, bool supportsDeclarativeRateLimits, bool supportsDeclarativeProxy, bool supportsDeclarativeDnsTuning, bool supportsDeclarativeTsig, bool supportsDeclarativeLdap, bool supportsDeclarativeSso, bool supportsDeclarativeGroups, bool supportsDeclarativeUsers, bool supportsDeclarativePermissions, bool supportsDeclarativeApps, CancellationToken cancellationToken)
+        public Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists, bool supportsDeclarativeDnsPolicy, bool supportsDeclarativeResolverPolicy, bool supportsDeclarativeRateLimits, bool supportsDeclarativeProxy, bool supportsDeclarativeDnsTuning, bool supportsDeclarativeTsig, bool supportsDeclarativeLdap, bool supportsDeclarativeSso, bool supportsDeclarativeGroups, bool supportsDeclarativeUsers, bool supportsDeclarativePermissions, bool supportsDeclarativeApps, CancellationToken cancellationToken) =>
+            JoinClusterWithCapabilitiesAsync(
+                secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, secondaryNodeCertificate,
+                supportsDeclarativeClusterOptions, supportsDeclarativeBlockLists, supportsDeclarativeDomainLists,
+                supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits,
+                supportsDeclarativeProxy, supportsDeclarativeDnsTuning, supportsDeclarativeTsig, supportsDeclarativeLdap,
+                supportsDeclarativeSso, supportsDeclarativeGroups, supportsDeclarativeUsers, supportsDeclarativePermissions,
+                supportsDeclarativeApps, cancellationToken, supportsDeclarativeAppDigests: false);
+
+        public async Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, bool supportsDeclarativeBlockLists, bool supportsDeclarativeDomainLists, bool supportsDeclarativeDnsPolicy, bool supportsDeclarativeResolverPolicy, bool supportsDeclarativeRateLimits, bool supportsDeclarativeProxy, bool supportsDeclarativeDnsTuning, bool supportsDeclarativeTsig, bool supportsDeclarativeLdap, bool supportsDeclarativeSso, bool supportsDeclarativeGroups, bool supportsDeclarativeUsers, bool supportsDeclarativePermissions, bool supportsDeclarativeApps, CancellationToken cancellationToken, bool supportsDeclarativeAppDigests)
         {
             if (!_loggedIn)
                 throw new HttpApiClientException("No active session exists. Please login and try again.");
@@ -544,6 +553,8 @@ namespace DnsServerCore.HttpApi
                 capability += "&supportsDeclarativePermissions=true";
             if (supportsDeclarativeApps)
                 capability += "&supportsDeclarativeApps=true";
+            if (supportsDeclarativeAppDigests)
+                capability += "&supportsDeclarativeAppDigests=true";
             Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primary/join?secondaryNodeId={secondaryNodeId}&secondaryNodeUrl={Uri.EscapeDataString(secondaryNodeUrl.OriginalString)}&secondaryNodeIpAddresses={Uri.EscapeDataString(secondaryNodeIpAddresses.Join())}&secondaryNodeCertificate={Base64Url.EncodeToString(secondaryNodeCertificate.Export(X509ContentType.Cert))}{capability}", cancellationToken);
 
             using JsonDocument jsonDoc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
