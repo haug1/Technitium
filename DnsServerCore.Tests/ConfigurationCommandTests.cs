@@ -44,6 +44,9 @@ namespace DnsServerCore.Tests
             string secret = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
             LoopbackWebService.AssertOk(await source.CallAsync(
                 "settings/set?tsigKeys=" + Uri.EscapeDataString($"{keyName}|{secret}|hmac-sha256"), source.AdminToken));
+            const string blockListUrl = "https://example.test/list?token=fixture-migration-token";
+            LoopbackWebService.AssertOk(await source.CallAsync(
+                "settings/set?blockListUpdateIntervalHours=0&blockListUrls=" + Uri.EscapeDataString(blockListUrl), source.AdminToken));
             string sourceUrl = source.Client.BaseAddress!.AbsoluteUri;
             var firstExport = await RunAsync(source, "export", sourceUrl);
             Assert.Equal(firstExport.Output, (await RunAsync(source, "export", sourceUrl)).Output);
@@ -53,31 +56,41 @@ namespace DnsServerCore.Tests
             Assert.Contains("Supply separately /auth/users/migration-reader/password", firstExport.Error);
             Assert.DoesNotContain(password, firstExport.Output);
             Assert.DoesNotContain(password, firstExport.Error);
+            Assert.Contains("Supply separately /blocklists/sources", firstExport.Error);
+            Assert.DoesNotContain(blockListUrl, firstExport.Output);
+            Assert.DoesNotContain(blockListUrl, firstExport.Error);
 
             JsonNode exported = JsonNode.Parse(firstExport.Output)!;
             var migration = new JsonObject
             {
                 ["schemaVersion"] = exported["schemaVersion"]!.DeepClone(),
                 ["logging"] = exported["logging"]!.DeepClone(),
+                ["blocklists"] = exported["blocklists"]!.DeepClone(),
                 ["auth"] = exported["auth"]!.DeepClone(),
                 ["zones"] = new JsonObject { ["cli-migration.test"] = exported["zones"]!["cli-migration.test"]!.DeepClone() }
             };
             JsonNode keys = exported["dns"]!["tsigKeys"]!.DeepClone();
             string variable = "TECHNITIUM_TEST_CLI_TSIG_" + Guid.NewGuid().ToString("N");
             string passwordVariable = variable + "_PASSWORD";
+            string blockListVariable = variable + "_BLOCKLIST_URL";
             keys[keyName]!["secret"] = new JsonObject { ["environment"] = variable };
             migration["dns"] = new JsonObject { ["tsigKeys"] = keys };
             migration["auth"]!["users"]!["migration-reader"]!["password"] = new JsonObject { ["environment"] = passwordVariable };
+            migration["blocklists"]!["sources"] = new JsonArray(new JsonObject { ["environment"] = blockListVariable });
             string migrationPath = Path.Combine(destination.ConfigurationDirectory, "cli-migration.json");
             await File.WriteAllTextAsync(migrationPath, migration.ToJsonString());
             try
             {
                 Environment.SetEnvironmentVariable(variable, secret);
                 Environment.SetEnvironmentVariable(passwordVariable, password);
+                Environment.SetEnvironmentVariable(blockListVariable, blockListUrl);
                 await RunAsync(destination, "validate", migrationPath);
                 await ApplyAsync(destination, migrationPath);
                 await destination.RestartAsync();
-                Assert.Equal(42, (await destination.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+                var settings = await destination.GetSettingsAsync();
+                Assert.Equal(42, settings.GetProperty("maxLogFileDays").GetInt32());
+                Assert.Equal(blockListUrl, Assert.Single(settings.GetProperty("blockListUrls").EnumerateArray()).GetString());
+                Assert.Equal(0, settings.GetProperty("blockListUpdateIntervalHours").GetInt32());
                 string reader = await destination.LoginAsync("migration-reader", password);
                 LoopbackWebService.AssertOk(await destination.CallAsync("settings/get", reader));
                 Assert.Equal("error", (await destination.CallAsync("settings/set?maxLogFileDays=180", reader))
@@ -92,6 +105,7 @@ namespace DnsServerCore.Tests
             {
                 Environment.SetEnvironmentVariable(variable, null);
                 Environment.SetEnvironmentVariable(passwordVariable, null);
+                Environment.SetEnvironmentVariable(blockListVariable, null);
             }
         }
 
