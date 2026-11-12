@@ -181,8 +181,8 @@ namespace DnsServerCore.Configuration
                 return;
 
             IReadOnlyList<NameServerAddress> servers = GetForwardingPolicy(manifest).Servers;
-            NetProxyType proxyType = snapshot.TryGetProperty("proxy", out JsonElement currentProxy) && currentProxy.ValueKind == JsonValueKind.Object
-                ? Enum.Parse<NetProxyType>(currentProxy.GetProperty("type").GetString()) : NetProxyType.None;
+            NetProxyType proxyType = snapshot.TryGetProperty("proxy", out JsonElement currentProxy) && currentProxy.ValueKind == JsonValueKind.Object && currentProxy.TryGetProperty("type", out JsonElement currentType)
+                ? Enum.Parse<NetProxyType>(currentType.GetString()) : NetProxyType.None;
             if (dns.TryGetProperty("proxy", out JsonElement proxy) && proxy.TryGetProperty("type", out JsonElement type))
             {
                 NetProxyType candidate = type.ValueKind == JsonValueKind.Null ? NetProxyType.None : Enum.Parse<NetProxyType>(type.GetString());
@@ -211,8 +211,8 @@ namespace DnsServerCore.Configuration
                 {
                     if (manifest.Settings.TryGetProperty("dns", out JsonElement dns) && dns.TryGetProperty("proxy", out _))
                         proxy.WriteTo(writer);
-                    else if (proxy.ValueKind == JsonValueKind.Object)
-                        proxy.GetProperty("type").WriteTo(writer);
+                    else if (proxy.ValueKind == JsonValueKind.Object && proxy.TryGetProperty("type", out JsonElement proxyType))
+                        proxyType.WriteTo(writer);
                 }
                 if (currentSettings.TryGetProperty("manifestProxyPassword", out JsonElement proxyPassword))
                     proxyPassword.WriteTo(writer);
@@ -232,7 +232,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, ConfigurationProxy.Candidate proxy)
         {
             CheckApplySupport(manifest);
 
@@ -244,7 +244,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), alreadyActive, listenerTuningStaged, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), proxy, alreadyActive, listenerTuningStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -395,9 +395,13 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        internal static void ValidateForwarding(ConfigurationManifest manifest, NetProxyType proxyType)
+        internal static ConfigurationProxy.Candidate PrepareProxy(ConfigurationManifest manifest, DnsServer dns)
         {
-            DnsServer.ValidateForwardingServers(GetForwardingPolicy(manifest).Servers, proxyType);
+            ConfigurationProxy.Candidate proxy = ConfigurationProxy.Prepare(manifest, dns.Proxy);
+            NetProxyType previous = dns.Proxy?.Type ?? NetProxyType.None;
+            NetProxyType effective = proxy.Managed == 0 ? previous : proxy.Proxy?.Type ?? NetProxyType.None;
+            DnsServer.ValidateForwardingServers(GetForwardingPolicy(manifest).Servers ?? (effective != previous ? dns.Forwarders : null), effective);
+            return proxy;
         }
 
         private static DnsServer.ForwardingPolicy GetForwardingPolicy(ConfigurationManifest manifest)
@@ -611,6 +615,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/dns/tuning: Applying DNS tuning to a cluster is not implemented.");
             if (GetRateLimitPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/rateLimits: Applying query-rate limits to a cluster is not implemented.");
+            if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy) && proxy.EnumerateObject().Any())
+                throw new InvalidDataException("/dns/proxy: Applying outbound proxy settings to a cluster is not implemented.");
             if (GetForwardingPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/forwarding: Applying forwarding policy to a cluster is not implemented.");
             if (GetBlockingPolicy(manifest) != default)
@@ -635,7 +641,7 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if ((_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path == "/dns/proxy" || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket"))
                 return;
 
@@ -740,14 +746,18 @@ namespace DnsServerCore.Configuration
                 section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
             }
 
-            if (includePreviewOnly && currentSettings.TryGetProperty("proxy", out JsonElement currentProxy) && currentProxy.ValueKind == JsonValueKind.Object)
+            if (currentSettings.TryGetProperty("proxy", out JsonElement currentProxy))
             {
                 var proxy = new JsonObject();
                 foreach (string field in new[] { "type", "address", "port", "username", "bypass" })
                 {
-                    if (currentProxy.TryGetProperty(field, out JsonElement value))
+                    if (currentProxy.ValueKind == JsonValueKind.Object && currentProxy.TryGetProperty(field, out JsonElement value))
                         proxy.Add(field, JsonNode.Parse(value.GetRawText()));
                 }
+                if (proxy["type"] is JsonValue type && type.GetValue<string>() != nameof(NetProxyType.None) && !proxy.ContainsKey("username"))
+                    proxy.Add("username", null);
+                if (currentProxy.ValueKind == JsonValueKind.Null)
+                    proxy.Add("type", nameof(NetProxyType.None));
                 if (proxy.Count > 0)
                     manifest["dns"]!.AsObject().Add("proxy", proxy);
             }

@@ -643,9 +643,8 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     ConfigurationPlan.CheckApplySupport(manifest);
-                    CheckApplyRevision(manifest, expected);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                    ConfigurationPlan.ValidateForwarding(manifest, _dnsWebService._dnsServer.Proxy?.Type ?? NetProxyType.None);
+                    ConfigurationProxy.Candidate proxy = CheckApplyRevision(manifest, expected, sessionUser);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners);
 
@@ -657,13 +656,13 @@ namespace DnsServerCore
                         context.GetCurrentJsonWriter().WriteString("operationId", operation.Id.ToString("N"));
                         context.Response.OnCompleted(() =>
                         {
-                            _ = Task.Run(() => CompleteWebApplyAsync(manifest, listeners, expected, operation));
+                            _ = Task.Run(() => CompleteWebApplyAsync(manifest, listeners, expected, operation, sessionUser));
                             return Task.CompletedTask;
                         });
                     }
                     else
                     {
-                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), listeners: listeners);
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, listeners: listeners);
                     }
                 }
                 catch (InvalidDataException ex)
@@ -680,25 +679,26 @@ namespace DnsServerCore
                 }
             }
 
-            private void CheckApplyRevision(ConfigurationManifest manifest, string expected)
+            private ConfigurationProxy.Candidate CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
-                using JsonDocument current = CaptureConfigurationSnapshot();
+                ConfigurationProxy.Candidate proxy = ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
+                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy);
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+                return proxy;
             }
 
-            private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation)
+            private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation, User sessionUser)
             {
                 try
                 {
                     await WithConfigurationLockAsync(async () =>
                     {
-                        CheckApplyRevision(manifest, expected);
                         ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                        ConfigurationPlan.ValidateForwarding(manifest, _dnsWebService._dnsServer.Proxy?.Type ?? NetProxyType.None);
+                        ConfigurationProxy.Candidate proxy = CheckApplyRevision(manifest, expected, sessionUser);
                         _dnsWebService.ValidateManifestWebListeners(listeners);
-                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners);
+                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy);
                     });
                     operation.State = "applied";
                 }
@@ -769,19 +769,25 @@ namespace DnsServerCore
                 }
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null)
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
-                    if (ConfigurationProxy.TryGetPasswordReference(manifest, out JsonElement password))
+                    if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy))
                     {
-                        if (password.ValueKind != JsonValueKind.Null &&
-                            !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
-                            throw new DnsWebServiceException("Access was denied.");
-                        ConfigurationProxy.WritePasswordSnapshot(writer, manifest, password, _dnsWebService._dnsServer.Proxy, _configurationRevisionKey);
+                        string password = null;
+                        if (proxy.TryGetProperty("password", out JsonElement reference))
+                        {
+                            if (reference.ValueKind != JsonValueKind.Null &&
+                                !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                                throw new DnsWebServiceException("Access was denied.");
+                            password = preparedProxy.HasValue ? preparedProxy.Value.Proxy?.Credential?.Password
+                                : ConfigurationProxy.ResolvePassword(manifest, reference);
+                        }
+                        ConfigurationProxy.WritePasswordSnapshot(writer, password, _dnsWebService._dnsServer.Proxy, _configurationRevisionKey);
                     }
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
@@ -1083,6 +1089,31 @@ namespace DnsServerCore
                     blockingAddresses));
 
                 bool hasProxyType = request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType);
+                NetProxy requestedProxy = null;
+                bool hasProxyBypass = false;
+                if (hasProxyType)
+                {
+                    if (proxyType != NetProxyType.None)
+                    {
+                        NetworkCredential credential = null;
+                        if (request.TryGetQueryOrForm("proxyUsername", out string username))
+                        {
+                            if (Encoding.UTF8.GetByteCount(username) > byte.MaxValue)
+                                throw new ArgumentException("Proxy username cannot exceed 255 UTF-8 bytes.", "proxyUsername");
+                            string password = request.QueryOrForm("proxyPassword");
+                            if (password is not null && Encoding.UTF8.GetByteCount(password) > byte.MaxValue)
+                                throw new ArgumentException("Proxy password cannot exceed 255 UTF-8 bytes.", "proxyPassword");
+                            credential = new NetworkCredential(username, password);
+                        }
+                        requestedProxy = NetProxy.CreateProxy(proxyType, request.QueryOrForm("proxyAddress"),
+                            int.Parse(request.QueryOrForm("proxyPort")), credential);
+                        hasProxyBypass = request.TryQueryOrFormArray("proxyBypass", value => new NetProxyBypassItem(value), out NetProxyBypassItem[] bypass);
+                        if (hasProxyBypass)
+                            requestedProxy.BypassList = bypass;
+                    }
+                    _dnsWebService._dnsServer.CheckManifestProxy(requestedProxy);
+                }
+
                 NetProxyType effectiveProxyType = hasProxyType ? proxyType : _dnsWebService._dnsServer.Proxy?.Type ?? NetProxyType.None;
                 bool hasForwarders = request.TryQueryOrFormArray("forwarders", NameServerAddress.Parse, out NameServerAddress[] forwarders);
                 DnsTransportProtocol forwarderProtocol = DnsTransportProtocol.Udp;
@@ -1784,43 +1815,19 @@ namespace DnsServerCore
                         //proxy & forwarders
                         if (hasProxyType)
                         {
-                            if (proxyType == NetProxyType.None)
+                            if (ConfigurationProxy.Differences(_dnsWebService._dnsServer.Proxy, requestedProxy) != 0)
+                                _dnsWebService._dnsServer.Proxy = requestedProxy;
+                            if (requestedProxy is not null)
                             {
-                                _dnsWebService._dnsServer.Proxy = null;
-                            }
-                            else
-                            {
-                                NetworkCredential credential = null;
-
-                                if (request.TryGetQueryOrForm("proxyUsername", out string proxyUsername))
+                                if (requestedProxy.Credential is not null)
                                 {
-                                    if (proxyUsername.Length > 255)
-                                        throw new ArgumentException("Proxy username length cannot exceed 255 characters.", nameof(proxyUsername));
-
-                                    string proxyPassword = request.QueryOrForm("proxyPassword");
-                                    if (proxyPassword?.Length > 255)
-                                        throw new ArgumentException("Proxy password length cannot exceed 255 characters.", nameof(proxyPassword));
-
-                                    credential = new NetworkCredential(proxyUsername, proxyPassword);
-
-                                    clusterParameters.Add("proxyUsername", proxyUsername);
-                                    clusterParameters.Add("proxyPassword", proxyPassword ?? "");
+                                    clusterParameters.Add("proxyUsername", requestedProxy.Credential.UserName);
+                                    clusterParameters.Add("proxyPassword", requestedProxy.Credential.Password);
                                 }
-
-                                string proxyAddress = request.QueryOrForm("proxyAddress");
-                                string proxyPort = request.QueryOrForm("proxyPort");
-
-                                _dnsWebService._dnsServer.Proxy = NetProxy.CreateProxy(proxyType, proxyAddress, int.Parse(proxyPort), credential);
-
-                                clusterParameters.Add("proxyAddress", proxyAddress);
-                                clusterParameters.Add("proxyPort", proxyPort);
-
-                                if (request.TryQueryOrFormArray("proxyBypass", delegate (string value) { return new NetProxyBypassItem(value); }, out NetProxyBypassItem[] proxyBypass))
-                                {
-                                    _dnsWebService._dnsServer.Proxy.BypassList = proxyBypass;
-
-                                    clusterParameters.Add("proxyBypass", proxyBypass.Join());
-                                }
+                                clusterParameters.Add("proxyAddress", requestedProxy.Address);
+                                clusterParameters.Add("proxyPort", requestedProxy.Port.ToString());
+                                if (hasProxyBypass)
+                                    clusterParameters.Add("proxyBypass", requestedProxy.BypassList.Join());
                             }
 
                             clusterParameters.Add("proxyType", proxyType.ToString());

@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.ApplicationCommon;
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns.Applications;
 using DnsServerCore.Dns.ResourceRecords;
 using DnsServerCore.Dns.Trees;
@@ -766,14 +767,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, ConfigurationProxy.Candidate proxy = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, proxy);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -823,6 +824,19 @@ namespace DnsServerCore.Dns
 
         internal bool ManifestOwnsServerDomain => _managedDnsSettings.HasFlag(ManagedDnsSettings.ServerDomain);
         internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
+        private ConfigurationProxy.Fields ManagedProxyFields => (ConfigurationProxy.Fields)_managedDnsSettingsExtension & ConfigurationProxy.Fields.All;
+        internal bool HasManagedProxy => ManagedProxyFields != 0;
+
+        internal void CheckManifestProxy(NetProxy candidate)
+        {
+            var managed = ManagedProxyFields;
+            if (managed == 0)
+                return;
+            string conflict = ConfigurationProxy.Paths(managed & ConfigurationProxy.Differences(_proxy, candidate)).FirstOrDefault();
+            if (conflict is not null)
+                throw new InvalidDataException($"{conflict}: Setting is managed by the configuration manifest.");
+        }
+
         internal bool HasManagedDnsSettings => _managedDnsSettings != 0 || _managedDnsSettingsExtension != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
         internal bool ManifestOwnsResponsiblePerson => _managedDnsSettings.HasFlag(ManagedDnsSettings.ResponsiblePerson);
@@ -981,6 +995,8 @@ namespace DnsServerCore.Dns
                 yield return "/dns/forwarding/timeoutMs";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.ForwardingConcurrency))
                 yield return "/dns/forwarding/concurrency";
+            foreach (string path in ConfigurationProxy.Paths(ManagedProxyFields))
+                yield return path;
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
                 yield return "/dns/rateLimits/ipv4";
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv6))
@@ -2354,6 +2370,7 @@ namespace DnsServerCore.Dns
 
             //proxy & forwarders
             NetProxyType proxyType = (NetProxyType)bR.ReadByte();
+            NetProxy restoredProxy = null;
             if (proxyType != NetProxyType.None)
             {
                 string address = s.ReadShortString();
@@ -2369,16 +2386,13 @@ namespace DnsServerCore.Dns
                 for (int i = 0; i < count; i++)
                     bypassList.Add(new NetProxyBypassItem(s.ReadShortString()));
 
-                if (apply)
-                {
-                    _proxy = NetProxy.CreateProxy(proxyType, address, port, credential);
-                    _proxy.BypassList = bypassList;
-                }
+                restoredProxy = NetProxy.CreateProxy(proxyType, address, port, credential);
+                restoredProxy.BypassList = bypassList;
             }
-            else if (apply)
-            {
-                _proxy = null;
-            }
+            if (!readOwnership)
+                CheckManifestProxy(restoredProxy);
+            if (apply && (readOwnership || ConfigurationProxy.Differences(_proxy, restoredProxy) != 0))
+                _proxy = restoredProxy;
 
             var forwarders = new NameServerAddress[bR.ReadByte()];
             for (int i = 0; i < forwarders.Length; i++)
@@ -2471,7 +2485,7 @@ namespace DnsServerCore.Dns
             return ownership;
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, ConfigurationProxy.Candidate proxy)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2652,17 +2666,18 @@ namespace DnsServerCore.Dns
             bW.Write(blocking.AnswerTtl ?? _blockingAnswerTtl);
 
             //proxy & forwarders
-            if (_proxy == null)
+            NetProxy effectiveProxy = proxy.Managed == 0 ? _proxy : proxy.Proxy;
+            if (effectiveProxy == null)
             {
                 bW.Write((byte)NetProxyType.None);
             }
             else
             {
-                bW.Write((byte)_proxy.Type);
-                s.WriteShortString(_proxy.Address);
-                bW.Write(_proxy.Port);
+                bW.Write((byte)effectiveProxy.Type);
+                s.WriteShortString(effectiveProxy.Address);
+                bW.Write(effectiveProxy.Port);
 
-                NetworkCredential credential = _proxy.Credential;
+                NetworkCredential credential = effectiveProxy.Credential;
 
                 if (credential == null)
                 {
@@ -2677,9 +2692,9 @@ namespace DnsServerCore.Dns
 
                 //bypass list
                 {
-                    bW.Write(Convert.ToByte(_proxy.BypassList.Count));
+                    bW.Write(Convert.ToByte(effectiveProxy.BypassList.Count));
 
-                    foreach (NetProxyBypassItem item in _proxy.BypassList)
+                    foreach (NetProxyBypassItem item in effectiveProxy.BypassList)
                         s.WriteShortString(item.Value);
                 }
             }
@@ -8205,7 +8220,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, bool alreadyActive, bool listenerTuningStaged, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -8226,7 +8241,7 @@ namespace DnsServerCore.Dns
                 lock (_saveLock)
                 {
                     ManagedDnsSettingsExtension previousExtendedOwnership = _managedDnsSettingsExtension;
-                    ManagedDnsSettingsExtension extendedOwnership = 0;
+                    ManagedDnsSettingsExtension extendedOwnership = (ManagedDnsSettingsExtension)proxy.Managed;
                     if (rateLimits.Ipv4 is not null)
                         extendedOwnership |= ManagedDnsSettingsExtension.RateLimitIpv4;
                     if (rateLimits.Ipv6 is not null)
@@ -8400,7 +8415,7 @@ namespace DnsServerCore.Dns
                     if (blocking.CustomAddresses is not null)
                         ownership |= ManagedDnsSettings.BlockingCustomAddresses;
 
-                    ValidateForwardingServers(forwarding.Servers, _proxy?.Type ?? NetProxyType.None);
+                    bool proxyChanged = proxy.Managed != 0 && !ReferenceEquals(_proxy, proxy.Proxy);
                     if (forwarding.Servers is not null)
                         ownership |= ManagedDnsSettings.ForwardingServers;
                     if (forwarding.Concurrent.HasValue)
@@ -8473,7 +8488,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8488,7 +8503,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, proxy));
                         _pendingSave = false;
                     }
                     catch
@@ -8507,6 +8522,8 @@ namespace DnsServerCore.Dns
                     SetDnsLoggingSettings(dnsLogging);
                     SetCachePolicy(cache);
                     SetBlockingPolicy(blocking, cancelPause: false);
+                    if (proxyChanged)
+                        _proxy = proxy.Proxy;
                     SetForwardingPolicy(forwarding);
                     SetRateLimitPolicy(rateLimits);
                     SetDnsTuning(tuning);

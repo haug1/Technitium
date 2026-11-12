@@ -212,12 +212,15 @@ namespace DnsServerCore
             if (format == "DC")
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
-                return _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || _dnsServer.HasManagedForwardingPolicy || _dnsServer.HasManagedRateLimits || _dnsServer.HasManagedDnsTuning || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
+                return _dnsServer.HasManagedProxy || _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || _dnsServer.HasManagedForwardingPolicy || _dnsServer.HasManagedRateLimits || _dnsServer.HasManagedDnsTuning || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
                     _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging || _dnsServer.HasManagedCachePolicy);
             }
 
             if (format == "DS")
             {
+                if (_dnsServer.HasManagedProxy)
+                    throw new InvalidDataException("/dns/proxy: Cannot verify outbound proxy settings in this combined backup format.");
+
                 if (!isConfigTransfer && _dnsServer.HasManagedCachePolicy)
                     throw new InvalidDataException("/dns/cache: Cannot verify cache policy in this combined backup format.");
 

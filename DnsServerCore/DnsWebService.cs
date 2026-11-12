@@ -2978,7 +2978,7 @@ namespace DnsServerCore
             return changed;
         }
 
-        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners)
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy)
         {
             WebListeners previous = CaptureWebListeners();
             SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
@@ -2993,7 +2993,7 @@ namespace DnsServerCore
                     ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
                 await StartWebServiceAsync(false, listeners);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
-                await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), listeners: listeners,
+                await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, listeners: listeners,
                     listenersChanged: true, webAddressesChanged: addressesChanged);
             }
             catch
@@ -3123,7 +3123,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate &&
@@ -3135,7 +3135,7 @@ namespace DnsServerCore
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive, listenerTuningStaged);
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive, listenerTuningStaged, proxy);
             }
             catch
             {
@@ -3146,6 +3146,12 @@ namespace DnsServerCore
                 }
 
                 throw;
+            }
+
+            if (_ssoHttpHandler is not null)
+            {
+                _ssoHttpHandler.Proxy = _dnsServer.Proxy;
+                _ssoHttpHandler.NetworkType = HttpClientNetworkHandler.GetNetworkType(_dnsServer.IPv6Mode);
             }
         }
 
@@ -3325,11 +3331,8 @@ namespace DnsServerCore
                 //init cluster manager and load config file
                 _clusterManager = new ClusterManager(this);
                 if (startupManifest is not null)
-                {
                     ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
-                    ConfigurationPlan.ValidateForwarding(startupManifest, _dnsServer.Proxy?.Type ?? NetProxyType.None);
-                }
-
+                ConfigurationProxy.Candidate proxy = startupManifest is null ? default : ConfigurationPlan.PrepareProxy(startupManifest, _dnsServer);
 
                 //cert may have changed so update cluster certs when loading
                 if (_clusterManager.ClusterInitialized)
@@ -3373,7 +3376,7 @@ namespace DnsServerCore
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged);
+                            await ApplyManifestAsync(startupManifest, endpoints, proxy, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged);
                         }
                     });
                 }

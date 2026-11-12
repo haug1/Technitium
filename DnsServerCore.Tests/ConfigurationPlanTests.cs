@@ -1,4 +1,4 @@
-using DnsServerCore.Configuration;
+﻿using DnsServerCore.Configuration;
 using System;
 using System.IO;
 using System.IO.Compression;
@@ -466,7 +466,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task ProxyPreviewResolvesPasswordWithoutReturningIt()
+        public async Task ProxyApplyRejectsRotatedPreviewAndPersistsTheNewPassword()
         {
             await using var server = await LoopbackWebService.StartAsync();
             const string variable = "TECHNITIUM_TEST_PROXY_PREVIEW_PASSWORD";
@@ -474,6 +474,13 @@ namespace DnsServerCore.Tests
             const string nextSecret = "fixture-next-proxy-password";
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "settings/set?proxyType=Http&proxyAddress=127.0.0.1&proxyPort=8080&proxyUsername=fixture&proxyPassword=" + firstSecret, server.AdminToken));
+
+            await server.RestartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] originalBackup = await backup.Content.ReadAsByteArrayAsync();
 
             const string manifest = """
                 {"schemaVersion":1,"dns":{"proxy":{"password":{"environment":"TECHNITIUM_TEST_PROXY_PREVIEW_PASSWORD"}}}}
@@ -494,6 +501,35 @@ namespace DnsServerCore.Tests
                 Assert.DoesNotContain(nextSecret, changed.GetRawText());
                 Assert.Equal(firstSecret, (await server.GetSettingsAsync()).GetProperty("proxy").GetProperty("password").GetString());
 
+                JsonElement stale = await ApplyAsync(server, manifest, matched.GetProperty("revision").GetString()!);
+                Assert.Equal("error", stale.GetProperty("status").GetString());
+                Assert.Contains("stale", stale.GetProperty("errorMessage").GetString());
+                Assert.Equal(firstSecret, (await server.GetSettingsAsync()).GetProperty("proxy").GetProperty("password").GetString());
+
+                JsonElement applied = await ApplyAsync(server, manifest, changed.GetProperty("revision").GetString()!);
+                LoopbackWebService.AssertOk(applied);
+                Assert.DoesNotContain(nextSecret, applied.GetRawText());
+                await server.RestartAsync();
+                JsonElement settings = await server.GetSettingsAsync();
+                Assert.Equal(nextSecret, settings.GetProperty("proxy").GetProperty("password").GetString());
+                Assert.Equal("/dns/proxy/password", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+                JsonElement repeated = await PreviewAsync(server, manifest);
+                Assert.Empty(repeated.GetProperty("changes").EnumerateArray());
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, repeated.GetProperty("revision").GetString()!));
+
+                JsonElement conflicting = await server.CallAsync(
+                    "settings/set?proxyType=None&maxLogFileDays=22", server.AdminToken);
+                Assert.Equal("error", conflicting.GetProperty("status").GetString());
+                Assert.Contains("/dns/proxy/password", conflicting.GetProperty("errorMessage").GetString());
+                Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+                using var restore = new MultipartFormDataContent();
+                restore.Add(new ByteArrayContent(originalBackup), "file", "backup.zip");
+                JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, restore);
+                Assert.Equal("error", restored.GetProperty("status").GetString());
+                Assert.Contains("/dns/proxy/password", restored.GetProperty("errorMessage").GetString());
+                Assert.Equal(nextSecret, (await server.GetSettingsAsync()).GetProperty("proxy").GetProperty("password").GetString());
+
                 Environment.SetEnvironmentVariable(variable, null);
                 using var content = new StringContent(manifest, Encoding.UTF8, "application/json");
                 JsonElement missing = await server.CallAsync("settings/config/plan", server.AdminToken, content);
@@ -505,6 +541,42 @@ namespace DnsServerCore.Tests
             {
                 Environment.SetEnvironmentVariable(variable, original);
             }
+        }
+
+        [Fact]
+        public async Task StartupAppliesProxyUsingAManifestRelativePasswordFile()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string invalid = """
+                {"schemaVersion":1,"dns":{"proxy":{"type":"Http","address":"127.0.0.1","port":8080,"bypass":["bad bypass entry"]}}}
+                """;
+            using var content = new StringContent(invalid, Encoding.UTF8, "application/json");
+            JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/proxy/bypass/0", rejected.GetProperty("errorMessage").GetString());
+            Assert.DoesNotContain("bad bypass entry", rejected.GetRawText());
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"proxy":{"type":"Http","address":"127.0.0.1","port":8080,
+                  "username":"fixture","password":{"file":"proxy-password"},"bypass":["localhost"]}}}
+                """;
+            string manifestPath = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            await File.WriteAllTextAsync(Path.Combine(server.ConfigurationDirectory, "proxy-password"), "fixture-file-password");
+            await File.WriteAllTextAsync(manifestPath, manifest);
+
+            await server.RestartAsync();
+            JsonElement proxy = (await server.GetSettingsAsync()).GetProperty("proxy");
+            Assert.Equal("fixture-file-password", proxy.GetProperty("password").GetString());
+            Assert.Equal("localhost", Assert.Single(proxy.GetProperty("bypass").EnumerateArray()).GetString());
+
+            File.Delete(manifestPath);
+            const string disabled = """{"schemaVersion":1,"dns":{"proxy":{"type":null}}}""";
+            JsonElement preview = await PreviewAsync(server, disabled);
+            Assert.Contains(preview.GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").GetString() == "/dns/proxy/password");
+            LoopbackWebService.AssertOk(await ApplyAsync(server, disabled, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("proxy").ValueKind);
         }
 
         [Fact]
@@ -535,6 +607,7 @@ namespace DnsServerCore.Tests
             JsonElement manifest = response.GetProperty("manifest");
             Assert.Equal(ConfigurationManifest.CurrentSchemaVersion, manifest.GetProperty("schemaVersion").GetInt32());
             Assert.Equal(ConfigurationPlan.Export(legacy, includePreviewOnly: false).ToJsonString(), manifest.GetRawText());
+            Assert.Equal("Http", manifest.GetProperty("dns").GetProperty("proxy").GetProperty("type").GetString());
 
             JsonElement inspection = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
             LoopbackWebService.AssertOk(inspection);
@@ -705,6 +778,12 @@ namespace DnsServerCore.Tests
             Assert.Equal("error", proxy.GetProperty("status").GetString());
             Assert.Contains("/dns/forwarding/servers", proxy.GetProperty("errorMessage").GetString());
             Assert.Equal(JsonValueKind.Null, (await server.GetSettingsAsync()).GetProperty("proxy").ValueKind);
+
+            const string incompatible = """{"schemaVersion":1,"dns":{"proxy":{"type":"Http","address":"localhost","port":8080}}}""";
+            using var proxyContent = new StringContent(incompatible, Encoding.UTF8, "application/json");
+            JsonElement proxyPreview = await server.CallAsync("settings/config/plan", server.AdminToken, proxyContent);
+            Assert.Equal("error", proxyPreview.GetProperty("status").GetString());
+            Assert.Contains("/dns/forwarding/servers", proxyPreview.GetProperty("errorMessage").GetString());
 
             using var form = new MultipartFormDataContent();
             form.Add(new ByteArrayContent(original), "file", "backup.zip");
@@ -2333,6 +2412,7 @@ namespace DnsServerCore.Tests
             await using var server = await LoopbackWebService.StartAsync();
             JsonNode candidate = JsonNode.Parse(ListenerManifest(LoopbackDnsServer.GetLoopbackEndPoint()))!;
             candidate["logging"]!["logQueries"] = true;
+            candidate["dns"]!["proxy"] = JsonNode.Parse("""{"type":"Http","address":"127.0.0.1","port":8080}""");
             string manifest = candidate.ToJsonString();
             string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
             string stagingPath = Path.Combine(server.ConfigurationDirectory, "log.tmp");
@@ -2347,6 +2427,7 @@ namespace DnsServerCore.Tests
             Assert.Equal(365, current.GetProperty("maxLogFileDays").GetInt32());
             Assert.False(current.GetProperty("noStackTrace").GetBoolean());
             Assert.False(current.GetProperty("logQueries").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, current.GetProperty("proxy").ValueKind);
 
             Directory.Delete(stagingPath);
             await server.RestartAsync();
@@ -2354,6 +2435,7 @@ namespace DnsServerCore.Tests
             JsonElement restored = await server.GetSettingsAsync();
             Assert.Equal(365, restored.GetProperty("maxLogFileDays").GetInt32());
             Assert.False(restored.GetProperty("logQueries").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, restored.GetProperty("proxy").ValueKind);
             Assert.Empty(restored.GetProperty("managedSettings").EnumerateArray());
         }
 
@@ -2364,7 +2446,7 @@ namespace DnsServerCore.Tests
             JsonElement current = await server.GetSettingsAsync();
             JsonObject snapshot = JsonNode.Parse(current.GetRawText())!.AsObject();
             snapshot["blockListUrls"] = new JsonArray("https://example.test/list?token=fixture-secret");
-            snapshot["proxy"] = new JsonObject { ["password"] = "fixture-secret" };
+            snapshot["proxy"] = new JsonObject { ["type"] = "None", ["password"] = "fixture-secret" };
 
             string exported = ConfigurationPlan.Export(JsonSerializer.SerializeToElement(snapshot)).ToJsonString();
             Assert.Equal(ConfigurationPlan.Export(current).ToJsonString(), exported);

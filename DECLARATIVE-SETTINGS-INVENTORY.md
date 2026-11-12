@@ -162,8 +162,8 @@ These fields persist in `dns.config`, transfer across the cluster, and apply liv
 | `dns.proxy.type` | `proxyType` | Enum, `None` | `None`, `Http`, or `Socks5`. Changing the type rebuilds the proxy configuration. |
 | `dns.proxy.address` | `proxyAddress` | Optional host or address, unset | Used when the proxy is enabled. |
 | `dns.proxy.port` | `proxyPort` | Optional integer port, unset | Required with an enabled proxy. |
-| `dns.proxy.username` | `proxyUsername` | Optional string, unset | Up to 255 characters. Credential creation depends on username presence. |
-| `dns.proxy.password` | `proxyPassword` | Optional secret reference, unset | Resolved password up to 255 characters. Export a reference or missing-input marker. |
+| `dns.proxy.username` | `proxyUsername` | Optional string, unset | Up to 255 UTF-8 bytes. Credential creation depends on username presence. |
+| `dns.proxy.password` | `proxyPassword` | Optional secret reference, unset | Resolved password up to 255 UTF-8 bytes. Export a reference or missing-input marker. |
 | `dns.proxy.bypass` | `proxyBypass` | Bypass entry array, empty | Entries use the network library's bypass parser. Storage uses a byte-sized count. |
 | `dns.forwarding.servers` | `forwarders`, `forwarderProtocol` | Ordered nameserver array with transport per entry, empty | Use nameserver address parsing. The API and initial environment inputs `DNS_SERVER_FORWARDERS` and `DNS_SERVER_FORWARDER_PROTOCOL` use a shared transport. Empty removes the configured forwarders. Storage uses a byte-sized count. QUIC needs platform support. HTTP proxy is incompatible with UDP and QUIC forwarding. |
 | `dns.forwarding.concurrent` | `concurrentForwarding` | Boolean, true | Controls concurrent use of configured forwarders. |
