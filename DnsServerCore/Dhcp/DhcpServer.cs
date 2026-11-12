@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Auth;
+using DnsServerCore.Configuration;
 using DnsServerCore.Dhcp.Options;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ResourceRecords;
@@ -26,9 +27,11 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net.Dns;
@@ -63,6 +66,26 @@ namespace DnsServerCore.Dhcp
         #endregion
 
         #region variables
+
+        private readonly SemaphoreSlim _manifestGate = new(1);
+        internal Task EnterManifestGateAsync(CancellationToken cancellationToken = default) => _manifestGate.WaitAsync(cancellationToken);
+        internal void ExitManifestGate() => _manifestGate.Release();
+
+        private async Task<bool> UpdateCurrentLeaseAsync(Scope scope, Action update)
+        {
+            await EnterManifestGateAsync();
+            try
+            {
+                if (!_scopes.TryGetValue(scope.Name, out Scope current) || !ReferenceEquals(scope, current) || !scope.Enabled)
+                    return false;
+                update();
+                return true;
+            }
+            finally
+            {
+                ExitManifestGate();
+            }
+        }
 
         readonly string _scopesFolder;
         readonly LogManager _log;
@@ -358,6 +381,9 @@ namespace DnsServerCore.Dhcp
                         if (options is null)
                             return null;
 
+                        if (!_scopes.TryGetValue(scope.Name, out Scope current) || !ReferenceEquals(scope, current) || !scope.Enabled)
+                            return null;
+
                         //log ip offer
                         _log.Write(remoteEP, "DHCP Server offered IP address [" + offer.Address.ToString() + "] to " + request.GetClientFullIdentifier() + " for scope: " + scope.Name);
 
@@ -422,7 +448,8 @@ namespace DnsServerCore.Dhcp
                             if ((leaseOffer.Type == LeaseType.Dynamic) && (scope.IsAddressExcluded(leaseOffer.Address) || scope.IsAddressReserved(leaseOffer.Address)))
                             {
                                 //client ip is excluded/reserved for dynamic allocations
-                                scope.ReleaseLease(leaseOffer);
+                                if (!await UpdateCurrentLeaseAsync(scope, () => scope.ReleaseLease(leaseOffer)))
+                                    return null;
                                 //send nak
                                 return DhcpMessage.CreateReply(request, IPAddress.Any, IPAddress.Any, null, null, new DhcpOption[] { new DhcpMessageTypeOption(DhcpMessageType.Nak), new ServerIdentifierOption(scope.InterfaceAddress), DhcpOption.CreateEndOption() });
                             }
@@ -433,7 +460,8 @@ namespace DnsServerCore.Dhcp
                                 if (leaseOffer.Type == LeaseType.Reserved)
                                 {
                                     //client's reserved lease has been removed so release the current lease and send NAK to allow it to get new allocation
-                                    scope.ReleaseLease(leaseOffer);
+                                    if (!await UpdateCurrentLeaseAsync(scope, () => scope.ReleaseLease(leaseOffer)))
+                                        return null;
                                     //send nak
                                     return DhcpMessage.CreateReply(request, IPAddress.Any, IPAddress.Any, null, null, new DhcpOption[] { new DhcpMessageTypeOption(DhcpMessageType.Nak), new ServerIdentifierOption(scope.InterfaceAddress), DhcpOption.CreateEndOption() });
                                 }
@@ -443,7 +471,8 @@ namespace DnsServerCore.Dhcp
                                 if (!reservedLease.Address.Equals(leaseOffer.Address))
                                 {
                                     //client has a new reserved lease so release the current lease and send NAK to allow it to get new allocation
-                                    scope.ReleaseLease(leaseOffer);
+                                    if (!await UpdateCurrentLeaseAsync(scope, () => scope.ReleaseLease(leaseOffer)))
+                                        return null;
                                     //send nak
                                     return DhcpMessage.CreateReply(request, IPAddress.Any, IPAddress.Any, null, null, new DhcpOption[] { new DhcpMessageTypeOption(DhcpMessageType.Nak), new ServerIdentifierOption(scope.InterfaceAddress), DhcpOption.CreateEndOption() });
                                 }
@@ -489,47 +518,51 @@ namespace DnsServerCore.Dhcp
                         if (options is null)
                             return null;
 
-                        //update lease hostname
-                        if (string.IsNullOrWhiteSpace(scope.DomainName))
+                        if (!await UpdateCurrentLeaseAsync(scope, () =>
                         {
-                            leaseOffer.SetHostName(request.HostName?.HostName);
-                        }
-                        else
-                        {
-                            string clientDomainName = null;
-
-                            if (!string.IsNullOrWhiteSpace(reservedLeaseHostName))
+                            //update lease hostname
+                            if (string.IsNullOrWhiteSpace(scope.DomainName))
                             {
-                                clientDomainName = GetSanitizedHostName(reservedLeaseHostName) + "." + scope.DomainName;
+                                leaseOffer.SetHostName(request.HostName?.HostName);
                             }
                             else
                             {
-                                foreach (DhcpOption option in options)
+                                string clientDomainName = null;
+
+                                if (!string.IsNullOrWhiteSpace(reservedLeaseHostName))
                                 {
-                                    if (option.Code == DhcpOptionCode.ClientFullyQualifiedDomainName)
+                                    clientDomainName = GetSanitizedHostName(reservedLeaseHostName) + "." + scope.DomainName;
+                                }
+                                else
+                                {
+                                    foreach (DhcpOption option in options)
                                     {
-                                        clientDomainName = (option as ClientFullyQualifiedDomainNameOption).DomainName;
-                                        break;
+                                        if (option.Code == DhcpOptionCode.ClientFullyQualifiedDomainName)
+                                        {
+                                            clientDomainName = (option as ClientFullyQualifiedDomainNameOption).DomainName;
+                                            break;
+                                        }
+                                    }
+
+                                    if (string.IsNullOrWhiteSpace(clientDomainName))
+                                    {
+                                        if ((request.HostName is not null) && !string.IsNullOrWhiteSpace(request.HostName.HostName))
+                                            clientDomainName = GetSanitizedHostName(request.HostName.HostName) + "." + scope.DomainName;
                                     }
                                 }
 
-                                if (string.IsNullOrWhiteSpace(clientDomainName))
+                                if (!string.IsNullOrWhiteSpace(clientDomainName))
                                 {
-                                    if ((request.HostName is not null) && !string.IsNullOrWhiteSpace(request.HostName.HostName))
-                                        clientDomainName = GetSanitizedHostName(request.HostName.HostName) + "." + scope.DomainName;
+                                    if (!clientDomainName.Equals(leaseOffer.HostName, StringComparison.OrdinalIgnoreCase))
+                                        RemoveDnsEntries(scope, leaseOffer); //hostname changed! delete old hostname entry from DNS
+
+                                    leaseOffer.SetHostName(clientDomainName);
                                 }
                             }
 
-                            if (!string.IsNullOrWhiteSpace(clientDomainName))
-                            {
-                                if (!clientDomainName.Equals(leaseOffer.HostName, StringComparison.OrdinalIgnoreCase))
-                                    RemoveDnsEntries(scope, leaseOffer); //hostname changed! delete old hostname entry from DNS
-
-                                leaseOffer.SetHostName(clientDomainName);
-                            }
-                        }
-
-                        scope.CommitLease(leaseOffer);
+                            scope.CommitLease(leaseOffer);
+                        }))
+                            return null;
 
                         //log ip lease
                         _log.Write(remoteEP, "DHCP Server leased IP address [" + leaseOffer.Address.ToString() + "] to " + request.GetClientFullIdentifier() + " for scope: " + scope.Name);
@@ -561,7 +594,8 @@ namespace DnsServerCore.Dhcp
                             return null; //the client's notion of its IP address is not correct; do nothing
 
                         //remove lease since the IP address is used by someone else
-                        scope.ReleaseLease(lease);
+                        if (!await UpdateCurrentLeaseAsync(scope, () => scope.ReleaseLease(lease)))
+                            return null;
 
                         //log issue
                         _log.Write(remoteEP, "DHCP Server received DECLINE message for scope '" + scope.Name + "': " + lease.GetClientInfo() + " detected that IP address [" + lease.Address + "] is already in use.");
@@ -594,7 +628,8 @@ namespace DnsServerCore.Dhcp
                             return null; //the client's notion of its IP address is not correct; do nothing
 
                         //release lease
-                        scope.ReleaseLease(lease);
+                        if (!await UpdateCurrentLeaseAsync(scope, () => scope.ReleaseLease(lease)))
+                            return null;
 
                         //log ip lease release
                         _log.Write(remoteEP, "DHCP Server released IP address [" + lease.Address.ToString() + "] that was leased to " + lease.GetClientInfo() + " for scope: " + scope.Name);
@@ -1113,7 +1148,7 @@ namespace DnsServerCore.Dhcp
             return false;
         }
 
-        private async Task<bool> ActivateScopeAsync(Scope scope, bool waitForInterface, bool throwException = false)
+        private async Task<bool> ActivateScopeAsync(Scope scope, bool waitForInterface, bool throwException = false, bool updateDnsEntries = true)
         {
             IPEndPoint dhcpEP = null;
 
@@ -1189,7 +1224,7 @@ namespace DnsServerCore.Dhcp
                     throw;
                 }
 
-                if (_dnsServer is not null)
+                if (updateDnsEntries && _dnsServer is not null)
                 {
                     //update valid leases into dns
                     DateTime utcNow = DateTime.UtcNow;
@@ -1292,14 +1327,124 @@ namespace DnsServerCore.Dhcp
             }
         }
 
-        private void LoadAllScopeFiles()
+        internal async Task ApplyManifestScopesAsync(ConfigurationManifest manifest, Func<Action, string[], Task> persist)
+        {
+            if (!manifest.Settings.TryGetProperty("dhcp", out var dhcp) || !dhcp.TryGetProperty("scopes", out var declarations))
+            {
+                await persist(null, []);
+                return;
+            }
+
+            using var snapshot = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(snapshot))
+            {
+                writer.WriteStartObject();
+                ConfigurationDhcp.WriteSnapshot(writer, declarations, _scopes);
+                writer.WriteEndObject();
+            }
+            snapshot.Position = 0;
+            using var state = JsonDocument.Parse(snapshot);
+            var changes = new List<ConfigurationChange>();
+            ConfigurationDhcp.Compare(dhcp, state.RootElement.GetProperty("manifestDhcpScopes"), changes);
+            if (changes.Count == 0)
+            {
+                await persist(null, []);
+                return;
+            }
+
+            var candidates = new Dictionary<string, Scope>(StringComparer.Ordinal);
+            var activated = new List<Scope>();
+            bool committed = false;
+            try
+            {
+                if (declarations.ValueKind == JsonValueKind.Null)
+                {
+                    foreach (string name in _scopes.Keys)
+                        candidates.Add(name, null);
+                }
+                else
+                {
+                    foreach (var entry in declarations.EnumerateObject())
+                    {
+                        string path = ConfigurationPlan.AppendPath("/dhcp/scopes", entry.Name);
+                        if (!changes.Any(change => change.Path == path || change.Path.StartsWith(path + "/", StringComparison.Ordinal)))
+                            continue;
+                        _scopes.TryGetValue(entry.Name, out Scope previous);
+                        Scope candidate = entry.Value.ValueKind == JsonValueKind.Null ? null :
+                            ConfigurationDhcp.PrepareScope(entry.Name, entry.Value, previous, _log, this);
+                        candidates.Add(entry.Name, candidate);
+                    }
+                }
+
+                foreach (Scope scope in candidates.Values)
+                {
+                    if (scope is not { Enabled: true })
+                        continue;
+                    if (!await ActivateScopeAsync(scope, waitForInterface: false, updateDnsEntries: false))
+                        throw new InvalidDataException($"{ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name)}/enabled: Could not activate the DHCP scope.");
+                    activated.Add(scope);
+                }
+
+                await persist(() =>
+                {
+                    foreach (var (name, scope) in candidates)
+                    {
+                        if (scope is null)
+                            File.Delete(Path.Combine(_scopesFolder, name + ".scope"));
+                        else
+                            WriteScopeFile(scope);
+                    }
+                }, candidates.Keys.Select(name => Path.Combine("scopes", name + ".scope")).ToArray());
+
+                committed = true;
+                foreach (var (name, candidate) in candidates)
+                {
+                    _scopes.TryGetValue(name, out Scope previous);
+                    if (candidate is null)
+                        _scopes.TryRemove(name, out _);
+                    else
+                        _scopes[name] = candidate;
+
+                    if (previous is { Enabled: true })
+                    {
+                        DeactivateScope(previous, removeDnsEntries: false, throwException: false);
+                        if (candidate is not { Enabled: true } || previous.DomainName != candidate.DomainName || previous.DnsUpdates != candidate.DnsUpdates)
+                        {
+                            foreach (Lease lease in previous.Leases.Values)
+                                RemoveDnsEntries(previous, lease);
+                        }
+                    }
+                    if (candidate is { Enabled: true })
+                    {
+                        if (candidate.UseThisDnsServer)
+                            candidate.FindThisDnsServerAddress();
+                        foreach (Lease lease in candidate.Leases.Values)
+                        {
+                            if (lease.LeaseExpires > DateTime.UtcNow)
+                                AddDnsEntries(candidate, lease);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (!committed)
+                {
+                    foreach (Scope scope in activated)
+                        DeactivateScope(scope, removeDnsEntries: false, throwException: false);
+                    foreach (Scope scope in candidates.Values)
+                        scope?.Dispose();
+                }
+            }
+        }
+
+        private Task[] LoadAllScopeFiles()
         {
             string[] scopeFiles = Directory.GetFiles(_scopesFolder, "*.scope", SearchOption.TopDirectoryOnly);
 
-            foreach (string scopeFile in scopeFiles)
-                _ = LoadScopeFileAsync(scopeFile);
-
+            Task[] loads = scopeFiles.Select(LoadScopeFileAsync).ToArray();
             _lastModifiedScopesSavedOn = DateTime.UtcNow;
+            return loads;
         }
 
         private async Task LoadScopeFileAsync(string scopeFile)
@@ -1379,8 +1524,11 @@ namespace DnsServerCore.Dhcp
             {
                 _maintenanceTimer = new Timer(delegate (object state)
                 {
+                    bool entered = _manifestGate.Wait(0);
                     try
                     {
+                        if (!entered)
+                            return;
                         foreach (KeyValuePair<string, Scope> scope in _scopes)
                         {
                             scope.Value.RemoveExpiredOffers();
@@ -1398,6 +1546,9 @@ namespace DnsServerCore.Dhcp
                     }
                     finally
                     {
+                        if (entered)
+                            ExitManifestGate();
+
                         try
                         {
                             _maintenanceTimer?.Change(MAINTENANCE_TIMER_INTERVAL, Timeout.Infinite);
@@ -1420,7 +1571,9 @@ namespace DnsServerCore.Dhcp
 
         #region public
 
-        public void Start()
+        public void Start() => StartAsync(waitForScopes: false).GetAwaiter().GetResult();
+
+        internal async Task StartAsync(bool waitForScopes)
         {
             if (_disposed)
                 ObjectDisposedException.ThrowIf(_disposed, this);
@@ -1430,7 +1583,9 @@ namespace DnsServerCore.Dhcp
 
             _state = ServiceState.Starting;
 
-            LoadAllScopeFiles();
+            Task[] loads = LoadAllScopeFiles();
+            if (waitForScopes)
+                await Task.WhenAll(loads);
             StartMaintenanceTimer();
 
             _state = ServiceState.Running;

@@ -2452,6 +2452,72 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpApplyPersistsScopeChangesAndRejectsStalePreviews()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Lab":{
+                    "enabled":false,"startingAddress":"192.0.2.10","endingAddress":"192.0.2.30","subnetMask":"255.255.255.0",
+                    "exclusions":[{"startingAddress":"192.0.2.12","endingAddress":"192.0.2.14"}],
+                    "reservations":{"02-00-00-00-00-01":{"address":"192.0.2.20"}}
+                }}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            const string update = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}""";
+            revision = (await PreviewAsync(server, update)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.35&subnetMask=255.255.255.0", server.AdminToken));
+            Assert.Equal("error", (await ApplyAsync(server, update, revision)).GetProperty("status").GetString());
+
+            revision = (await PreviewAsync(server, update)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, update, revision));
+            Assert.Empty((await PreviewAsync(server, update)).GetProperty("changes").EnumerateArray());
+
+            const string removal = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":null}}}""";
+            revision = (await PreviewAsync(server, removal)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, removal, revision));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, removal)).GetProperty("changes").EnumerateArray());
+            Assert.False(File.Exists(Path.Combine(server.ConfigurationDirectory, "scopes", "Lab.scope")));
+        }
+
+        [Fact]
+        public async Task DhcpApplyRestoresLoggingAndExistingScopeWhenScopeWriteFails()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.30&subnetMask=255.255.255.0", server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"logging":{"logQueries":true},"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            string stagingPath = Path.Combine(server.ConfigurationDirectory, "scopes", "Lab.tmp");
+            Directory.CreateDirectory(stagingPath);
+            try
+            {
+                JsonElement rejected = await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("persist", rejected.GetProperty("errorMessage").GetString());
+                Assert.Equal(preview.GetProperty("revision").GetString(),
+                    (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+            }
+            finally
+            {
+                Directory.Delete(stagingPath);
+            }
+
+            await server.RestartAsync();
+            Assert.False((await server.GetSettingsAsync()).GetProperty("logQueries").GetBoolean());
+            Assert.Contains((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/dhcp/scopes/Lab/endingAddress"));
+        }
+
+        [Fact]
         public async Task DhcpInspectionExportAndExclusionPreviewUseConfiguredScopeValues()
         {
             await using var server = await LoopbackWebService.StartAsync();

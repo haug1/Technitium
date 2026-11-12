@@ -1626,10 +1626,18 @@ namespace DnsServerCore.Dhcp
         {
             var identifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, hardwareAddress);
             if (address is null)
+            {
                 _reservedLeases.TryRemove(identifier, out _);
-            else
-                _reservedLeases[identifier] = new Lease(LeaseType.Reserved, hostName, DhcpMessageHardwareAddressType.Ethernet,
-                    hardwareAddress, address, comments);
+                return;
+            }
+
+            _reservedLeases[identifier] = new Lease(LeaseType.Reserved, hostName, DhcpMessageHardwareAddressType.Ethernet,
+                hardwareAddress, address, comments);
+            foreach (Lease lease in _leases.Values)
+            {
+                if (lease.Type == LeaseType.Dynamic && lease.Address.Equals(address) && lease.HardwareAddress.AsSpan().SequenceEqual(hardwareAddress))
+                    lease.ConvertToReserved();
+            }
         }
 
         internal void ClearManifestReservations() => _reservedLeases.Clear();

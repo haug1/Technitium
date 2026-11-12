@@ -679,11 +679,17 @@ namespace DnsServerCore
                 if (expected.Length != 66)
                     throw new DnsWebServiceException("Supply the preview revision in the If-Match header.");
 
+                bool dhcpGate = false;
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     ConfigurationPlan.CheckApplySupport(manifest);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
+                    if (HasDhcpScopeDeclaration(manifest))
+                    {
+                        await _dnsWebService._dhcpServer.EnterManifestGateAsync(context.RequestAborted);
+                        dhcpGate = true;
+                    }
                     var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
@@ -717,6 +723,11 @@ namespace DnsServerCore
                 {
                     throw new DnsWebServiceException("Could not activate or persist the configuration settings.");
                 }
+                finally
+                {
+                    if (dhcpGate)
+                        _dnsWebService._dhcpServer.ExitManifestGate();
+                }
             }
 
             private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
@@ -733,7 +744,19 @@ namespace DnsServerCore
                 ConfigurationDnsCertificate.Candidate dnsCertificate = ConfigurationDnsCertificate.Prepare(manifest, _dnsWebService._dnsServer);
                 var webCertificate = _dnsWebService.PrepareWebCertificate(manifest);
                 var tsig = _dnsWebService.PrepareTsigKeys(manifest);
-                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig);
+                using ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = CaptureDhcpScopeSnapshot(manifest, sessionUser);
+                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot);
+                if (dhcpSnapshot is not null)
+                {
+                    if (!_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Modify))
+                        throw new DnsWebServiceException("Access was denied.");
+                    var changes = new List<ConfigurationChange>();
+                    ConfigurationDhcp.Compare(manifest.Settings.GetProperty("dhcp"), current.RootElement.GetProperty("manifestDhcpScopes"), changes);
+                    if (changes.Any(change => change.Kind == ConfigurationChangeKind.Remove &&
+                        !change.Path.Contains("/reservations/", StringComparison.Ordinal)) &&
+                        !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Delete))
+                        throw new DnsWebServiceException("Access was denied.");
+                }
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
@@ -749,9 +772,20 @@ namespace DnsServerCore
                     await WithConfigurationLockAsync(async () =>
                     {
                         ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                        var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
-                        _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
-                        await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig);
+                        bool dhcpGate = HasDhcpScopeDeclaration(manifest);
+                        if (dhcpGate)
+                            await _dnsWebService._dhcpServer.EnterManifestGateAsync();
+                        try
+                        {
+                            var (proxy, dnsCertificate, webCertificate, tsig) = CheckApplyRevision(manifest, expected, sessionUser);
+                            _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
+                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig);
+                        }
+                        finally
+                        {
+                            if (dhcpGate)
+                                _dnsWebService._dhcpServer.ExitManifestGate();
+                        }
                     });
                     operation.State = "applied";
                 }
@@ -839,6 +873,9 @@ namespace DnsServerCore
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
             }
+
+            private static bool HasDhcpScopeDeclaration(ConfigurationManifest manifest) =>
+                manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) && dhcp.TryGetProperty("scopes", out _);
 
             private ConfigurationDhcp.ScopeSnapshot CaptureDhcpScopeSnapshot(ConfigurationManifest manifest, User sessionUser)
             {

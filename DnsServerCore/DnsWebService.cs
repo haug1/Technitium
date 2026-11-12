@@ -3255,8 +3255,10 @@ namespace DnsServerCore
             string previousCertificateFileHash = _webServiceCertificateFileHash;
             try
             {
-                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig);
+                await _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
+                    ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
+                        (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeScopes, scopeFiles));
             }
             catch
             {
@@ -3537,11 +3539,21 @@ namespace DnsServerCore
                         if (dnsCertificateStaged)
                             _dnsServer.StageManifestDnsCertificate(dnsCertificate);
                         await _dnsServer.StartAsync(throwIfBindFails || endpoints is not null || dnsBindings != default || dnsCertificateStaged, endpoints ?? _dnsServer.LocalEndPoints);
-                        _dhcpServer.Start();
+                        bool declaresDhcp = startupManifest is not null && startupManifest.Settings.TryGetProperty("dhcp", out var dhcp) &&
+                            dhcp.TryGetProperty("scopes", out _);
+                        await _dhcpServer.StartAsync(waitForScopes: declaresDhcp);
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged);
+                            await _dhcpServer.EnterManifestGateAsync();
+                            try
+                            {
+                                await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged);
+                            }
+                            finally
+                            {
+                                _dhcpServer.ExitManifestGate();
+                            }
                         }
                     });
                 }

@@ -5325,6 +5325,8 @@ TSIG preview reports additions, removals, algorithm updates, and secret rotation
 
 Explicit `allowZones` and `blockZones` replace the corresponding normalized domain sets on standalone servers. Preview reports each added or removed name. The API requires the corresponding list permissions, including Delete when removing entries. Apply updates DNS live and rejects conflicting list edits and restores while the manifest owns the list. Export includes lists the caller may view.
 
+DHCP scope apply requires DHCP Server Modify permission and Delete permission when removing scopes. Enabled scopes must bind before the server commits changes. Scope files share the configuration rollback journal with the other changed settings. Active leases remain part of the scope when its settings change.
+
 Inspection export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. A scope whose reservations require a client identifier outside the manifest format is listed in `missingInputs`.
 
 DNS listener policy can be applied live. It covers ECS client source selection, the ordered DNS reverse-proxy ACL, and the DNS-over-HTTP real-IP header and help redirect. These settings are node-local. The server rejects conflicting edits and backup restores while the fields are managed by a manifest.

@@ -281,7 +281,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate certificate, ConfigurationTsig.Candidate tsig, Action writeScopes, string[] scopeFiles)
         {
             CheckApplySupport(manifest);
 
@@ -303,7 +303,7 @@ namespace DnsServerCore.Configuration
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
-                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked))))));
+                writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked, writeScopes, scopeFiles))))));
         }
 
         internal static DnsServer.DnsBindings GetDnsBindings(ConfigurationManifest manifest)
@@ -859,12 +859,12 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (path is "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
             if ((value.ValueKind == JsonValueKind.Object) &&
-                _settings.Any(entry => entry.Value.CanApply && entry.Key.StartsWith(path + "/", StringComparison.Ordinal)))
+                (path == "/dhcp" || _settings.Any(entry => entry.Value.CanApply && entry.Key.StartsWith(path + "/", StringComparison.Ordinal))))
             {
                 foreach (JsonProperty field in value.EnumerateObject())
                     CheckApplySupport(field.Value, AppendPath(path, field.Name));

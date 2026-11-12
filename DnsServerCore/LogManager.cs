@@ -324,7 +324,7 @@ namespace DnsServerCore
             return ConvertToRelativePath(ConvertToAbsolutePath(path));
         }
 
-        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig, Action writeCertificate, Action writeBlockListConfig, Action writeWebConfig, Action writeAllowed, Action writeBlocked)
+        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig, Action writeCertificate, Action writeBlockListConfig, Action writeWebConfig, Action writeAllowed, Action writeBlocked, Action writeScopes, string[] scopeFiles)
         {
             lock (_saveLock)
             {
@@ -353,7 +353,7 @@ namespace DnsServerCore
                     ((useLocalTime ?? previousUseLocalTime) == previousUseLocalTime) &&
                     string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal))
                 {
-                    PersistManifestSettings(writeDnsConfig, null, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked);
+                    PersistManifestSettings(writeDnsConfig, null, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked, writeScopes, scopeFiles);
                     return;
                 }
 
@@ -374,7 +374,7 @@ namespace DnsServerCore
                     if (activate)
                         ApplyLoggingType();
                     _managedSettings = managedSettings;
-                    PersistManifestSettings(writeDnsConfig, SaveConfigFileInternal, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked);
+                    PersistManifestSettings(writeDnsConfig, SaveConfigFileInternal, writeCertificate, writeBlockListConfig, writeWebConfig, writeAllowed, writeBlocked, writeScopes, scopeFiles);
                     _pendingSave = false;
                 }
                 catch
@@ -392,9 +392,9 @@ namespace DnsServerCore
             }
         }
 
-        private void PersistManifestSettings(Action dns, Action logging, Action certificate, Action blocklist, Action web, Action allowed, Action blocked)
+        private void PersistManifestSettings(Action dns, Action logging, Action certificate, Action blocklist, Action web, Action allowed, Action blocked, Action scopes, string[] scopeFiles)
         {
-            Action write = dns + logging + certificate + blocklist + web + allowed + blocked;
+            Action write = dns + logging + certificate + blocklist + web + allowed + blocked + scopes;
             if (write is null)
                 return;
 
@@ -415,6 +415,7 @@ namespace DnsServerCore
             if (blocked is not null)
                 files.Add("blocked.config");
 
+            files.AddRange(scopeFiles);
             ConfigurationJournal.Persist(_configFolder, write, files.ToArray());
         }
 
