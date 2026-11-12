@@ -1846,10 +1846,11 @@ namespace DnsServerCore
                 options.EnableForHttps = true;
             });
 
+            IReadOnlyList<IPAddress> kestrelAddresses = WebUtilities.GetValidKestrelLocalAddresses(_webServiceLocalAddresses);
             builder.WebHost.ConfigureKestrel(delegate (WebHostBuilderContext context, KestrelServerOptions serverOptions)
             {
                 //http
-                foreach (IPAddress webServiceLocalAddress in _webServiceLocalAddresses)
+                foreach (IPAddress webServiceLocalAddress in kestrelAddresses)
                     serverOptions.Listen(webServiceLocalAddress, _webServiceHttpPort);
 
                 //http unix socket
@@ -1900,7 +1901,7 @@ namespace DnsServerCore
                 //https
                 if (!httpOnlyMode && _webServiceEnableTls && (_webServiceSslServerAuthenticationOptions is not null))
                 {
-                    foreach (IPAddress webServiceLocalAddress in _webServiceLocalAddresses)
+                    foreach (IPAddress webServiceLocalAddress in kestrelAddresses)
                     {
                         serverOptions.Listen(webServiceLocalAddress, _webServiceTlsPort, delegate (ListenOptions listenOptions)
                         {

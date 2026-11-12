@@ -1,6 +1,7 @@
 technitiumModule:
 {
   name = "technitium-deployment";
+  globalTimeout = 300;
 
   nodes.server =
     { pkgs, lib, ... }:

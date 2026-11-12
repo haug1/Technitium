@@ -122,6 +122,8 @@ namespace DnsServerApp
             catch (Exception ex)
             {
                 Console.WriteLine(ex.ToString());
+                if (throwIfBindFails)
+                    Environment.ExitCode = 1;
             }
             finally
             {
