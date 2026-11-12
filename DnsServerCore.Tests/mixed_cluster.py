@@ -166,6 +166,8 @@ def verify(current, previous, folder, propagation, graceful):
         group_revision = ok(primary.call("settings/config/plan", manifest=group_policy))["revision"]
         user_policy = {"schemaVersion": 1, "auth": {"users": {"cluster-operator": None}}}
         user_revision = ok(primary.call("settings/config/plan", manifest=user_policy))["revision"]
+        permission_policy = {"schemaVersion": 1, "auth": {"permissions": {"Settings": {"groups": {"Everyone": None}}}}}
+        permission_revision = ok(primary.call("settings/config/plan", manifest=permission_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -183,12 +185,23 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeSso"] is True
             assert joined["supportsDeclarativeGroups"] is True
             assert joined["supportsDeclarativeUsers"] is True
+            assert joined["supportsDeclarativePermissions"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeUsers"), joined
+        assert not joined.get("supportsDeclarativePermissions"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=permission_policy),
+            primary.call("settings/config/apply", manifest=permission_policy, revision=permission_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative permissions" in rejected["errorMessage"], rejected
+        if joined.get("supportsDeclarativeUsers"):
+            plan = ok(primary.call("settings/config/plan", manifest=user_policy))
+            ok(primary.call("settings/config/apply", manifest=user_policy, revision=plan["revision"]))
+            print("Mixed-build check passed. Existing user support allowed account ownership and rejected permission changes.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=user_policy),
             primary.call("settings/config/apply", manifest=user_policy, revision=user_revision),
@@ -580,6 +593,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_sso_policy(primary, secondary, release, local_web)
     verify_group_policy(primary, secondary, release, local_web)
     verify_user_policy(primary, secondary, release, local_web)
+    verify_permission_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -1190,6 +1204,56 @@ def verify_user_policy(primary, secondary, cluster_manifest, local_web):
     wait_for(lambda: secondary.call(endpoint)["status"] == "error", "the Secondary to remove the account")
     assert all(grant["username"] != name for grant in ok(secondary.call(grant_endpoint))["userPermissions"])
     apply(primary, cluster_manifest)
+
+
+def verify_permission_policy(primary, secondary, cluster_manifest, local_web):
+    name = "Permission operators"
+    grants = {"Settings": {"groups": {name: ["View"]}}}
+    desired = {**cluster_manifest, "auth": {"groups": {name: {}}, "permissions": grants}}
+    path = "/auth/permissions/Settings/groups/permission operators"
+    endpoint = "admin/permissions/get?section=Settings"
+    denied = secondary.call("settings/config/plan", manifest={
+        "schemaVersion": 1, "auth": {"permissions": {"Settings": {"groups": {"Everyone": None}}}},
+    })
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, manifest):
+        def preview():
+            result = node.call("settings/config/plan", manifest=manifest)
+            if result["status"] == "error" and "has not advertised support for declarative permissions" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm permission support")
+        ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
+        return plan
+
+    def matches(view, modify, owned):
+        state = ok(secondary.call(endpoint))
+        grant = next((grant for grant in state["groupPermissions"] if grant["name"] == name), None)
+        return (path in state["managedSettings"]) == owned and (
+            grant is None if view is None else grant is not None and grant["canView"] == view and grant["canModify"] == modify)
+
+    apply(primary, desired)
+    wait_for(lambda: matches(True, False, True), "the Secondary to inherit the Settings grant")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(True, False, True)
+    apply(secondary, local_web)
+    assert matches(True, False, True)
+    denied = primary.call("admin/permissions/set?section=Settings&groupPermissions=")
+    assert denied["status"] == "error" and path in denied["errorMessage"], denied
+
+    grants["Settings"]["groups"][name] = ["View", "Modify"]
+    apply(primary, desired)
+    wait_for(lambda: matches(True, True, True), "the Secondary to inherit the updated grant")
+    assert not apply(primary, desired)["changes"]
+    exported = ok(primary.call("settings/config/export"))["manifest"]
+    assert set(exported["auth"]["permissions"]["Settings"]["groups"][name]) == {"View", "Modify"}
+    grants["Settings"]["groups"][name] = None
+    apply(primary, desired)
+    wait_for(lambda: matches(None, None, True), "the Secondary to remove the grant")
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(None, None, False), "the Secondary to release permission ownership")
 
 
 def assert_promoted_policy(state):

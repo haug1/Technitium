@@ -308,6 +308,8 @@ namespace DnsServerCore.Configuration
                     groupPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("userPeers", out JsonElement userPeers))
                     userPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("permissionPeers", out JsonElement permissionPeers))
+                    permissionPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -884,8 +886,7 @@ namespace DnsServerCore.Configuration
         {
             if (!cluster.ClusterInitialized)
                 return;
-            if (ConfigurationPermissions.TryGetDeclaration(manifest, out _))
-                throw new InvalidDataException("/auth/permissions: Applying permissions to a cluster is not implemented.");
+            CheckClusterPermissionRole(manifest, cluster);
             CheckClusterUserRole(manifest, cluster);
             CheckClusterGroupRole(manifest, cluster);
             if (ConfigurationApplications.IsDeclared(manifest))
@@ -900,6 +901,28 @@ namespace DnsServerCore.Configuration
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        private static void CheckClusterPermissionRole(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (ConfigurationPermissions.TryGetDeclaration(manifest, out _) && cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new InvalidDataException("/auth/permissions: Only the Primary can apply cluster permissions.");
+        }
+
+        internal static int[] CheckClusterPermissionSupport(ConfigurationManifest manifest, ClusterManager cluster, bool grantsChanged)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            CheckClusterPermissionRole(manifest, cluster);
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                return null;
+
+            var auth = cluster.DnsWebService.AuthManager;
+            if (!grantsChanged && !auth.PermissionOwnershipFromPrimary &&
+                auth.ManagedPermissionPaths.SequenceEqual(ConfigurationPermissions.GetOwnedPaths(manifest)))
+                return null;
+            return cluster.CheckDeclarativePermissionPeers();
         }
 
         private static void CheckClusterUserRole(ConfigurationManifest manifest, ClusterManager cluster)

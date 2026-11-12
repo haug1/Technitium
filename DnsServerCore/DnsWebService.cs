@@ -3263,6 +3263,9 @@ namespace DnsServerCore
                 users = ConfigurationUsers.Prepare(manifest, _authManager, ConfigurationGroups.Prepare(manifest, _authManager),
                     actor: zoneCreator, ldap: ldap, sso: sso);
             int[] userPeers = ConfigurationPlan.CheckClusterUserSupport(manifest, _clusterManager, users);
+            int[] permissionPeers = ConfigurationPlan.CheckClusterPermissionSupport(manifest, _clusterManager,
+                clustered && !secondary && ConfigurationPermissions.TryGetDeclaration(manifest, out _) &&
+                ConfigurationPermissions.Prepare(manifest, _authManager, ConfigurationGroups.Prepare(manifest, _authManager), users, zoneCreator).Count > 0);
             var domainListChange = ConfigurationPlan.CheckClusterDomainListSupport(manifest, _clusterManager);
             var dnsPolicyChange = ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _clusterManager, proxy, tsig);
             var previousBlockLists = (blockLists.BlockListUrls, blockLists.BlockListUpdateIntervalHours,
@@ -3327,6 +3330,11 @@ namespace DnsServerCore
                     if (!_clusterManager.CheckDeclarativeUserPeers().SequenceEqual(userPeers))
                         throw new InvalidDataException("/auth/users: Cluster membership changed during apply. Create a new preview.");
                 };
+                Action checkPermissionPeers = permissionPeers is null ? null : () =>
+                {
+                    if (!_clusterManager.CheckDeclarativePermissionPeers().SequenceEqual(permissionPeers))
+                        throw new InvalidDataException("/auth/permissions: Cluster membership changed during apply. Create a new preview.");
+                };
                 var clusterFiles = new List<string>(2);
                 if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
                     clusterFiles.Add("cluster.config");
@@ -3340,7 +3348,7 @@ namespace DnsServerCore
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + checkDnsPolicyPeers + checkLdapPeers + checkSsoPeers + checkGroupPeers + checkUserPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + checkDnsPolicyPeers + checkLdapPeers + checkSsoPeers + checkGroupPeers + checkUserPeers + checkPermissionPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
                         persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
                         {
                             writeCluster = write;
@@ -3359,7 +3367,7 @@ namespace DnsServerCore
                 throw;
             }
 
-            if (clustered && !secondary && (userPeers is not null || groupPeers is not null || ssoPeers is not null || ldapPeers is not null || dnsPolicyChange.HasValue || domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
+            if (clustered && !secondary && (permissionPeers is not null || userPeers is not null || groupPeers is not null || ssoPeers is not null || ldapPeers is not null || dnsPolicyChange.HasValue || domainListChange.HasValue || previousBlockLists != (blockLists.BlockListUrls,
                 blockLists.BlockListUpdateIntervalHours, blockLists.ManifestOwnsSources, blockLists.ManifestOwnsUpdateInterval)))
                 _clusterManager.TriggerNotifyAllSecondaryNodesIfPrimarySelfNode();
 

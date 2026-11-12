@@ -41,6 +41,8 @@ namespace DnsServerCore.Configuration
                             ConfigurationManifest.CanonicalDnsName(entry.Name, "/zones", allowRoot: true));
                 }
             }
+            if (paths.Count > ushort.MaxValue)
+                throw new InvalidDataException($"{Path}: Too many permission ownership declarations.");
             return paths.ToArray();
 
             void AddScope(PermissionSection section, JsonElement value, string zone = null)

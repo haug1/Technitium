@@ -75,6 +75,7 @@ namespace DnsServerCore.Cluster
         internal volatile bool SupportsDeclarativeSso;
         internal volatile bool SupportsDeclarativeGroups;
         internal volatile bool SupportsDeclarativeUsers;
+        internal volatile bool SupportsDeclarativePermissions;
         string _version;
         DateTime _upSince;
         DateTime _lastSeen;
@@ -252,6 +253,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeSso = clusterInfo.SupportsDeclarativeSso;
                 SupportsDeclarativeGroups = clusterInfo.SupportsDeclarativeGroups;
                 SupportsDeclarativeUsers = clusterInfo.SupportsDeclarativeUsers;
+                SupportsDeclarativePermissions = clusterInfo.SupportsDeclarativePermissions;
 
                 if (_type == ClusterNodeType.Primary)
                     _clusterManager.UpdateClusterFromPrimaryNode(clusterInfo); //update cluster nodes from primary node response
@@ -284,6 +286,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeSso = false;
                 SupportsDeclarativeGroups = false;
                 SupportsDeclarativeUsers = false;
+                SupportsDeclarativePermissions = false;
             }
             catch (Exception ex)
             {
@@ -300,6 +303,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeSso = false;
                 SupportsDeclarativeGroups = false;
                 SupportsDeclarativeUsers = false;
+                SupportsDeclarativePermissions = false;
                 success = false;
                 _clusterManager.DnsWebService.LogManager.Write("Heartbeat failed for " + _type.ToString() + " node '" + ToString() + "'.", ex);
             }

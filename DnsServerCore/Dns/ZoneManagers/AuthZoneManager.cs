@@ -838,7 +838,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (auth.UserOwnershipFromPrimary ? isClusterSecondary : auth.ManagedUserPaths.SequenceEqual(userOwnership))
                 userOwnership = null;
             string[] permissionOwnership = ConfigurationPermissions.GetOwnedPaths(manifest);
-            if (auth.ManagedPermissionPaths.SequenceEqual(permissionOwnership))
+            if (auth.PermissionOwnershipFromPrimary ? isClusterSecondary : auth.ManagedPermissionPaths.SequenceEqual(permissionOwnership))
                 permissionOwnership = null;
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
@@ -906,7 +906,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 return (persist => persist(), null, []);
 
             var files = changed.Select(entry => Path.Combine("zones", entry.Name + ".zone")).ToList();
-            if (membership.Count > 0 || ldap is not null || ldapOwnership is not null || groupChanges.Count > 0 || userChanges.Count > 0 || grants.Count > 0 || sso is not null || ssoOwnership is not null || groupOwnership is not null || userOwnership is not null)
+            if (membership.Count > 0 || ldap is not null || ldapOwnership is not null || groupChanges.Count > 0 || userChanges.Count > 0 || grants.Count > 0 || sso is not null || ssoOwnership is not null || groupOwnership is not null || userOwnership is not null || permissionOwnership is not null)
                 files.Add("auth.config");
             if (ownershipChanged)
                 files.Add(ManifestOwnershipFile);

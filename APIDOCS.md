@@ -5327,6 +5327,8 @@ The Primary can apply `auth.groups` when every peer advertises `supportsDeclarat
 
 The Primary can apply `auth.users` when every peer advertises `supportsDeclarativeUsers`. Secondaries inherit accounts and ownership. Disabled or deleted accounts lose active interactive sessions on those nodes.
 
+The Primary can apply section-level `auth.permissions` when every peer advertises `supportsDeclarativePermissions`. Secondaries inherit those grants and ownership. Zone-specific grants remain local during this transfer.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7469,6 +7471,7 @@ WHERE:
 - `supportsDeclarativeSso` (optional): Set to true when the Secondary can inherit manifest ownership of SSO settings. Required when the Primary manages any SSO fields.
 - `supportsDeclarativeGroups` (optional): Set to true when the Secondary can inherit manifest ownership of authentication groups.
 - `supportsDeclarativeUsers` (optional): Set to true when the Secondary can inherit manifest ownership of user accounts.
+- `supportsDeclarativePermissions` (optional): Set to true when the Secondary can inherit manifest ownership of section-level permission grants.
 
 RESPONSE:
 ```

@@ -38,6 +38,7 @@ namespace DnsServerCore.HttpApi.Models
         public bool SupportsDeclarativeSso { get; set; }
         public bool SupportsDeclarativeGroups { get; set; }
         public bool SupportsDeclarativeUsers { get; set; }
+        public bool SupportsDeclarativePermissions { get; set; }
         public bool SupportsDeclarativeClusterHandoff { get; set; }
         public string[]? ManagedOptionPaths { get; set; }
         public string? ClusterDomain { get; set; }

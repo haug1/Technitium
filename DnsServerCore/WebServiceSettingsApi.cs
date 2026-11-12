@@ -606,7 +606,8 @@ namespace DnsServerCore
                         manifest["auth"] = new System.Text.Json.Nodes.JsonObject
                         {
                             ["groups"] = ConfigurationGroups.Export(_dnsWebService._authManager),
-                            ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs)
+                            ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs),
+                            ["permissions"] = ConfigurationPermissions.Export(_dnsWebService._authManager)
                         };
                     if (_dnsWebService._authManager.ManifestStaticSessionDefinitions.Count > 0)
                     {
@@ -1254,6 +1255,11 @@ namespace DnsServerCore
                         }
                     }
                     var grants = ConfigurationPermissions.Prepare(manifest, auth, groups, users, sessionUser);
+                    if (manifest is not null && ConfigurationPlan.CheckClusterPermissionSupport(manifest, _dnsWebService._clusterManager, grants.Count > 0) is { } permissionPeers)
+                    {
+                        writer.WritePropertyName("permissionPeers");
+                        JsonSerializer.Serialize(writer, permissionPeers);
+                    }
                     if (declaresGroups)
                     {
                         ConfigurationGroups.ValidateRemovals(auth, groups, ldap, users, grants, sso, ConfigurationGroups.DeclaredZoneRemovals(manifest));
