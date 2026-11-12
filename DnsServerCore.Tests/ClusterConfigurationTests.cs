@@ -1,7 +1,10 @@
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography.X509Certificates;
+using DnsServerCore.HttpApi;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -400,6 +403,64 @@ namespace DnsServerCore.Tests
                         return node.GetProperty("id").GetInt32();
                 }
                 throw new InvalidDataException("The local Secondary was not present in cluster state.");
+            }
+        }
+
+        [Fact]
+        public async Task PrimaryRejectsIntervalChangesUntilMembersAdvertiseSupport()
+        {
+            await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
+            await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true);
+            JsonElement initialized = await primary.CallAsync(
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", primary.AdminToken);
+            LoopbackWebService.AssertOk(initialized);
+            Uri primaryUrl = new(Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray())
+                .GetProperty("url").GetString()!);
+
+            const string manifest = """{"schemaVersion":1,"cluster":{"configRefreshSeconds":120}}""";
+            JsonElement beforeJoin = await PreviewAsync();
+            LoopbackWebService.AssertOk(beforeJoin);
+
+            using var certificate = X509CertificateLoader.LoadPkcs12FromFile(
+                Path.Combine(primary.ConfigurationDirectory, "self-signed-cert.pfx"), null);
+            using var legacyClient = new HttpApiClient(new Uri($"https://127.0.0.1:{primaryUrl.Port}/"), ipv6Mode: default, ignoreCertificateErrors: true);
+            legacyClient.UseApiToken(primary.AdminToken);
+            const int legacyId = 1234;
+            await legacyClient.JoinClusterAsync(legacyId, new Uri("https://legacy.cluster.test:53443/"), [IPAddress.Loopback], certificate);
+
+            JsonElement blockedPreview = await PreviewAsync();
+            Assert.Equal("error", blockedPreview.GetProperty("status").GetString());
+            Assert.Contains("legacy.cluster.test", blockedPreview.GetProperty("errorMessage").GetString());
+            using var rejectedBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            JsonElement blockedApply = await primary.CallAsync("settings/config/apply", primary.AdminToken, rejectedBody,
+                beforeJoin.GetProperty("response").GetProperty("revision").GetString());
+            Assert.Equal("error", blockedApply.GetProperty("status").GetString());
+            Assert.Contains("has not advertised support", blockedApply.GetProperty("errorMessage").GetString());
+            JsonElement state = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            LoopbackWebService.AssertOk(state);
+            Assert.Equal(900, state.GetProperty("response").GetProperty("configRefreshIntervalSeconds").GetInt32());
+            await legacyClient.DeleteSecondaryNodeAsync(legacyId);
+
+            using var form = new FormUrlEncodedContent([
+                new("secondaryNodeIpAddresses", "127.0.0.1"),
+                new("primaryNodeUrl", primaryUrl.AbsoluteUri),
+                new("primaryNodeIpAddress", "127.0.0.1"),
+                new("primaryNodeUsername", "admin"),
+                new("primaryNodePassword", primary.AdminPassword),
+                new("ignoreCertificateErrors", "true")
+            ]);
+            LoopbackWebService.AssertOk(await secondary.CallAsync("admin/cluster/initJoin", secondary.AdminToken, form));
+
+            JsonElement supported = await PreviewAsync();
+            LoopbackWebService.AssertOk(supported);
+            using var applyBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await primary.CallAsync("settings/config/apply", primary.AdminToken, applyBody,
+                supported.GetProperty("response").GetProperty("revision").GetString()));
+
+            async Task<JsonElement> PreviewAsync()
+            {
+                using var body = new StringContent(manifest, Encoding.UTF8, "application/json");
+                return await primary.CallAsync("settings/config/plan", primary.AdminToken, body);
             }
         }
 

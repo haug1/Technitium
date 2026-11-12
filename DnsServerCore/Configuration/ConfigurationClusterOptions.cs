@@ -16,7 +16,7 @@ namespace DnsServerCore.Configuration
         internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.AddressRecordChange[] AddressRecords)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.AddressRecordChange[] AddressRecords, int[] IntervalPeers)
         {
             internal bool ValuesChanged => Current != Desired;
             internal bool AddressesChanged => !SameAddresses(CurrentAddresses, DesiredAddresses);
@@ -178,8 +178,10 @@ namespace DnsServerCore.Configuration
             Settings current = cluster.GetManifestOptions();
             var records = addresses is not null && self.Type == ClusterNodeType.Primary && !SameAddresses(currentAddresses, addresses)
                 ? cluster.PreparePrimaryAddressRecords(self, addresses) : [];
-            return new Candidate(current, ReadOptions(section, current), self.Id, self.Type, currentOwnership, ownership,
-                currentAddresses, addresses ?? currentAddresses, records);
+            Settings desired = ReadOptions(section, current);
+            int[] peers = current != desired ? cluster.CheckDeclarativeIntervalPeers() : [];
+            return new Candidate(current, desired, self.Id, self.Type, currentOwnership, ownership,
+                currentAddresses, addresses ?? currentAddresses, records, peers);
         }
 
         internal static bool SameAddresses(IReadOnlyList<IPAddress> current, IReadOnlyList<IPAddress> desired) =>
@@ -260,6 +262,8 @@ namespace DnsServerCore.Configuration
             writer.WriteBoolean("addressesChanged", candidate.AddressesChanged);
             writer.WritePropertyName("addressRecordRevisions");
             JsonSerializer.Serialize(writer, candidate.AddressRecords.Select(record => new { record.Zone, record.Owner, record.Type, record.Revision }));
+            writer.WritePropertyName("intervalPeers");
+            JsonSerializer.Serialize(writer, candidate.IntervalPeers);
             writer.WritePropertyName("currentOwnership");
             JsonSerializer.Serialize(writer, candidate.CurrentOwnership);
             writer.WriteEndObject();

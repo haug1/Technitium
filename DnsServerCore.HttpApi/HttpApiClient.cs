@@ -426,12 +426,16 @@ namespace DnsServerCore.HttpApi
             return clusterInfo;
         }
 
-        public async Task<ClusterInfo> JoinClusterAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, CancellationToken cancellationToken = default)
+        public Task<ClusterInfo> JoinClusterAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, CancellationToken cancellationToken = default) =>
+            JoinClusterWithCapabilitiesAsync(secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, secondaryNodeCertificate, false, cancellationToken);
+
+        public async Task<ClusterInfo> JoinClusterWithCapabilitiesAsync(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyCollection<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeClusterOptions, CancellationToken cancellationToken = default)
         {
             if (!_loggedIn)
                 throw new HttpApiClientException("No active session exists. Please login and try again.");
 
-            Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primary/join?secondaryNodeId={secondaryNodeId}&secondaryNodeUrl={Uri.EscapeDataString(secondaryNodeUrl.OriginalString)}&secondaryNodeIpAddresses={Uri.EscapeDataString(secondaryNodeIpAddresses.Join())}&secondaryNodeCertificate={Base64Url.EncodeToString(secondaryNodeCertificate.Export(X509ContentType.Cert))}", cancellationToken);
+            string capability = supportsDeclarativeClusterOptions ? "&supportsDeclarativeClusterOptions=true" : "";
+            Stream stream = await _httpClient.GetStreamAsync($"api/admin/cluster/primary/join?secondaryNodeId={secondaryNodeId}&secondaryNodeUrl={Uri.EscapeDataString(secondaryNodeUrl.OriginalString)}&secondaryNodeIpAddresses={Uri.EscapeDataString(secondaryNodeIpAddresses.Join())}&secondaryNodeCertificate={Base64Url.EncodeToString(secondaryNodeCertificate.Export(X509ContentType.Cert))}{capability}", cancellationToken);
 
             using JsonDocument jsonDoc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             JsonElement rootElement = jsonDoc.RootElement;

@@ -838,7 +838,7 @@ namespace DnsServerCore.Cluster
             DeleteAllClusterConfig();
         }
 
-        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate)
+        public ClusterNode JoinCluster(int secondaryNodeId, Uri secondaryNodeUrl, IReadOnlyList<IPAddress> secondaryNodeIpAddresses, X509Certificate2 secondaryNodeCertificate, bool supportsDeclarativeOptions)
         {
             if (!ClusterInitialized)
                 throw new DnsServerException("Failed to add Secondary node: the Cluster is not initialized.");
@@ -861,7 +861,10 @@ namespace DnsServerCore.Cluster
             }
 
             //add secondary node to cluster nodes
-            ClusterNode secondaryNode = new ClusterNode(this, secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, ClusterNodeType.Secondary, ClusterNodeState.Unknown);
+            ClusterNode secondaryNode = new ClusterNode(this, secondaryNodeId, secondaryNodeUrl, secondaryNodeIpAddresses, ClusterNodeType.Secondary, ClusterNodeState.Unknown)
+            {
+                SupportsDeclarativeClusterOptions = supportsDeclarativeOptions
+            };
             Dictionary<int, ClusterNode> updatedClusterNodes = new Dictionary<int, ClusterNode>(existingClusterNodes.Count + 1);
 
             foreach (KeyValuePair<int, ClusterNode> existingClusterNode in existingClusterNodes)
@@ -1184,6 +1187,19 @@ namespace DnsServerCore.Cluster
             }
         }
 
+        internal int[] CheckDeclarativeIntervalPeers()
+        {
+            var peers = _clusterNodes.Values.Where(node => node.State != ClusterNodeState.Self).OrderBy(node => node.Id);
+            var ids = new List<int>();
+            foreach (ClusterNode peer in peers)
+            {
+                if (!peer.SupportsDeclarativeClusterOptions)
+                    throw new InvalidDataException($"/cluster: Node '{peer.Name}' has not advertised support for declarative interval changes.");
+                ids.Add(peer.Id);
+            }
+            return ids.ToArray();
+        }
+
         internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
         {
             if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.OwnershipChanged))
@@ -1205,6 +1221,9 @@ namespace DnsServerCore.Cluster
                 {
                     persist(() =>
                     {
+                        if (change.ValuesChanged && !CheckDeclarativeIntervalPeers().SequenceEqual(change.IntervalPeers))
+                            throw new InvalidDataException("/cluster: Cluster membership changed during apply. Create a new preview.");
+
                         foreach (AddressRecordChange record in change.AddressRecords)
                         {
                             if (zones.GetAuthZoneInfo(record.Zone)?.LastModified != record.Revision)
@@ -1727,7 +1746,8 @@ namespace DnsServerCore.Cluster
                 ClusterNode selfSecondaryNode = new ClusterNode(this, RandomNumberGenerator.GetInt32(int.MaxValue), secondaryNodeUrl, secondaryNodeIpAddresses, ClusterNodeType.Secondary, ClusterNodeState.Self);
 
                 //join cluster
-                primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses, _dnsWebService.WebServiceTlsCertificate, cancellationToken);
+                primaryNodeClusterInfo = await primaryNodeApiClient.JoinClusterWithCapabilitiesAsync(selfSecondaryNode.Id, secondaryNodeUrl, secondaryNodeIpAddresses,
+                    _dnsWebService.WebServiceTlsCertificate, supportsDeclarativeClusterOptions: true, cancellationToken);
 
                 //initialize cluster
                 Dictionary<int, ClusterNode> clusterNodes = new Dictionary<int, ClusterNode>(primaryNodeClusterInfo.ClusterNodes.Count + 1);
