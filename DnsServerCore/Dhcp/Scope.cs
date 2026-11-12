@@ -126,7 +126,7 @@ namespace DnsServerCore.Dhcp
         {
         }
 
-        private Scope(Stream s, LogManager log, DhcpServer dhcpServer, bool resolveLocalDns)
+        internal Scope(Stream s, LogManager log, DhcpServer dhcpServer, bool resolveLocalDns)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "SC")
                 throw new InvalidDataException("DhcpServer scope file format is invalid.");

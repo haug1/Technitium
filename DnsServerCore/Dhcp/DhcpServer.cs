@@ -27,6 +27,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -1501,15 +1502,86 @@ namespace DnsServerCore.Dhcp
         internal void CheckManifestScopeOptions(Scope scope, Action<Scope> prepare)
         {
             string scopePath = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name);
-            string reservationPath = scopePath + "/reservations";
-            string[] paths = _managedPaths.Where(path => path.StartsWith(scopePath + "/", StringComparison.Ordinal) &&
-                path != reservationPath && !path.StartsWith(reservationPath + "/", StringComparison.Ordinal)).ToArray();
+            string[] paths = GetManagedScopeOptionPaths(scopePath);
             if (paths.Length == 0)
                 return;
 
             using Scope candidate = scope.CloneForManifest();
             prepare(candidate);
             ConfigurationDhcp.CheckScopeOptionOwnership(scope, candidate, scopePath, paths);
+        }
+
+        private string[] GetManagedScopeOptionPaths(string scopePath)
+        {
+            string reservationPath = scopePath + "/reservations";
+            return _managedPaths.Where(path => path.StartsWith(scopePath + "/", StringComparison.Ordinal) &&
+                path != reservationPath && !path.StartsWith(reservationPath + "/", StringComparison.Ordinal)).ToArray();
+        }
+
+        internal static IEnumerable<ZipArchiveEntry> GetScopeBackupEntries(ZipArchive archive)
+        {
+            return archive.Entries.Where(entry => entry.FullName == "scopes/" + entry.Name &&
+                entry.Name.EndsWith(".scope", StringComparison.Ordinal) &&
+                entry.Name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0);
+        }
+
+        internal void CheckManifestScopeRestore(ZipArchive archive, bool deleteExistingFiles)
+        {
+            if (_managedPaths.Length == 0)
+                return;
+
+            var restored = new Dictionary<string, (IPAddress Start, IPAddress End)>(StringComparer.Ordinal);
+            var fileNames = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (ZipArchiveEntry entry in GetScopeBackupEntries(archive))
+            {
+                using Stream input = entry.Open();
+                using var candidate = new Scope(input, _log, this, resolveLocalDns: false);
+                if (!string.Equals(entry.Name, candidate.Name + ".scope", StringComparison.Ordinal) || !fileNames.Add(entry.Name))
+                    throw new InvalidDataException("The DHCP backup contains an inconsistent or duplicate scope name.");
+
+                restored.Add(candidate.Name, (candidate.StartingAddress, candidate.EndingAddress));
+                if (_scopes.TryGetValue(candidate.Name, out Scope current))
+                {
+                    string path = ConfigurationPlan.AppendPath("/dhcp/scopes", candidate.Name);
+                    string[] optionPaths = GetManagedScopeOptionPaths(path);
+                    if (optionPaths.Length > 0)
+                        ConfigurationDhcp.CheckScopeOptionOwnership(current, candidate, path, optionPaths);
+                    CheckManifestReservations(current, candidate.ReservedLeases);
+                }
+                else
+                {
+                    CheckManifestScopeMembership(candidate.Name);
+                    if (OperatingSystem.IsWindows())
+                    {
+                        foreach (string name in _scopes.Keys)
+                        {
+                            if (name.Equals(candidate.Name, StringComparison.OrdinalIgnoreCase))
+                                CheckManifestScopeMembership(name);
+                        }
+                    }
+                }
+            }
+
+            foreach (var (name, scope) in _scopes)
+            {
+                if (restored.ContainsKey(name))
+                    continue;
+                if (deleteExistingFiles)
+                    CheckManifestScopeMembership(name);
+                else
+                    restored.Add(name, (scope.StartingAddress, scope.EndingAddress));
+            }
+
+            foreach (var (name, range) in restored)
+            {
+                string path = ConfigurationPlan.AppendPath("/dhcp/scopes", name);
+                if (!_managedPaths.Contains(path, StringComparer.Ordinal))
+                    continue;
+                if (restored.Any(entry => entry.Key != name &&
+                    (Scope.IsAddressInRange(range.Start, entry.Value.Start, entry.Value.End) ||
+                        Scope.IsAddressInRange(entry.Value.Start, range.Start, range.End))))
+                    throw new DhcpServerException($"{path}: The restored address ranges overlap a managed scope.");
+            }
         }
 
         internal void CheckManifestReservations(Scope scope, IReadOnlyCollection<Lease> proposed)

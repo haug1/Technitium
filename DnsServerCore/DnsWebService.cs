@@ -1542,18 +1542,15 @@ namespace DnsServerCore
                             }
 
                             //extract scope files from backup
-                            foreach (ZipArchiveEntry entry in backupZip.Entries)
+                            foreach (ZipArchiveEntry entry in DhcpServer.GetScopeBackupEntries(backupZip))
                             {
-                                if (entry.FullName.StartsWith("scopes/", StringComparison.Ordinal))
+                                try
                                 {
-                                    try
-                                    {
-                                        await entry.ExtractToFileAsync(Path.Combine(_configFolder, "scopes", entry.Name), true);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        _log.Write(ex);
-                                    }
+                                    await entry.ExtractToFileAsync(Path.Combine(_configFolder, "scopes", entry.Name), true);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _log.Write(ex);
                                 }
                             }
                         }

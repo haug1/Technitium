@@ -2202,10 +2202,13 @@ namespace DnsServerCore
                             bool checkWeb = webServiceSettings && (_dnsWebService._manifestOwnsRealIpHeader || _dnsWebService._manifestOwnsFrameAncestors || _dnsWebService._manifestOwnsReverseProxyAcl || _dnsWebService._managedWebListeners != 0);
                             bool checkDomainLists = allowedZones && _dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList ||
                                 blockedZones && _dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList;
-                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists)
+                            bool checkScopes = scopes && _dnsWebService._dhcpServer.ManagedPaths.Count > 0;
+                            if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
                                 {
+                                    if (checkScopes)
+                                        _dnsWebService._dhcpServer.CheckManifestScopeRestore(archive, deleteExistingFiles);
                                     if (checkDomainLists)
                                         _dnsWebService.CheckManagedDomainLists(archive, allowedZones, blockedZones);
                                     if (checkLog && archive.GetEntry("log.config") is ZipArchiveEntry logEntry)

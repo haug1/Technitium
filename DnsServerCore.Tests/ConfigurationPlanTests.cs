@@ -2652,6 +2652,55 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpRestoreRejectsManagedChangesBeforeRestoringOtherStores()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            await using var source = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Default":{"leaseTime":{"days":1}}}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+
+            LoopbackWebService.AssertOk(await source.CallAsync("settings/set?maxLogFileDays=10", source.AdminToken));
+            await source.RestartAsync();
+            LoopbackWebService.AssertOk(await source.CallAsync("dhcp/scopes/set?name=Default&leaseTimeDays=2", source.AdminToken));
+            JsonElement rejected = await RestoreAsync(await BackupAsync(includeScopes: true), deleteExisting: false);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Default/leaseTime/days", rejected.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+            rejected = await RestoreAsync(await BackupAsync(includeScopes: false), deleteExisting: true);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Default", rejected.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+            LoopbackWebService.AssertOk(await source.CallAsync("dhcp/scopes/set?name=Default&leaseTimeDays=1&leaseTimeHours=3", source.AdminToken));
+            LoopbackWebService.AssertOk(await RestoreAsync(await BackupAsync(includeScopes: true), deleteExisting: true));
+            Assert.Equal(10, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            JsonElement scope = await server.CallAsync("dhcp/scopes/get?name=Default", server.AdminToken);
+            LoopbackWebService.AssertOk(scope);
+            Assert.Equal(3, scope.GetProperty("response").GetProperty("leaseTimeHours").GetInt32());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            async Task<byte[]> BackupAsync(bool includeScopes)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/settings/backup?logSettings=true&scopes={includeScopes}");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", source.AdminToken);
+                using HttpResponseMessage response = await source.Client.SendAsync(request);
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsByteArrayAsync();
+            }
+
+            async Task<JsonElement> RestoreAsync(byte[] backup, bool deleteExisting)
+            {
+                using var form = new MultipartFormDataContent();
+                form.Add(new ByteArrayContent(backup), "file", "backup.zip");
+                return await server.CallAsync($"settings/restore?scopes=true&logSettings=true&deleteExistingFiles={deleteExisting}", server.AdminToken, form);
+            }
+        }
+
+        [Fact]
         public async Task DhcpApplyRestoresLoggingAndExistingScopeWhenScopeWriteFails()
         {
             await using var server = await LoopbackWebService.StartAsync();

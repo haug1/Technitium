@@ -5645,7 +5645,7 @@ WHERE:
 - `blockedZones` (optional): Set to `true` to restore blocked zones file. Default value is `false`.
 - `blockLists` (optional): Set to `true` to restore block lists cache files. Default value is `false`.
 - `apps` (optional): Set to `true` to restore the DNS apps. Default value is `false`.
-- `scopes` (optional): Set to `true` to restore DHCP scope files. Default value is `false`.
+- `scopes` (optional): Set to `true` to restore DHCP scope files. A conflict with manifest-managed DHCP membership, options, or reservations rejects the restore before it changes any selected store. Default value is `false`.
 - `stats` (optional): Set to `true` to restore dashboard stats files. Default value is `false`.
 - `logs` (optional): Set to `true` to restore log files. Default value is `false`.
 - `deleteExistingFiles` (optional). Set to `true` to delete existing files for selected items. Default value is `false`.
