@@ -51,9 +51,9 @@ To verify propagation, use the same build for both nodes. This mode configures t
 python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll --propagation
 ```
 
-The GitHub Actions regression workflow runs both modes. It publishes the current console host and the pinned compatibility baseline `281fcffd`.
+Run the **Configuration integration tests** workflow manually in GitHub Actions when verifying a release or cluster changes. It publishes the current console host and the pinned compatibility baseline `281fcffd`, then runs both modes.
 
-The Linux workflow also checks app package retry against a loopback HTTPS source. Run it against a published console host with Python 3 and OpenSSL available.
+The integration workflow also checks app package retry against a loopback HTTPS source. Run it against a published console host with Python 3 and OpenSSL available.
 
 ```sh
 python3 DnsServerCore.Tests/app_package_retry.py /path/to/current/DnsServerApp.dll

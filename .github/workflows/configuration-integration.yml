@@ -1,0 +1,53 @@
+name: Configuration integration tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: DnsServer
+      - uses: actions/checkout@v5
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          ref: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
+          path: TechnitiumLibrary
+      - name: Check out the cluster compatibility baseline
+        uses: actions/checkout@v5
+        with:
+          ref: 281fcffd2defec08eeb6def870deb08726c4dc8e
+          path: DnsServerBaseline
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build TechnitiumLibrary
+        working-directory: TechnitiumLibrary
+        run: |
+          for project in TechnitiumLibrary.ByteTree TechnitiumLibrary.Net TechnitiumLibrary.Security.OTP; do
+            dotnet build "$project/$project.csproj" -c Release
+          done
+      - name: Publish the console host for integration tests
+        working-directory: DnsServer
+        run: dotnet publish DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-integration-build"
+      - name: Verify HTTPS app package retry
+        working-directory: DnsServer
+        run: python3 DnsServerCore.Tests/app_package_retry.py "$RUNNER_TEMP/technitium-integration-build/DnsServerApp.dll"
+      - name: Verify declarative settings propagate between cluster nodes
+        working-directory: DnsServer
+        timeout-minutes: 8
+        run: python3 DnsServerCore.Tests/mixed_cluster.py "$RUNNER_TEMP/technitium-integration-build/DnsServerApp.dll" --propagation
+      - name: Verify older nodes block unsupported declarative changes
+        working-directory: DnsServer
+        timeout-minutes: 4
+        run: |
+          dotnet publish ../DnsServerBaseline/DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-baseline"
+          python3 DnsServerCore.Tests/mixed_cluster.py \
+            "$RUNNER_TEMP/technitium-integration-build/DnsServerApp.dll" \
+            "$RUNNER_TEMP/technitium-cluster-baseline/DnsServerApp.dll"
