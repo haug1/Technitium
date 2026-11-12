@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Configuration
 {
@@ -89,6 +90,7 @@ namespace DnsServerCore.Configuration
 
             ValidateSchema(root);
             CheckDnsNameKeys(root, "zones", "", allowRoot: true);
+            ValidateZoneRecords(root);
             if (root.TryGetProperty("dns", out JsonElement dns))
             {
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
@@ -439,22 +441,82 @@ namespace DnsServerCore.Configuration
             foreach (JsonProperty entry in entries.EnumerateObject())
             {
                 string entryPath = AppendPath(path + "/" + propertyName, entry.Name);
-                string name = entry.Name.TrimEnd('.');
-                try
-                {
-                    if (DnsClient.IsDomainNameUnicode(name))
-                        name = DnsClient.ConvertDomainNameToAscii(name);
-                }
-                catch (ArgumentException)
-                {
-                    throw new InvalidDataException($"{DisplayPath(entryPath)}: Invalid DNS name.");
-                }
-
-                if ((!allowRoot && (name.Length == 0)) || !DnsClient.IsDomainNameValid(name))
-                    throw new InvalidDataException($"{DisplayPath(entryPath)}: Invalid DNS name.");
+                string name = CanonicalDnsName(entry.Name, entryPath, allowRoot);
 
                 if (!names.Add(name))
                     throw new InvalidDataException($"{DisplayPath(entryPath)}: Duplicate canonical DNS name.");
+            }
+        }
+
+        private static string CanonicalDnsName(string value, string path, bool allowRoot)
+        {
+            string name = value.TrimEnd('.');
+            try
+            {
+                if (DnsClient.IsDomainNameUnicode(name))
+                    name = DnsClient.ConvertDomainNameToAscii(name);
+            }
+            catch (ArgumentException)
+            {
+                throw new InvalidDataException($"{DisplayPath(path)}: Invalid DNS name.");
+            }
+
+            if ((!allowRoot && name.Length == 0) || !DnsClient.IsDomainNameValid(name))
+                throw new InvalidDataException($"{DisplayPath(path)}: Invalid DNS name.");
+
+            return name.ToLowerInvariant();
+        }
+
+        private static void ValidateZoneRecords(JsonElement root)
+        {
+            if (!root.TryGetProperty("zones", out JsonElement zones))
+                return;
+
+            foreach (JsonProperty zone in zones.EnumerateObject())
+            {
+                if (zone.Value.ValueKind != JsonValueKind.Object || !zone.Value.TryGetProperty("records", out JsonElement records) ||
+                    records.ValueKind != JsonValueKind.Array)
+                    continue;
+
+                string zonePath = AppendPath("/zones", zone.Name);
+                string zoneName = CanonicalDnsName(zone.Name, zonePath, allowRoot: true);
+                int index = 0;
+                foreach (JsonElement record in records.EnumerateArray())
+                {
+                    string recordPath = $"{zonePath}/records/{index++}";
+                    string owner = record.GetProperty("owner").GetString();
+                    if (owner != "@")
+                        owner = CanonicalDnsName(owner, recordPath + "/owner", allowRoot: true);
+                    else
+                        owner = zoneName;
+
+                    if (!AuthZoneManager.DomainBelongsToZone(zoneName, owner))
+                        throw new InvalidDataException($"{DisplayPath(recordPath + "/owner")}: Record owner must belong to its zone.");
+
+                    JsonElement typeValue = record.GetProperty("type");
+                    DnsResourceRecordType type;
+                    if (typeValue.ValueKind == JsonValueKind.Number)
+                        type = (DnsResourceRecordType)decimal.ToUInt16(typeValue.GetDecimal());
+                    else if (!Enum.TryParse(typeValue.GetString(), out type))
+                        throw new InvalidDataException($"{DisplayPath(recordPath + "/type")}: Unknown record type. Use a numeric type code for unrecognized types.");
+
+                    JsonElement data = record.GetProperty("data");
+                    if (data.TryGetProperty("forwarder", out _) && type != DnsResourceRecordType.FWD)
+                        throw new InvalidDataException($"{DisplayPath(recordPath + "/data/forwarder")}: Forwarder data requires an FWD record.");
+                    if (data.TryGetProperty("app", out _) && type != DnsResourceRecordType.APP)
+                        throw new InvalidDataException($"{DisplayPath(recordPath + "/data/app")}: App data requires an APP record.");
+                    if (data.TryGetProperty("txtBase64", out JsonElement segments))
+                    {
+                        int segmentIndex = 0;
+                        byte[] decoded = new byte[255];
+                        foreach (JsonElement segment in segments.EnumerateArray())
+                        {
+                            if (!Convert.TryFromBase64String(segment.GetString(), decoded, out _))
+                                throw new InvalidDataException($"{DisplayPath(recordPath + $"/data/txtBase64/{segmentIndex}")}: Expected base64 text for a segment of at most 255 bytes.");
+                            segmentIndex++;
+                        }
+                    }
+                }
             }
         }
 

@@ -107,6 +107,35 @@ namespace DnsServerCore.Tests
             Assert.DoesNotContain(variable, error.Message);
         }
 
+        [Theory]
+        [InlineData("outside.test", "A", "{\"zoneFile\":\"192.0.2.1\"}", "/owner")]
+        [InlineData("@", "UNKNOWN", "{\"rawHex\":\"00\"}", "/type")]
+        [InlineData("@", "A", "{\"forwarder\":{\"address\":\"192.0.2.1\"}}", "/data/forwarder")]
+        [InlineData("@", "TXT", "{\"txtBase64\":[\"invalid***\"]}", "/data/txtBase64/0")]
+        public void ZoneRecordValidationReportsInvalidField(string owner, string type, string data, string suffix)
+        {
+            string path = WriteManifest($$"""
+                {"schemaVersion":1,"zones":{"lab.example.test":{"records":[{"owner":"{{owner}}","type":"{{type}}","data":{{data}} }] } } }
+                """);
+
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains("/zones/lab.example.test/records/0" + suffix, error.Message);
+            Assert.DoesNotContain("invalid***", error.Message);
+        }
+
+        [Fact]
+        public void ZoneRecordValidationAcceptsApexAndCanonicalInternationalizedNames()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"zones":{"bücher.test.":{"records":[
+                    {"owner":"@","type":"TXT","data":{"txtBase64":["SGVsbG8="]}},
+                    {"owner":"www.XN--BCHER-KVA.TEST.","type":65280,"data":{"rawHex":"00"}}
+                ]}}}
+                """);
+
+            ConfigurationManifest.Load(path);
+        }
+
         private string WriteManifest(string json)
         {
             string path = Path.Combine(_directory.FullName, ConfigurationManifest.DefaultFileName);
