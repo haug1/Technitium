@@ -205,3 +205,50 @@ These fields persist in `dns.config`, apply live, and transfer across the cluste
 | `dns.blocking.answerTtl` | `blockingAnswerTtl` | Unsigned seconds, 30 | Use the DNS TTL parser for legacy API input. Updates the blocking SOA. |
 | `dns.blocking.customAddresses` | `customBlockingAddresses` | IP address array, empty | IPv4 or IPv6 for custom address mode. Legacy API skips invalid addresses. Storage uses a byte-sized count. |
 | `dns.tsigKeys` | `tsigKeys` | Named keys with algorithm and secret reference, empty | Up to 255 keys. Normalize DNS names, require unique names, and validate algorithms and secrets with the TSIG implementation. The legacy API can generate a secret from empty input. The cluster catalog key is lifecycle-managed and cannot be removed through settings. |
+
+## DHCP scopes and reservations
+
+Scopes are keyed by their case-sensitive name and are node-local. The DHCP API reads and writes them through `dhcp/scopes/*`. The server reads versions 1–10 and writes version 10 of `scopes/<name>.scope`. Scope changes apply through the DHCP manager without restarting the DNS or web services. Enabling a scope can open DHCP listeners. DHCP configuration is excluded from cluster transfer. [Scope API](DnsServerCore/WebServiceDhcpApi.cs#L375) · [Scope persistence](DnsServerCore/Dhcp/Scope.cs#L124) · [DHCP lifecycle](DnsServerCore/Dhcp/DhcpServer.cs#L1454) · [Cluster transfer](DnsServerCore/Cluster/ClusterManager.cs#L866)
+
+Defaults below describe a scope created through the API. On initial creation of the scopes directory, the server seeds a disabled `Default` scope for 192.168.1.1–192.168.1.254 with mask 255.255.255.0, an exclusion for .1–.10, router .1, domain `home`, local DNS enabled, a one-day lease, and client identifier override enabled. [Scope defaults](DnsServerCore/Dhcp/Scope.cs#L45) · [Initial scope](DnsServerCore/Dhcp/DhcpServer.cs#L94)
+
+| Proposed manifest path under `dhcp.scopes.<name>` | API field or operation | Type and default | Validation and dependencies |
+| --- | --- | --- | --- |
+| Resource key | `name`, `newName` | Scope name, required | Filename-safe name. The legacy API uses `newName` to rename; the manifest must define how identity changes are applied. |
+| `enabled` | `enable` and `disable` | Boolean, true for API-created scopes | Activation requires a usable network interface and can fail on bind. |
+| `startingAddress` | `startingAddress` | IPv4 address, required for creation | Range start must precede end and differ from the network address. Validate range overlap against other scopes. |
+| `endingAddress` | `endingAddress` | IPv4 address, required for creation | Range end must follow start and differ from the broadcast address. |
+| `subnetMask` | `subnetMask` | IPv4 subnet mask, required for creation | Determines network and broadcast addresses. Validate with the address range. |
+| `leaseTime.days` | `leaseTimeDays` | Integer days, 1 | Range 0–999. |
+| `leaseTime.hours` | `leaseTimeHours` | Integer hours, 0 | Range 0–23. |
+| `leaseTime.minutes` | `leaseTimeMinutes` | Integer minutes, 0 | Range 0–59. |
+| `offerDelayMs` | `offerDelayTime` | Unsigned 16-bit milliseconds, 0 | Applied before sending an offer. |
+| `pingCheck.enabled` | `pingCheckEnabled` | Boolean, false | Enables address checks before offering a lease. |
+| `pingCheck.timeoutMs` | `pingCheckTimeout` | Unsigned 16-bit milliseconds, 1000 | Used when ping checks are enabled. |
+| `pingCheck.retries` | `pingCheckRetries` | Unsigned 8-bit count, 2 | Used when ping checks are enabled. |
+| `domainName` | `domainName` | Optional DNS name, unset | Normalize and validate as a DNS name. Used for DHCP domain option and DNS updates. |
+| `domainSearchList` | `domainSearchList` | DNS name array, empty | Normalize and validate each name. Legacy API accepts a comma-separated list. |
+| `dnsUpdates.enabled` | `dnsUpdates` | Boolean, true | Controls lease-driven DNS updates for a scope with a domain name. |
+| `dnsUpdates.overwriteDynamicRecords` | `dnsOverwriteForDynamicLease` | Boolean, false | Controls replacement of an existing DNS record for a dynamic lease. |
+| `dnsUpdates.ttl` | `dnsTtl` | Unsigned seconds, 900 | Use the DNS TTL parser for legacy API input. |
+| `boot.serverAddress` | `serverAddress` | Optional IPv4 address, unset | Uses the DHCP server address when absent. |
+| `boot.serverHostName` | `serverHostName` | Optional string, unset | The setter accepts up to 63 characters. |
+| `boot.fileName` | `bootFileName` | Optional string, unset | The setter accepts up to 127 characters. |
+| `routerAddress` | `routerAddress` | Optional IPv4 address, unset | Supplies the router option when present. |
+| `dns.useThisServer` | `useThisDnsServer` | Boolean, false | The API ignores supplied DNS servers while enabled. Resolved server addresses are derived. |
+| `dns.servers` | `dnsServers` | IPv4 address array, empty | Used when the local DNS flag is false. |
+| `winsServers` | `winsServers` | IPv4 address array, empty | Legacy API accepts comma-separated addresses. |
+| `ntp.servers` | `ntpServers` | IPv4 address array, empty | Addresses may be supplemented by resolving configured names. |
+| `ntp.serverDomainNames` | `ntpServerDomainNames` | DNS name array, empty | Normalize and validate names. Resolved addresses are derived. |
+| `staticRoutes` | `staticRoutes` | Route array, empty | Each entry contains a destination, mask, and router. Use the classless route parser. |
+| `vendorInfo` | `vendorInfo` | Map from vendor identifier to encoded payload, empty | Unique vendor identifiers. Legacy payload accepts hexadecimal or text input. |
+| `capwapAcIpAddresses` | `capwapAcIpAddresses` | IPv4 address array, empty | Supplies CAPWAP controller addresses. |
+| `tftpServerAddresses` | `tftpServerAddresses` | IPv4 address array, empty | Supplies TFTP server addresses. |
+| `genericOptions` | `genericOptions` | Option array with byte code and hexadecimal payload, empty | Use DHCP option parsing and validate encoded lengths before persistence. |
+| `exclusions` | `exclusions` | Address range array, empty | Both ends must fall within the scope. |
+| `reservations` | `reservedLeases`, `addReservedLease`, `removeReservedLease` | Map keyed by normalized MAC address, empty | Each entry has an IPv4 address and optional hostname and comments. The bulk setter validates scope membership. Dedicated add rejects duplicate client identifiers. |
+| `allowOnlyReservedLeases` | `allowOnlyReservedLeases` | Boolean, false | Disables dynamic address allocation. |
+| `blockLocallyAdministeredMacAddresses` | `blockLocallyAdministeredMacAddresses` | Boolean, false | Blocks dynamic allocation to clients using locally administered addresses. |
+| `ignoreClientIdentifierOption` | `ignoreClientIdentifierOption` | Boolean, true for API-created scopes | Uses the MAC address for allocation. Changing identity rules can affect renewal. |
+
+Active leases are persisted in the same scope files as settings. Reconciliation must preserve them unless an explicit scope operation requires otherwise. Offers, allocation cursors, interface bindings, and lease timestamps are runtime state. Lease conversion to or from a reservation is a runtime operation that also changes configured reservations. [Reservation setters](DnsServerCore/Dhcp/Scope.cs#L2152) · [Lease persistence](DnsServerCore/Dhcp/Scope.cs#L1796)
