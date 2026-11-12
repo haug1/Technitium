@@ -50,6 +50,45 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ManagedAppTransferRejectsAnUnreadableArchiveAndCanRetry()
+        {
+            const string appPath = "/apps/packages/Fixture";
+            await using var server = await LoopbackWebService.StartAsync();
+            string appFolder = Path.Combine(server.ConfigurationDirectory, "apps", "Fixture");
+
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => TransferAsync("not a ZIP"u8.ToArray()));
+            Assert.Contains(appPath + "/source", error.Message);
+            Assert.False(Directory.Exists(appFolder));
+            Assert.Empty(server.Applications.ManagedPaths);
+
+            using var package = new MemoryStream();
+            using (var archive = new ZipArchive(package, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                using var config = new StreamWriter(archive.CreateEntry("dnsApp.config").Open());
+                config.Write("{}");
+            }
+
+            await TransferAsync(package.ToArray());
+            Assert.True(File.Exists(Path.Combine(appFolder, "Fixture.zip")));
+            Assert.Contains("Fixture", server.Applications.Applications.Keys);
+            Assert.Contains(appPath, server.Applications.ManagedPaths);
+
+            async Task TransferAsync(byte[] bytes)
+            {
+                using var transfer = new MemoryStream();
+                using (var archive = new ZipArchive(transfer, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    using Stream entry = archive.CreateEntry("apps/Fixture/Fixture.zip").Open();
+                    entry.Write(bytes);
+                }
+
+                transfer.Position = 0;
+                using var incoming = new ZipArchive(transfer, ZipArchiveMode.Read);
+                await server.Applications.ApplyClusterTransferAsync(DnsApplicationManager.ReadClusterTransfer(incoming), [appPath]);
+            }
+        }
+
+        [Fact]
         public async Task AppConfigurationChangesDnsResponsesAndSurvivesRestart()
         {
             await using var server = await LoopbackWebService.StartAsync();

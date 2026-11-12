@@ -221,9 +221,7 @@ namespace DnsServerCore.Configuration
                     hash = SHA256.HashData(input);
                     input.Position = 0;
                 }
-                using var archive = new ZipArchive(input, ZipArchiveMode.Read);
-                if (archive.Entries.Count == 0)
-                    throw new InvalidDataException();
+                ReadPackageArchive(input);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
             {
@@ -232,6 +230,13 @@ namespace DnsServerCore.Configuration
 
             if (hash is not null)
                 CheckPackageHash(sha256, hash, path + (packageDigest is null ? "/source/sha256" : "/packageSha256"));
+        }
+
+        private static void ReadPackageArchive(Stream input)
+        {
+            using var archive = new ZipArchive(input, ZipArchiveMode.Read, leaveOpen: true);
+            if (archive.Entries.Count == 0)
+                throw new InvalidDataException();
         }
 
         private static (string Package, string Source) ReadPackagePins(JsonElement declaration, JsonElement source, string path)
@@ -373,23 +378,31 @@ namespace DnsServerCore.Configuration
                 var packages = new Dictionary<string, byte[]>(StringComparer.Ordinal);
                 foreach (Entry entry in entries.Where(entry => entry.InstallName is not null))
                 {
-                    if (entry.RemoteSource is null)
+                    byte[] package = entry.Package;
+                    if (entry.RemoteSource is not null)
                     {
-                        packages.Add(entry.Name, entry.Package);
-                        continue;
+                        try
+                        {
+                            package = await manager.DownloadManifestPackageAsync(entry.RemoteSource);
+                        }
+                        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or OperationCanceledException)
+                        {
+                            throw new InvalidDataException($"{entry.SettingPath}/source: Could not download the app package.");
+                        }
+                        if (entry.PackageSha256 is not null)
+                            CheckPackageHash(entry.PackageSha256, SHA256.HashData(package), entry.SettingPath + "/source/sha256");
                     }
-                    byte[] downloaded;
+
                     try
                     {
-                        downloaded = await manager.DownloadManifestPackageAsync(entry.RemoteSource);
+                        using var input = new MemoryStream(package, writable: false);
+                        ReadPackageArchive(input);
                     }
-                    catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or OperationCanceledException)
+                    catch (InvalidDataException)
                     {
-                        throw new InvalidDataException($"{entry.SettingPath}/source: Could not download the app package.");
+                        throw new InvalidDataException($"{entry.SettingPath}/source: Expected a readable, nonempty ZIP package.");
                     }
-                    if (entry.PackageSha256 is not null)
-                        CheckPackageHash(entry.PackageSha256, SHA256.HashData(downloaded), entry.SettingPath + "/source/sha256");
-                    packages.Add(entry.Name, downloaded);
+                    packages.Add(entry.Name, package);
                 }
 
                 Entry[] changed = entries.Where(entry => entry.InstallName is null && !entry.Remove && entry.Before != entry.After).ToArray();
