@@ -20,7 +20,7 @@ namespace DnsServerCore.Configuration
             IPAddress.Parse("192.0.2.1"), IPAddress.Parse("192.0.2.2"), IPAddress.Parse("255.255.255.0"), null, null)
             { IgnoreClientIdentifierOption = true });
 
-        private sealed record Reservation(IPAddress Address, string HostName, string Comments);
+        private sealed record Reservation(IPAddress Address, string HostName, string Comments, string HardwareAddress);
 
         private sealed record ScopeState(IPAddress Start, IPAddress End, IPAddress Mask, bool Enabled);
 
@@ -65,9 +65,11 @@ namespace DnsServerCore.Configuration
                     foreach (JsonProperty reservation in reservations.EnumerateObject())
                     {
                         string entryPath = ConfigurationPlan.AppendPath(path + "/reservations", reservation.Name);
-                        if (!identifiers.Add(ReadHardwareAddress(reservation.Name, entryPath)))
-                            throw new InvalidDataException($"{entryPath}: Duplicate reservation hardware address.");
+                        if (!identifiers.Add(ReservationKey(ReadReservationIdentifier(reservation.Name, entryPath))))
+                            throw new InvalidDataException($"{entryPath}: Duplicate reservation client identifier.");
 
+                        if (reservation.Value.ValueKind == JsonValueKind.Object && reservation.Value.TryGetProperty("hardwareAddress", out JsonElement hardware))
+                            ReadReservationHardware(hardware.GetString(), entryPath + "/hardwareAddress");
                         IPAddress address = reservation.Value.ValueKind == JsonValueKind.Object
                             ? ReadAddress(reservation.Value, "address") : null;
                         if (address is null)
@@ -135,13 +137,13 @@ namespace DnsServerCore.Configuration
                 }
 
                 Lease[] activeLeases = scope.Leases.Values.Where(lease => lease.LeaseExpires > now)
-                    .OrderBy(lease => lease.Address.ConvertIpToNumber()).ThenBy(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal)
+                    .OrderBy(lease => lease.Address.ConvertIpToNumber()).ThenBy(lease => ReservationKey(lease.ClientIdentifier), StringComparer.Ordinal)
                     .ToArray();
                 writer.WriteStartArray("activeLeases");
                 foreach (Lease lease in activeLeases)
                 {
                     writer.WriteStartObject();
-                    writer.WriteString("hardwareAddress", BitConverter.ToString(lease.HardwareAddress));
+                    writer.WriteString("clientKey", ReservationKey(lease.ClientIdentifier));
                     writer.WriteString("address", lease.Address.ToString());
                     writer.WriteBoolean("dynamic", lease.Type == LeaseType.Dynamic);
                     writer.WriteEndObject();
@@ -149,9 +151,10 @@ namespace DnsServerCore.Configuration
                 writer.WriteEndArray();
 
                 writer.WriteStartObject("reservations");
-                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal))
+                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => ReservationKey(lease.ClientIdentifier), StringComparer.Ordinal))
                 {
-                    writer.WriteStartObject(BitConverter.ToString(reservation.HardwareAddress));
+                    writer.WriteStartObject(ReservationKey(reservation.ClientIdentifier));
+                    writer.WriteString("hardwareAddress", BitConverter.ToString(reservation.HardwareAddress));
                     writer.WriteString("address", reservation.Address.ToString());
                     writer.WriteString("hostName", reservation.HostName);
                     writer.WriteString("comments", reservation.Comments);
@@ -355,30 +358,24 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            var existing = scope.ReservedLeases.ToLookup(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal);
+            var existing = scope.ReservedLeases.ToDictionary(lease => lease.ClientIdentifier);
             foreach (JsonProperty entry in declarations.EnumerateObject())
             {
                 string entryPath = ConfigurationPlan.AppendPath(path, entry.Name);
-                string key = ReadHardwareAddress(entry.Name, entryPath);
-                byte[] mac = Lease.ParseHardwareAddress(key);
-                var identifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, mac);
-                Lease previous = null;
-                foreach (Lease reservation in existing[key])
-                {
-                    if (!reservation.ClientIdentifier.Equals(identifier) || previous is not null)
-                        throw new InvalidDataException($"{entryPath}: The existing reservation cannot be identified by an Ethernet MAC address alone.");
-                    previous = reservation;
-                }
-
+                ClientIdentifierOption identifier = ReadReservationIdentifier(entry.Name, entryPath);
+                existing.TryGetValue(identifier, out Lease previous);
                 if (entry.Value.ValueKind == JsonValueKind.Null)
                 {
-                    scope.SetManifestReservation(mac, null, null, null);
+                    scope.SetManifestReservation(identifier, null, null, null, null);
                     continue;
                 }
+                byte[] hardwareAddress = entry.Value.TryGetProperty("hardwareAddress", out JsonElement hardware)
+                    ? ReadReservationHardware(hardware.GetString(), entryPath + "/hardwareAddress")
+                    : previous?.HardwareAddress ?? DefaultReservationHardware(identifier);
                 IPAddress address = ReadAddress(entry.Value, "address") ?? previous?.Address;
                 string hostName = entry.Value.TryGetProperty("hostName", out JsonElement host) ? host.GetString() : previous?.HostName;
                 string comments = entry.Value.TryGetProperty("comments", out JsonElement comment) ? comment.GetString() : previous?.Comments;
-                scope.SetManifestReservation(mac, address, hostName, comments);
+                scope.SetManifestReservation(identifier, hardwareAddress, address, hostName, comments);
             }
         }
 
@@ -487,22 +484,24 @@ namespace DnsServerCore.Configuration
                 var reservations = new JsonObject();
                 var reservedAddresses = new HashSet<IPAddress>();
                 bool representable = true;
-                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => BitConverter.ToString(lease.HardwareAddress), StringComparer.Ordinal))
+                foreach (Lease reservation in scope.ReservedLeases.OrderBy(lease => ReservationKey(lease.ClientIdentifier), StringComparer.Ordinal))
                 {
-                    string mac = BitConverter.ToString(reservation.HardwareAddress);
-                    if (reservation.HardwareAddress.Length != 6 || reservations.ContainsKey(mac) ||
-                        !reservedAddresses.Add(reservation.Address) || !Scope.IsAddressInRange(reservation.Address, scope.StartingAddress, scope.EndingAddress) ||
-                        !reservation.ClientIdentifier.Equals(new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, reservation.HardwareAddress)))
+                    string key = ReservationKey(reservation.ClientIdentifier);
+                    if (reservation.HardwareAddress.Length is < 1 or > 16 ||
+                        !reservedAddresses.Add(reservation.Address) || !Scope.IsAddressInRange(reservation.Address, scope.StartingAddress, scope.EndingAddress))
                     {
                         representable = false;
                         break;
                     }
-                    reservations.Add(mac, new JsonObject
+                    var value = new JsonObject
                     {
                         ["address"] = reservation.Address.ToString(),
                         ["hostName"] = reservation.HostName,
                         ["comments"] = reservation.Comments
-                    });
+                    };
+                    if (!reservation.HardwareAddress.AsSpan().SequenceEqual(DefaultReservationHardware(reservation.ClientIdentifier)))
+                        value["hardwareAddress"] = BitConverter.ToString(reservation.HardwareAddress);
+                    reservations.Add(key, value);
                 }
                 if (!representable)
                 {
@@ -537,7 +536,7 @@ namespace DnsServerCore.Configuration
                     {
                         foreach (JsonProperty reservation in option.Value.EnumerateObject())
                         {
-                            string key = ReadHardwareAddress(reservation.Name, path);
+                            string key = ReservationKey(ReadReservationIdentifier(reservation.Name, path));
                             string entryPath = ConfigurationPlan.AppendPath(path, key);
                             paths.Add(entryPath);
                             if (reservation.Value.ValueKind == JsonValueKind.Object)
@@ -851,17 +850,18 @@ namespace DnsServerCore.Configuration
             string path = scopePath + "/reservations";
             bool exists = current.ValueKind == JsonValueKind.Object;
             var reservations = new Dictionary<string, Reservation>(StringComparer.Ordinal);
-            var activeLeases = new List<(string HardwareAddress, IPAddress Address)>();
+            var activeLeases = new List<(string ClientKey, IPAddress Address)>();
             if (exists)
             {
                 foreach (JsonProperty entry in current.GetProperty("reservations").EnumerateObject())
                 {
                     JsonElement value = entry.Value;
                     reservations.Add(entry.Name, new Reservation(ReadAddress(value, "address"),
-                        value.GetProperty("hostName").GetString(), value.GetProperty("comments").GetString()));
+                        value.GetProperty("hostName").GetString(), value.GetProperty("comments").GetString(),
+                        value.GetProperty("hardwareAddress").GetString()));
                 }
                 foreach (JsonElement lease in current.GetProperty("activeLeases").EnumerateArray())
-                    activeLeases.Add((lease.GetProperty("hardwareAddress").GetString(), ReadAddress(lease, "address")));
+                    activeLeases.Add((lease.GetProperty("clientKey").GetString(), ReadAddress(lease, "address")));
             }
 
             var changedAddresses = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -882,7 +882,8 @@ namespace DnsServerCore.Configuration
                     foreach (JsonProperty entry in desired.EnumerateObject())
                     {
                         string entryPath = ConfigurationPlan.AppendPath(path, entry.Name);
-                        string key = ReadHardwareAddress(entry.Name, entryPath);
+                        ClientIdentifierOption identifier = ReadReservationIdentifier(entry.Name, entryPath);
+                        string key = ReservationKey(identifier);
                         reservations.TryGetValue(key, out Reservation previous);
                         if (entry.Value.ValueKind == JsonValueKind.Null)
                         {
@@ -900,7 +901,12 @@ namespace DnsServerCore.Configuration
                             throw new InvalidDataException($"{entryPath}/address: A reservation requires an IPv4 address.");
                         string host = value.TryGetProperty("hostName", out JsonElement hostName) ? hostName.GetString() : previous?.HostName;
                         string comments = value.TryGetProperty("comments", out JsonElement comment) ? comment.GetString() : previous?.Comments;
-                        var candidate = new Reservation(address, host, comments);
+                        byte[] hardware = value.TryGetProperty("hardwareAddress", out JsonElement declaredHardware)
+                            ? ReadReservationHardware(declaredHardware.GetString(), entryPath + "/hardwareAddress")
+                            : previous is null ? DefaultReservationHardware(identifier) : Lease.ParseHardwareAddress(previous.HardwareAddress);
+                        if (hardware is null)
+                            throw new InvalidDataException($"{entryPath}/hardwareAddress: A reservation for this client identifier requires a hardware address.");
+                        var candidate = new Reservation(address, host, comments, BitConverter.ToString(hardware));
                         if (candidate == previous)
                             continue;
 
@@ -909,9 +915,9 @@ namespace DnsServerCore.Configuration
                             if (previous is not null)
                                 CheckRemoval(key, previous, entryPath);
                             CheckRange(entryPath + "/address", address, start, end);
-                            if (activeLeases.Any(lease => lease.Address.Equals(address) && lease.HardwareAddress != key))
+                            if (activeLeases.Any(lease => lease.Address.Equals(address) && lease.ClientKey != key))
                                 throw new InvalidDataException($"{entryPath}/address: The address belongs to an active lease for another client.");
-                            if (activeLeases.Any(lease => lease.HardwareAddress == key && !lease.Address.Equals(address)))
+                            if (activeLeases.Any(lease => lease.ClientKey == key && !lease.Address.Equals(address)))
                                 throw new InvalidDataException($"{entryPath}/address: This client has an active lease at a different address.");
                             changedAddresses.Add(key, entryPath);
                         }
@@ -936,12 +942,54 @@ namespace DnsServerCore.Configuration
 
             void CheckRemoval(string key, Reservation previous, string entryPath)
             {
-                if (activeLeases.Any(lease => lease.HardwareAddress == key && lease.Address.Equals(previous.Address)))
+                if (activeLeases.Any(lease => lease.ClientKey == key && lease.Address.Equals(previous.Address)))
                     throw new InvalidDataException($"{entryPath}: This reservation has an active lease.");
             }
         }
 
-        private static string ReadHardwareAddress(string key, string path)
+        internal static string ReservationKey(ClientIdentifierOption identifier)
+        {
+            byte[] hardwareAddress = DefaultReservationHardware(identifier);
+            return hardwareAddress is null ? "id:" + identifier : BitConverter.ToString(hardwareAddress);
+        }
+
+        private static byte[] DefaultReservationHardware(ClientIdentifierOption identifier) =>
+            identifier.Type == (byte)DhcpMessageHardwareAddressType.Ethernet && identifier.Identifier.Length == 6
+                ? identifier.Identifier : null;
+
+        private static ClientIdentifierOption ReadReservationIdentifier(string key, string path)
+        {
+            if (!key.StartsWith("id:", StringComparison.Ordinal))
+                return new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, ReadEthernetHardwareAddress(key, path));
+
+            int separator = key.IndexOf('-', 3);
+            if (separator < 4 || !byte.TryParse(key.AsSpan(3, separator - 3), out byte type) || key.Length - separator is < 3 or > 509)
+                throw new InvalidDataException($"{path}: Invalid DHCP client identifier.");
+            try
+            {
+                return new ClientIdentifierOption(type, Convert.FromHexString(key.AsSpan(separator + 1)));
+            }
+            catch (FormatException)
+            {
+                throw new InvalidDataException($"{path}: Invalid DHCP client identifier.");
+            }
+        }
+
+        private static byte[] ReadReservationHardware(string value, string path)
+        {
+            try
+            {
+                byte[] hardware = Lease.ParseHardwareAddress(value);
+                if (hardware.Length is >= 1 and <= 16)
+                    return hardware;
+            }
+            catch (Exception ex) when (ex is FormatException or OverflowException)
+            {
+            }
+            throw new InvalidDataException($"{path}: Expected a hardware address with 1 to 16 bytes.");
+        }
+
+        private static byte[] ReadEthernetHardwareAddress(string key, string path)
         {
             byte[] hardwareAddress;
             try
@@ -955,7 +1003,7 @@ namespace DnsServerCore.Configuration
 
             if (hardwareAddress.Length != 6)
                 throw new InvalidDataException($"{path}: An Ethernet hardware address must have six bytes.");
-            return BitConverter.ToString(hardwareAddress);
+            return hardwareAddress;
         }
 
         private static IPAddress ReadAddress(JsonElement value, string field)

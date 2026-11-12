@@ -246,7 +246,7 @@ Defaults below describe a scope created through the API. On initial creation of 
 | `tftpServerAddresses` | `tftpServerAddresses` | IPv4 address array, empty | Supplies TFTP server addresses. |
 | `genericOptions` | `genericOptions` | Option array with byte code and hexadecimal payload, empty | Use DHCP option parsing and validate encoded lengths before persistence. |
 | `exclusions` | `exclusions` | Address range array, empty | Both ends must fall within the scope. |
-| `reservations` | `reservedLeases`, `addReservedLease`, `removeReservedLease` | Map keyed by normalized MAC address, empty | Each entry has an IPv4 address and optional hostname and comments. The bulk setter validates scope membership. Dedicated add rejects duplicate client identifiers. |
+| `reservations` | `reservedLeases`, `addReservedLease`, `removeReservedLease` | Map keyed by normalized DHCP client identifier, empty | Use a MAC key for Ethernet identifiers or `id:<type>-<hex>` for other identifiers. Each entry has an IPv4 address and optional hostname and comments. Supply the hardware address when the identifier does not provide it. The bulk setter validates scope membership. Dedicated add rejects duplicate client identifiers. |
 | `allowOnlyReservedLeases` | `allowOnlyReservedLeases` | Boolean, false | Disables dynamic address allocation. |
 | `blockLocallyAdministeredMacAddresses` | `blockLocallyAdministeredMacAddresses` | Boolean, false | Blocks dynamic allocation to clients using locally administered addresses. |
 | `ignoreClientIdentifierOption` | `ignoreClientIdentifierOption` | Boolean, true for API-created scopes | Uses the MAC address for allocation. Changing identity rules can affect renewal. |

@@ -5379,7 +5379,7 @@ Static session manifests require Administration Delete permission. Preview and e
 
 Configuration export includes supported unsigned primary zones and their policies and records for callers with Zones View permission on the section and the zone. Zone-generated and DHCP-maintained records are omitted. Unsupported zones and record collections are identified by path in `missingInputs`.
 
-Configuration export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. A scope whose reservations require a client identifier outside the manifest format is listed in `missingInputs`.
+Configuration export includes configured DHCP scopes, options, exclusions, and reservations for callers with DHCP Server view permission. It omits active leases, derived addresses, and interface bindings. DHCP reservations with custom client identifiers use keys such as `id:0-AABB`. Their exported values include `hardwareAddress`. A scope with duplicate or out-of-range reserved IP addresses is listed in `missingInputs`.
 
 DNS listener policy can be applied live. It covers ECS client source selection, the ordered DNS reverse-proxy ACL, and the DNS-over-HTTP real-IP header and help redirect. These settings are node-local. The server rejects conflicting edits and backup restores while the fields are managed by a manifest.
 

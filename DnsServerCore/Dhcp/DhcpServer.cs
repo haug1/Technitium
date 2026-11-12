@@ -1606,7 +1606,7 @@ namespace DnsServerCore.Dhcp
                 return;
 
             string root = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name) + "/reservations";
-            string path = ConfigurationPlan.AppendPath(root, BitConverter.ToString((current ?? candidate).HardwareAddress));
+            string path = ConfigurationPlan.AppendPath(root, ConfigurationDhcp.ReservationKey((current ?? candidate).ClientIdentifier));
             bool ownsCollection = _managedPaths.Contains(root, StringComparer.Ordinal);
             if (current is null || candidate is null)
             {
@@ -1616,6 +1616,7 @@ namespace DnsServerCore.Dhcp
             }
 
             CheckField("address", current.Address, candidate.Address);
+            CheckField("hardwareAddress", BitConverter.ToString(current.HardwareAddress), BitConverter.ToString(candidate.HardwareAddress));
             CheckField("hostName", EmptyAsNull(current.HostName), EmptyAsNull(candidate.HostName));
             CheckField("comments", EmptyAsNull(current.Comments), EmptyAsNull(candidate.Comments));
 

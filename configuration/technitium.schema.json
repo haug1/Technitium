@@ -1116,6 +1116,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "address": {"anyOf": [{"$ref": "#/$defs/ipv4Address"}, {"type": "null"}]},
+                      "hardwareAddress": {"type": "string", "minLength": 2, "maxLength": 47},
                       "hostName": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
                       "comments": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]}
                     }

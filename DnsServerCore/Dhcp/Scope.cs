@@ -1635,20 +1635,18 @@ namespace DnsServerCore.Dhcp
             _dnsServers = useThisServer ? null : addresses;
         }
 
-        internal void SetManifestReservation(byte[] hardwareAddress, IPAddress address, string hostName, string comments)
+        internal void SetManifestReservation(ClientIdentifierOption identifier, byte[] hardwareAddress, IPAddress address, string hostName, string comments)
         {
-            var identifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, hardwareAddress);
             if (address is null)
             {
                 _reservedLeases.TryRemove(identifier, out _);
                 return;
             }
 
-            _reservedLeases[identifier] = new Lease(LeaseType.Reserved, hostName, DhcpMessageHardwareAddressType.Ethernet,
-                hardwareAddress, address, comments);
+            _reservedLeases[identifier] = new Lease(LeaseType.Reserved, identifier, hostName, hardwareAddress, address, comments, 0);
             foreach (Lease lease in _leases.Values)
             {
-                if (lease.Type == LeaseType.Dynamic && lease.Address.Equals(address) && lease.HardwareAddress.AsSpan().SequenceEqual(hardwareAddress))
+                if (lease.Type == LeaseType.Dynamic && lease.Address.Equals(address) && lease.ClientIdentifier.Equals(identifier))
                     lease.ConvertToReserved();
             }
         }

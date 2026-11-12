@@ -2809,6 +2809,19 @@ namespace DnsServerCore.Tests
                 "&leaseTimeDays=3&exclusions=192.0.2.45%7C192.0.2.47&genericOptions=224%7CAA%3ABB", server.AdminToken));
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-0A&ipAddress=192.0.2.30&hostName=reserved", server.AdminToken));
+            await server.RestartAsync(null, () =>
+            {
+                string path = Path.Combine(server.ConfigurationDirectory, "scopes", "Lab.scope");
+                using var dhcp = new DhcpServer(Path.GetDirectoryName(path), null);
+                using var saved = new MemoryStream(File.ReadAllBytes(path));
+                using var legacy = new Scope(saved, null, dhcp, resolveLocalDns: false);
+                byte[] mac = Convert.FromHexString("02000000000A");
+                legacy.ReservedLeases = [.. legacy.ReservedLeases,
+                    new Lease(LeaseType.Reserved, new ClientIdentifierOption(0, [0xAA, 0xBB]),
+                        "client-identifier", mac, IPAddress.Parse("192.0.2.31"), null, 0)];
+                using var output = File.Create(path);
+                legacy.WriteTo(output);
+            });
 
             JsonElement response = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(response);
@@ -2818,6 +2831,9 @@ namespace DnsServerCore.Tests
             Assert.Equal(3, scope.GetProperty("leaseTime").GetProperty("days").GetInt32());
             Assert.Equal("AABB", Assert.Single(scope.GetProperty("genericOptions").EnumerateArray()).GetProperty("value").GetString());
             Assert.Equal("reserved", scope.GetProperty("reservations").GetProperty("02-00-00-00-00-0A").GetProperty("hostName").GetString());
+            JsonElement custom = scope.GetProperty("reservations").GetProperty("id:0-AABB");
+            Assert.Equal("02-00-00-00-00-0A", custom.GetProperty("hardwareAddress").GetString());
+            Assert.Equal("192.0.2.31", custom.GetProperty("address").GetString());
             Assert.False(scope.TryGetProperty("activeLeases", out _));
             Assert.Equal("192.0.2.45", Assert.Single(scope.GetProperty("exclusions").EnumerateArray()).GetProperty("startingAddress").GetString());
 
@@ -2832,6 +2848,11 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(destinationExport);
             Assert.Equal(export.GetProperty("dhcp").GetRawText(),
                 destinationExport.GetProperty("response").GetProperty("manifest").GetProperty("dhcp").GetRawText());
+
+            JsonElement legacyEdit = await destination.CallAsync(
+                "dhcp/scopes/set?name=Lab&reservedLeases=reserved%7C02-00-00-00-00-0A%7C192.0.2.30%7C", destination.AdminToken);
+            Assert.Equal("error", legacyEdit.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Lab/reservations/id:0-AABB", legacyEdit.GetProperty("errorMessage").GetString());
 
             const string resize = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}""";
             using var invalid = new StringContent(resize, Encoding.UTF8, "application/json");
@@ -2989,10 +3010,10 @@ namespace DnsServerCore.Tests
             using JsonDocument snapshot = JsonDocument.Parse("""
                 {"manifestDhcpScopes":{"Lab":{
                     "startingAddress":"192.0.2.10","endingAddress":"192.0.2.50","subnetMask":"255.255.255.0","enabled":true,
-                    "reservations":{"02-00-00-00-00-0A":{"address":"192.0.2.20","hostName":null,"comments":null}},
+                    "reservations":{"02-00-00-00-00-0A":{"address":"192.0.2.20","hostName":null,"comments":null,"hardwareAddress":"02-00-00-00-00-0A"}},
                     "activeLeases":[
-                        {"hardwareAddress":"02-00-00-00-00-0A","address":"192.0.2.20"},
-                        {"hardwareAddress":"02-00-00-00-00-0C","address":"192.0.2.22"}
+                        {"clientKey":"02-00-00-00-00-0A","address":"192.0.2.20"},
+                        {"clientKey":"02-00-00-00-00-0C","address":"192.0.2.22"}
                     ],
                     "exclusions":[]
                 }}}
@@ -3018,7 +3039,7 @@ namespace DnsServerCore.Tests
             using JsonDocument snapshot = JsonDocument.Parse($$"""
                 {"manifestDhcpScopes":{"Lab":{
                   "startingAddress":"192.0.2.10","endingAddress":"192.0.2.50","subnetMask":"255.255.255.0","enabled":true,
-                  "activeLeases":[{"hardwareAddress":"02-00-00-00-00-0A","address":"192.0.2.20","dynamic":{{dynamicFlag}} }],
+                  "activeLeases":[{"clientKey":"02-00-00-00-00-0A","address":"192.0.2.20","dynamic":{{dynamicFlag}} }],
                   "exclusions":[]
                 } } }
                 """);
