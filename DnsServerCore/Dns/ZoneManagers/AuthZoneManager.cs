@@ -766,14 +766,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
 
                 HashSet<(string Owner, DnsResourceRecordType Type, DnsClass Class, DnsResourceRecordData Data,
-                    uint Ttl, bool Disabled, string Comments, uint ExpiryTtl)> OperatorRecordKeys(List<DnsResourceRecord> source) =>
+                    uint Ttl, bool Disabled, string Comments, uint ExpiryTtl, string Glue)> OperatorRecordKeys(List<DnsResourceRecord> source) =>
                     source.Where(record => !ConfigurationPlan.IsLeaseRecord(record) &&
                         !ConfigurationPlan.IsGeneratedRecord(name, _dnsServer.ServerDomain, record.Name, record.Type, record.RDATA))
                         .Select(record =>
                         {
                             var metadata = record.Tag as GenericRecordInfo;
                             return (record.Name.ToLowerInvariant(), record.Type, record.Class, record.RDATA,
-                                record.OriginalTtlValue, metadata?.Disabled ?? false, metadata?.Comments ?? string.Empty, metadata?.ExpiryTtl ?? 0u);
+                                record.OriginalTtlValue, metadata?.Disabled ?? false, metadata?.Comments ?? string.Empty, metadata?.ExpiryTtl ?? 0u,
+                                string.Join('|', (metadata as NSRecordInfo)?.GlueRecords?.Select(glue => glue.ToString()) ?? []));
                         }).ToHashSet();
 
             }
@@ -1137,6 +1138,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                             info.LastModified = DateTime.UtcNow;
                         if (edit.ExpiryTtl.HasValue)
                             info.ExpiryTtl = edit.ExpiryTtl.Value;
+                        if (edit.Glue is not null)
+                            record.SetGlueRecords(edit.Glue);
                         replacement.Add(record);
                     }
                     if (rrset.Key is DnsResourceRecordType.CNAME or DnsResourceRecordType.DNAME or DnsResourceRecordType.APP && replacement.Count > 1)

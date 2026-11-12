@@ -3358,6 +3358,36 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneGlueAppliesExportsAndClears()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"glue.test":{"type":"Primary","records":[
+                    {"owner":"child.glue.test","type":"NS","ttl":300,"data":{"zoneFile":"ns.child.glue.test."},
+                     "glue":["192.0.2.42","2001:db8::42"]}
+                ]}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(export);
+            JsonElement zone = export.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("glue.test");
+            JsonElement record = Assert.Single(zone.GetProperty("records").EnumerateArray());
+            Assert.Collection(record.GetProperty("glue").EnumerateArray(),
+                address => Assert.Equal("192.0.2.42", address.GetString()),
+                address => Assert.Equal("2001:db8::42", address.GetString()));
+
+            string clear = manifest.Replace("[\"192.0.2.42\",\"2001:db8::42\"]", "[]", StringComparison.Ordinal);
+            JsonElement preview = await PreviewAsync(server, clear);
+            Assert.Equal("Update", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("kind").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, clear, preview.GetProperty("revision").GetString()!));
+            Assert.Empty((await PreviewAsync(server, clear)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task ZoneRecordApplyStartsExpiryWithoutRestart()
         {
             await using var server = await LoopbackWebService.StartAsync();

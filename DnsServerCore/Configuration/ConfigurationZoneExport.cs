@@ -57,7 +57,7 @@ namespace DnsServerCore.Configuration
 
         private static JsonArray ExportRecords(string zone, string serverDomain, string path, List<DnsResourceRecord> records, ISet<string> missingInputs)
         {
-            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl)>();
+            var entries = new List<(string Owner, ushort Type, string Hex, uint Ttl, bool Disabled, string Comments, uint ExpiryTtl, string[] Glue)>();
             foreach (DnsResourceRecord record in records)
             {
                 if (ConfigurationPlan.IsLeaseRecord(record) ||
@@ -66,7 +66,6 @@ namespace DnsServerCore.Configuration
 
                 var info = record.Tag as GenericRecordInfo;
                 if (record.Class != DnsClass.IN || record.Type is DnsResourceRecordType.APP or DnsResourceRecordType.FWD ||
-                    info is NSRecordInfo { GlueRecords.Count: > 0 } ||
                     info is SVCBRecordInfo { AutoIpv4Hint: true } or SVCBRecordInfo { AutoIpv6Hint: true })
                 {
                     missingInputs.Add(path + "/records");
@@ -91,14 +90,32 @@ namespace DnsServerCore.Configuration
                     return null;
                 }
 
-                entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false, info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u));
+                string[] glue = null;
+                if (record.RDATA is DnsNSRecordData ns)
+                {
+                    IReadOnlyList<DnsResourceRecord> glueRecords = (info as NSRecordInfo)?.GlueRecords ?? [];
+                    if (glueRecords.Any(address => address.Class != DnsClass.IN || address.OriginalTtlValue != record.OriginalTtlValue ||
+                        !address.Name.Equals(ns.NameServer, StringComparison.OrdinalIgnoreCase) ||
+                        address.Type is not (DnsResourceRecordType.A or DnsResourceRecordType.AAAA)) ||
+                        (glueRecords.Count > 0 && owner == zone && (zone.Length == 0 ||
+                            ns.NameServer.Equals(zone, StringComparison.OrdinalIgnoreCase) ||
+                            ns.NameServer.EndsWith("." + zone, StringComparison.OrdinalIgnoreCase))))
+                    {
+                        missingInputs.Add(path + "/records");
+                        return null;
+                    }
+                    glue = glueRecords.Select(address => address.RDATA.ToString()).ToArray();
+                }
+
+                entries.Add((owner, (ushort)record.Type, hex, record.OriginalTtlValue, info?.Disabled ?? false,
+                    info?.Comments ?? string.Empty, info?.ExpiryTtl ?? 0u, glue));
             }
 
             var exported = new JsonArray();
             foreach (var entry in entries.OrderBy(entry => entry.Owner, StringComparer.Ordinal).ThenBy(entry => entry.Type)
                          .ThenBy(entry => entry.Hex, StringComparer.Ordinal))
             {
-                exported.Add(new JsonObject
+                var record = new JsonObject
                 {
                     ["owner"] = entry.Owner == zone ? "@" : entry.Owner,
                     ["type"] = (int)entry.Type,
@@ -107,7 +124,10 @@ namespace DnsServerCore.Configuration
                     ["disabled"] = entry.Disabled,
                     ["comments"] = entry.Comments,
                     ["expiryTtl"] = entry.ExpiryTtl
-                });
+                };
+                if (entry.Glue is not null)
+                    record["glue"] = JsonSerializer.SerializeToNode(entry.Glue);
+                exported.Add(record);
             }
             return exported;
         }

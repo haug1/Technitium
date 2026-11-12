@@ -603,6 +603,8 @@ namespace DnsServerCore.Configuration
                 {
                     string recordPath = $"{zonePath}/records/{index++}";
                     (string owner, DnsResourceRecordType type) = ReadZoneRecordIdentity(zoneName, record, recordPath);
+                    if (record.TryGetProperty("glue", out _) && type != DnsResourceRecordType.NS)
+                        throw new InvalidDataException($"{DisplayPath(recordPath + "/glue")}: Glue addresses require an NS record.");
                     JsonElement data = record.GetProperty("data");
                     if (data.TryGetProperty("zoneFile", out JsonElement zoneFile))
                         ReadZoneFileRecordData(zoneName, owner, type, zoneFile.GetString(), recordPath + "/data/zoneFile");

@@ -29,31 +29,33 @@ namespace DnsServerCore.Dns.ResourceRecords
 {
     static class DnsResourceRecordExtensions
     {
-        public static void SetGlueRecords(this DnsResourceRecord record, string glueAddresses)
+        public static void SetGlueRecords(this DnsResourceRecord record, string glueAddresses) =>
+            SetGlueRecords(record, glueAddresses.Split(IPAddress.Parse, ','));
+
+        internal static void SetGlueRecords(this DnsResourceRecord record, IReadOnlyList<IPAddress> glueAddresses)
         {
             if (record.RDATA is not DnsNSRecordData nsRecord)
                 throw new InvalidOperationException();
 
             string domain = nsRecord.NameServer;
 
-            IPAddress[] glueAddressesList = glueAddresses.Split(IPAddress.Parse, ',');
-            DnsResourceRecord[] glueRecords = new DnsResourceRecord[glueAddressesList.Length];
+            DnsResourceRecord[] glueRecords = new DnsResourceRecord[glueAddresses.Count];
 
             for (int i = 0; i < glueRecords.Length; i++)
             {
-                switch (glueAddressesList[i].AddressFamily)
+                switch (glueAddresses[i].AddressFamily)
                 {
                     case AddressFamily.InterNetwork:
-                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.A, DnsClass.IN, record.TTL, new DnsARecordData(glueAddressesList[i]));
+                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.A, DnsClass.IN, record.TTL, new DnsARecordData(glueAddresses[i]));
                         break;
 
                     case AddressFamily.InterNetworkV6:
-                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.AAAA, DnsClass.IN, record.TTL, new DnsAAAARecordData(glueAddressesList[i]));
+                        glueRecords[i] = new DnsResourceRecord(domain, DnsResourceRecordType.AAAA, DnsClass.IN, record.TTL, new DnsAAAARecordData(glueAddresses[i]));
                         break;
                 }
             }
 
-            record.GetAuthNSRecordInfo().GlueRecords = glueRecords;
+            record.GetAuthNSRecordInfo().GlueRecords = glueRecords.Length == 0 ? null : glueRecords;
         }
 
         public static void SyncGlueRecords(this DnsResourceRecord record, IReadOnlyList<DnsResourceRecord> allGlueRecords)
