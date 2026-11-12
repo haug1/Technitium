@@ -944,8 +944,14 @@ namespace DnsServerCore
                 if (isConfigTransfer && dnsSettings && _dnsServer.HasManagedClusterDnsSettings &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                 {
-                    using Stream dnsConfiguration = dnsEntry.Open();
-                    CheckRestoreManifestDnsSettings(dnsConfiguration, isConfigTransfer: true);
+                    bool checkDnsBody;
+                    using (Stream dnsConfiguration = dnsEntry.Open())
+                        checkDnsBody = CheckRestoreManifestDnsSettings(dnsConfiguration, isConfigTransfer: true);
+                    if (checkDnsBody)
+                    {
+                        using Stream dnsConfiguration = dnsEntry.Open();
+                        _dnsServer.CheckRestoreManifestDnsBody(dnsConfiguration, isConfigTransfer: true);
+                    }
                 }
 
                 if (isConfigTransfer && blockLists && _dnsServer.BlockListZoneManager.HasManagedSettings &&

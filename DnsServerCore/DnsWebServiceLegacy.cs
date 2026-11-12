@@ -212,12 +212,15 @@ namespace DnsServerCore
             if (format == "DC")
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
-                return !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
+                return _dnsServer.HasManagedRecursionPolicy || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
                     _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging);
             }
 
             if (format == "DS")
             {
+                if (_dnsServer.HasManagedRecursionPolicy)
+                    throw new InvalidDataException("/dns/recursion: Cannot verify recursion policy in this combined backup format.");
+
                 if (!isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention))
                     throw new InvalidDataException("/statistics: Release statistics ownership before restoring this combined DNS backup format.");
 

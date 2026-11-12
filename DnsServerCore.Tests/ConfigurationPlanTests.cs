@@ -466,6 +466,61 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task RecursionPolicyAppliesAndProtectsAclOrder()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=recursion.test&type=Primary", server.AdminToken));
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"recursion":{"mode":"UseSpecifiedNetworkACL",
+                    "networkAcl":["!127.0.0.0/8","127.0.0.1"]}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            Assert.DoesNotContain("127.0.0.0", preview.GetRawText());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal("UseSpecifiedNetworkACL", settings.GetProperty("recursion").GetString());
+            Assert.Equal(2, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            JsonNode exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["recursion"]!;
+            Assert.Equal("UseSpecifiedNetworkACL", exported["mode"]!.GetValue<string>());
+            Assert.Equal("""["!127.0.0.0/8","127.0.0.1"]""", exported["networkAcl"]!.ToJsonString());
+
+            JsonElement reordered = await server.CallAsync(
+                "settings/set?recursionNetworkACL=127.0.0.1%2C%21127.0.0.0%2F8", server.AdminToken);
+            Assert.Equal("error", reordered.GetProperty("status").GetString());
+            Assert.Contains("/dns/recursion/networkAcl", reordered.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/recursion/mode", restored.GetProperty("errorMessage").GetString());
+            Assert.Equal("UseSpecifiedNetworkACL", (await server.GetSettingsAsync()).GetProperty("recursion").GetString());
+
+            Assert.False((await server.QueryAsync("recursion.test", DnsResourceRecordType.SOA)).RecursionAvailable);
+            const string allowFirst = """
+                {"schemaVersion":1,"dns":{"recursion":{"mode":"UseSpecifiedNetworkACL","networkAcl":["127.0.0.1","!127.0.0.0/8"]}}}
+                """;
+            string allowRevision = (await PreviewAsync(server, allowFirst)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, allowFirst, allowRevision));
+            Assert.True((await server.QueryAsync("recursion.test", DnsResourceRecordType.SOA)).RecursionAvailable);
+
+            const string clear = """{"schemaVersion":1,"dns":{"recursion":{"networkAcl":null}}}""";
+            string revision = (await PreviewAsync(server, clear)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, clear, revision));
+            Assert.Empty((await server.GetSettingsAsync()).GetProperty("recursionNetworkACL").EnumerateArray());
+        }
+
+        [Fact]
         public async Task DnsRestoreAcceptsMatchingOwnedLoggingAndStatistics()
         {
             await using var server = await LoopbackWebService.StartAsync();

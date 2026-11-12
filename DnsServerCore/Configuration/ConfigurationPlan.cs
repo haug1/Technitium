@@ -61,6 +61,8 @@ namespace DnsServerCore.Configuration
             ["/dns/clientSubnet/ipv6PrefixLength"] = Field("eDnsClientSubnetIPv6PrefixLength", 56, canApply: true),
             ["/dns/clientSubnet/ipv4Override"] = Field<string>("eDnsClientSubnetIpv4Override", null, canApply: true),
             ["/dns/clientSubnet/ipv6Override"] = Field<string>("eDnsClientSubnetIpv6Override", null, canApply: true),
+            ["/dns/recursion/mode"] = Field("recursion", nameof(DnsServerRecursion.AllowOnlyForPrivateNetworks), canApply: true),
+            ["/dns/recursion/networkAcl"] = Field("recursionNetworkACL", Array.Empty<string>(), canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -166,7 +168,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -280,6 +282,19 @@ namespace DnsServerCore.Configuration
             return new DnsServer.StatisticsSettings(inMemory, retention);
         }
 
+        private static DnsServer.RecursionPolicy GetRecursionPolicy(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("recursion", out JsonElement recursion))
+                return default;
+
+            DnsServerRecursion? mode = recursion.TryGetProperty("mode", out JsonElement value)
+                ? value.ValueKind == JsonValueKind.Null ? DnsServerRecursion.AllowOnlyForPrivateNetworks : Enum.Parse<DnsServerRecursion>(value.GetString())
+                : null;
+            NetworkAccessControl[] acl = recursion.TryGetProperty("networkAcl", out JsonElement rules)
+                ? ConfigurationManifest.ReadNetworkAcl(rules, "/dns/recursion/networkAcl") : null;
+            return new DnsServer.RecursionPolicy(mode, acl);
+        }
+
         private static DnsServer.ClientSubnetSettings GetClientSubnetSettings(ConfigurationManifest manifest)
         {
             return manifest.Settings.TryGetProperty("dns", out JsonElement dns) && dns.TryGetProperty("clientSubnet", out JsonElement subnet)
@@ -355,6 +370,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
+            if (GetRecursionPolicy(manifest) != default)
+                throw new InvalidDataException("/dns/recursion: Applying recursion policy to a cluster is not implemented.");
             if (GetClientSubnetSettings(manifest) != default)
                 throw new InvalidDataException("/dns/clientSubnet: Applying EDNS Client Subnet settings to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
@@ -723,6 +740,11 @@ namespace DnsServerCore.Configuration
                     {
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
+                    }
+                    else if (path == "/dns/recursion/networkAcl")
+                    {
+                        var rules = ConfigurationManifest.ReadNetworkAcl(desired, path);
+                        candidate = JsonSerializer.SerializeToElement(rules.Select(rule => rule.ToString()).ToArray());
                     }
                     else if (path == "/web/reverseProxyAcl")
                     {

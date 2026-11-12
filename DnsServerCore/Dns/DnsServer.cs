@@ -156,7 +156,9 @@ namespace DnsServerCore.Dns
             ClientSubnetIpv4Override = 33554432,
             ClientSubnetIpv6Override = 67108864,
             IgnoreResolverLogs = 134217728,
-            LogQueries = 268435456
+            LogQueries = 268435456,
+            RecursionMode = 536870912,
+            RecursionAcl = 1073741824
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -170,6 +172,8 @@ namespace DnsServerCore.Dns
 
         internal readonly record struct ClientSubnetSettings(bool? Enabled, byte? Ipv4Prefix, byte? Ipv6Prefix,
             bool HasIpv4Override, NetworkAddress Ipv4Override, bool HasIpv6Override, NetworkAddress Ipv6Override);
+
+        internal readonly record struct RecursionPolicy(DnsServerRecursion? Mode, IReadOnlyCollection<NetworkAccessControl> NetworkAcl);
 
         internal readonly record struct DnsLoggingSettings(bool? IgnoreResolverLogs, bool? LogQueries);
 
@@ -683,14 +687,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -783,9 +787,14 @@ namespace DnsServerCore.Dns
         internal bool ManifestOwnsQueryLogging => _managedDnsSettings.HasFlag(ManagedDnsSettings.LogQueries);
         private const ManagedDnsSettings DnsLoggingOwnership = ManagedDnsSettings.IgnoreResolverLogs | ManagedDnsSettings.LogQueries;
 
+        internal bool ManifestOwnsRecursionMode => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecursionMode);
+        internal bool ManifestOwnsRecursionAcl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecursionAcl);
+        internal bool HasManagedRecursionPolicy => (_managedDnsSettings & RecursionOwnership) != 0;
+        private const ManagedDnsSettings RecursionOwnership = ManagedDnsSettings.RecursionMode | ManagedDnsSettings.RecursionAcl;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -794,6 +803,10 @@ namespace DnsServerCore.Dns
                 if (_managedDnsSettings.HasFlag(flag))
                     yield return "/dns/clientSubnet/" + field;
             }
+            if (ManifestOwnsRecursionMode)
+                yield return "/dns/recursion/mode";
+            if (ManifestOwnsRecursionAcl)
+                yield return "/dns/recursion/networkAcl";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1056,6 +1069,19 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/apps/autoUpdate: Setting is managed by the configuration manifest.");
         }
 
+        internal void CheckManifestRecursionPolicy(RecursionPolicy policy)
+        {
+            if (ManifestOwnsRecursionMode && policy.Mode.HasValue && policy.Mode != _recursion)
+                throw new DnsWebServiceException("/dns/recursion/mode: Setting is managed by the configuration manifest.");
+            if (policy.NetworkAcl is not null)
+            {
+                if (policy.NetworkAcl.Count > byte.MaxValue)
+                    throw new DnsWebServiceException("/dns/recursion/networkAcl: A maximum of 255 rules is allowed.");
+                if (ManifestOwnsRecursionAcl && !policy.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? []))
+                    throw new DnsWebServiceException("/dns/recursion/networkAcl: Setting is managed by the configuration manifest.");
+            }
+        }
+
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
         {
             if (ManifestOwnsResolverLogging && settings.IgnoreResolverLogs.HasValue && settings.IgnoreResolverLogs != (_resolverLog is null))
@@ -1227,9 +1253,9 @@ namespace DnsServerCore.Dns
             }
         }
 
-        internal void CheckRestoreManifestLocalDnsSettings(Stream stream)
+        internal void CheckRestoreManifestDnsBody(Stream stream, bool isConfigTransfer = false)
         {
-            ReadConfigFrom(stream, isConfigTransfer: false, apply: false);
+            ReadConfigFrom(stream, isConfigTransfer, apply: false);
         }
 
         private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false, bool apply = true)
@@ -1568,11 +1594,13 @@ namespace DnsServerCore.Dns
 
             //recursion
             DnsServerRecursion recursion = (DnsServerRecursion)bR.ReadByte();
-            if (apply)
+            if (apply && (readOwnership || !ManifestOwnsRecursionMode))
                 _recursion = recursion;
             var recursionAcl = AuthZoneInfo.ReadNetworkACLFrom(bR);
-            if (apply)
+            if (apply && (readOwnership || !ManifestOwnsRecursionAcl))
                 _recursionNetworkACL = recursionAcl;
+            if (!apply)
+                CheckManifestRecursionPolicy(new RecursionPolicy(recursion, recursionAcl ?? []));
 
             bool randomizeName = bR.ReadBoolean();
             if (apply)
@@ -1823,8 +1851,11 @@ namespace DnsServerCore.Dns
 
             if (!apply)
             {
-                CheckManifestDnsLogging(new DnsLoggingSettings(ignoreResolverLogs, logQueries));
-                CheckManifestStatistics(new StatisticsSettings(enableInMemoryStats, maxStatFileDays));
+                if (!isConfigTransfer)
+                {
+                    CheckManifestDnsLogging(new DnsLoggingSettings(ignoreResolverLogs, logQueries));
+                    CheckManifestStatistics(new StatisticsSettings(enableInMemoryStats, maxStatFileDays));
+                }
                 return;
             }
 
@@ -1846,7 +1877,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2016,8 +2047,8 @@ namespace DnsServerCore.Dns
             }
 
             //recursion
-            bW.Write((byte)_recursion);
-            AuthZoneInfo.WriteNetworkACLTo(_recursionNetworkACL, bW);
+            bW.Write((byte)(recursion.Mode ?? _recursion));
+            AuthZoneInfo.WriteNetworkACLTo(recursion.NetworkAcl ?? _recursionNetworkACL, bW);
 
             bW.Write(_randomizeName);
             bW.Write(_qnameMinimization);
@@ -7626,7 +7657,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7715,6 +7746,13 @@ namespace DnsServerCore.Dns
                     if (dnsLogging.LogQueries.HasValue)
                         ownership |= ManagedDnsSettings.LogQueries;
 
+                    if (recursion.Mode.HasValue)
+                        ownership |= ManagedDnsSettings.RecursionMode;
+                    if (recursion.NetworkAcl is not null)
+                        ownership |= ManagedDnsSettings.RecursionAcl;
+
+                    bool recursionChanged = (recursion.Mode.HasValue && recursion.Mode != _recursion) ||
+                        (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? []));
                     bool dnsLoggingChanged = (dnsLogging.IgnoreResolverLogs.HasValue && dnsLogging.IgnoreResolverLogs != (_resolverLog is null)) ||
                         (dnsLogging.LogQueries.HasValue && dnsLogging.LogQueries != (_queryLog is not null));
                     bool excludedPortsChanged = outbound.ExcludedPorts is not null && !HaveSameSocketPoolExcludedPorts(outbound.ExcludedPorts);
@@ -7742,7 +7780,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7756,7 +7794,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion));
                         _pendingSave = false;
                     }
                     catch
@@ -7772,6 +7810,10 @@ namespace DnsServerCore.Dns
                     SetOutboundSocketSettings(outbound);
                     SetClientSubnetSettings(subnet);
                     SetDnsLoggingSettings(dnsLogging);
+                    if (recursion.NetworkAcl is not null)
+                        RecursionNetworkACL = recursion.NetworkAcl;
+                    if (recursion.Mode.HasValue)
+                        Recursion = recursion.Mode.Value;
 
                     if (appAutoUpdateChanged)
                         _dnsApplicationManager.EnableAutomaticUpdate = appAutoUpdate.Value;

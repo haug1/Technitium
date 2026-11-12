@@ -944,6 +944,11 @@ namespace DnsServerCore
                 DnsServer.ClientSubnetSettings subnet = _dnsWebService._dnsServer.CheckManifestClientSubnet(
                     _dnsWebService._dnsServer.NormalizeClientSubnetSettings(requestedSubnet));
 
+                bool hasRecursionMode = request.TryGetQueryOrFormEnum("recursion", out DnsServerRecursion recursion);
+                bool hasRecursionAcl = request.TryQueryOrFormArray("recursionNetworkACL", NetworkAccessControl.Parse, out NetworkAccessControl[] recursionNetworkACL);
+                _dnsWebService._dnsServer.CheckManifestRecursionPolicy(new DnsServer.RecursionPolicy(
+                    hasRecursionMode ? recursion : null, hasRecursionAcl ? recursionNetworkACL : null));
+
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
                 _dnsWebService._dnsServer.CheckManifestDnsLogging(new DnsServer.DnsLoggingSettings(
@@ -1662,14 +1667,14 @@ namespace DnsServerCore
 
                         #region recursion
 
-                        if (request.TryGetQueryOrFormEnum("recursion", out DnsServerRecursion recursion))
+                        if (hasRecursionMode && !_dnsWebService._dnsServer.ManifestOwnsRecursionMode)
                         {
                             _dnsWebService._dnsServer.Recursion = recursion;
 
                             clusterParameters.Add("recursion", recursion.ToString());
                         }
 
-                        if (request.TryQueryOrFormArray("recursionNetworkACL", NetworkAccessControl.Parse, out NetworkAccessControl[] recursionNetworkACL))
+                        if (hasRecursionAcl && !_dnsWebService._dnsServer.ManifestOwnsRecursionAcl)
                         {
                             _dnsWebService._dnsServer.RecursionNetworkACL = recursionNetworkACL;
 
@@ -2233,13 +2238,13 @@ namespace DnsServerCore
                                     }
                                     if (checkDns && archive.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                                     {
-                                        bool checkLocalDnsSettings;
+                                        bool checkDnsBody;
                                         using (Stream dnsConfiguration = dnsEntry.Open())
-                                            checkLocalDnsSettings = _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
-                                        if (checkLocalDnsSettings)
+                                            checkDnsBody = _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
+                                        if (checkDnsBody)
                                         {
                                             using Stream dnsConfiguration = dnsEntry.Open();
-                                            _dnsWebService._dnsServer.CheckRestoreManifestLocalDnsSettings(dnsConfiguration);
+                                            _dnsWebService._dnsServer.CheckRestoreManifestDnsBody(dnsConfiguration);
                                         }
                                     }
                                     if (checkWeb && archive.GetEntry("webservice.config") is ZipArchiveEntry webEntry)

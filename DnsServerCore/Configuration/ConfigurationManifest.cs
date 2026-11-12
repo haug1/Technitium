@@ -115,6 +115,8 @@ namespace DnsServerCore.Configuration
                     if (clientSubnet.TryGetProperty("ipv6Override", out JsonElement ipv6Override))
                         ReadNetwork(ipv6Override.GetString(), "/dns/clientSubnet/ipv6Override", AddressFamily.InterNetworkV6);
                 }
+                if (dns.TryGetProperty("recursion", out JsonElement recursion) && recursion.TryGetProperty("networkAcl", out JsonElement recursionAcl))
+                    ReadNetworkAcl(recursionAcl, "/dns/recursion/networkAcl");
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
