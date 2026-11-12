@@ -92,6 +92,7 @@ namespace DnsServerCore.Configuration
             ValidateSchema(root);
             CheckDnsNameKeys(root, "zones", "", allowRoot: true);
             ValidateZoneRecords(root);
+            ConfigurationZonePolicies.Validate(root);
             ConfigurationDhcp.Validate(root);
             if (root.TryGetProperty("dns", out JsonElement dns))
             {
@@ -217,6 +218,14 @@ namespace DnsServerCore.Configuration
             if (value.ValueKind == JsonValueKind.Null)
                 return DnsWebService.CreateDefaultReverseProxyAcl();
 
+            return ReadNetworkAcl(value, "/web/reverseProxyAcl");
+        }
+
+        internal static NetworkAccessControl[] ReadNetworkAcl(JsonElement value, string path)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return [];
+
             var rules = new NetworkAccessControl[value.GetArrayLength()];
             for (int i = 0; i < rules.Length; i++)
             {
@@ -224,7 +233,7 @@ namespace DnsServerCore.Configuration
                 int slash = entry.IndexOf('/');
                 if (!NetworkAccessControl.TryParse(entry, out rules[i]) ||
                     (slash >= 0 && (!byte.TryParse(entry.AsSpan(slash + 1), out byte prefix) || prefix != rules[i].NetworkAddress.PrefixLength)))
-                    throw new InvalidDataException($"/web/reverseProxyAcl/{i}: Invalid network ACL rule.");
+                    throw new InvalidDataException($"{DisplayPath(path)}/{i}: Invalid network ACL rule.");
             }
             return rules;
         }

@@ -757,6 +757,8 @@ namespace DnsServerCore
                         writer.WriteString("type", zone.Type.ToString());
                         writer.WriteBoolean("enabled", !zone.Disabled);
                         writer.WriteBoolean("clusterProtected", clusterProtected);
+                        if (declaration.Value.ValueKind == JsonValueKind.Object)
+                            ConfigurationZonePolicies.WriteSnapshot(writer, declaration.Value, zone);
                     }
 
                     if (declaration.Value.ValueKind == JsonValueKind.Object &&

@@ -441,7 +441,7 @@ namespace DnsServerCore.Configuration
 
                 foreach (JsonProperty field in declaration.Value.EnumerateObject())
                 {
-                    if (field.Name is not ("type" or "enabled" or "records"))
+                    if (field.Name is not ("type" or "enabled" or "records") && !ConfigurationZonePolicies.IsPolicy(field.Name))
                         throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
                 }
 
@@ -452,12 +452,15 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
                     if (type != "Primary")
                         throw new InvalidDataException($"{path}/type: Preview of creation is currently supported for primary zones.");
+                    ConfigurationZonePolicies.Compare(path, declaration.Value, current, changes);
                     changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Add, false));
                     continue;
                 }
 
                 if (type is not null && !current.GetProperty("type").ValueEquals(type))
                     throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
+
+                ConfigurationZonePolicies.Compare(path, declaration.Value, current, changes);
 
                 if (current.TryGetProperty("recordChanges", out JsonElement recordChanges))
                 {

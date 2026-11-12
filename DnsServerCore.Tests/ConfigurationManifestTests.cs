@@ -170,6 +170,17 @@ namespace DnsServerCore.Tests
             ConfigurationManifest.Load(path);
         }
 
+        [Fact]
+        public void ZonePolicyValidationRejectsAnInvalidNetworkPrefixWithoutEchoingIt()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"zones":{"policy.test":{"query":{"networkAcl":["192.0.2.0/64"]}}}}
+                """);
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains("/zones/policy.test/query/networkAcl/0", error.Message);
+            Assert.DoesNotContain("192.0.2.", error.Message);
+        }
+
         private string WriteManifest(string json)
         {
             string path = Path.Combine(_directory.FullName, ConfigurationManifest.DefaultFileName);

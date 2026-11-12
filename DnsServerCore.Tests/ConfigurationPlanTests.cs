@@ -1204,6 +1204,37 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZonePolicyPreviewReportsChangesAndKeepsAclValuesPrivate()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=policy.test&type=Primary", server.AdminToken));
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"policy.test":{
+                    "query":{"mode":"UseSpecifiedNetworkACL","networkAcl":["!192.0.2.0/25","192.0.2.0/24"]},
+                    "transfer":{"mode":null,"networkAcl":null},
+                    "notify":{"mode":"SpecifiedNameServers","nameServers":["2001:db8::10"]},
+                    "updates":{"mode":"Deny","networkAcl":[]}
+                }}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.Equal("/zones/policy.test/notify/mode", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/zones/policy.test/notify/nameServers", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/zones/policy.test/query/mode", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/zones/policy.test/query/networkAcl", change.GetProperty("path").GetString()));
+            Assert.DoesNotContain("192.0.2.", preview.GetRawText());
+            Assert.DoesNotContain("2001:db8", preview.GetRawText());
+            Assert.Single((await server.QueryAsync("policy.test", DnsResourceRecordType.SOA)).Answer);
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/options/set?zone=policy.test&queryAccess=UseSpecifiedNetworkACL&queryAccessNetworkACL=%21192.0.2.0%2F25%2C192.0.2.0%2F24",
+                server.AdminToken));
+            JsonElement updated = await PreviewAsync(server, manifest);
+            Assert.Equal(2, updated.GetProperty("changes").GetArrayLength());
+            Assert.NotEqual(preview.GetProperty("revision").GetString(), updated.GetProperty("revision").GetString());
+        }
+
+        [Fact]
         public async Task ZoneRecordPreviewTracksRecordChangesWithoutMutatingDns()
         {
             await using var server = await LoopbackWebService.StartAsync();
