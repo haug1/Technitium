@@ -606,6 +606,7 @@
             "role": {"anyOf": [{"enum": ["Primary", "Secondary"]}, {"type": "null"}]},
             "primaryUrl": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
             "primaryAddress": {"anyOf": [{"$ref": "#/$defs/ipAddress"}, {"type": "null"}]},
+            "primaryAddresses": {"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "minItems": 1, "maxItems": 10},
             "username": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
             "password": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},
             "totp": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]},

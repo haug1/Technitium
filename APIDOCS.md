@@ -7725,6 +7725,8 @@ Cluster state includes `managedOptionPaths` for the node. A Secondary reports it
 
 Configuration preview and apply accept `cluster.domain` and `cluster.bootstrap.role` as assertions on an initialized node. `cluster.node.addresses` reconciles and owns the advertised addresses on either role. On a Primary, apply also reconciles the corresponding DNS records. The API rejects a conflicting assertion before changing cluster settings. With Administration View permission, export includes the cluster topology and reports Secondary join inputs under `missingInputs`. Live Secondary join uses environment references for the Primary password and optional TOTP value. Preview validates local prerequisites and resolves references. Apply checks the revision and connects to the Primary before changing membership. An unclustered server with web TLS configured can preview and apply a cluster-only Primary bootstrap manifest with Administration Delete permission. Live bootstrap requires new cluster and catalog zones.
 
+A Secondary bootstrap manifest can provide one connection address through `cluster.bootstrap.primaryAddress` or up to ten through `cluster.bootstrap.primaryAddresses`. Export includes the Primary’s advertised addresses so a replacement Secondary can join before cluster DNS is available.
+
 RESPONSE:
 ```
 {

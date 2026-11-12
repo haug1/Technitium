@@ -773,7 +773,7 @@ namespace DnsServerCore
                         else if (bootstrap is ConfigurationClusterOptions.SecondaryBootstrap secondary)
                         {
                             await _dnsWebService._clusterManager.InitializeAndJoinClusterAsync(secondary.Addresses, secondary.PrimaryUrl, secondary.Username,
-                                secondary.Password, secondary.Totp, secondary.PrimaryAddress is null ? null : [secondary.PrimaryAddress],
+                                secondary.Password, secondary.Totp, secondary.PrimaryAddresses,
                                 secondary.IgnoreCertificateErrors, expectedDomain: secondary.Domain);
                         }
                         return;

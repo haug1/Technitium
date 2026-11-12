@@ -56,6 +56,7 @@ namespace DnsServerCore.Tests
         [InlineData("""{"bootstrap":{"role":"Secondary","primaryUrl":"https://primary.example.test/join"}}""", "/cluster/bootstrap/primaryUrl")]
         [InlineData("""{"bootstrap":{"role":"Secondary"},"configRefreshSeconds":120}""", "Only the Primary")]
         [InlineData("""{"bootstrap":{"role":"Primary","username":"operator"}}""", "/cluster/bootstrap/username")]
+        [InlineData("""{"bootstrap":{"role":"Secondary","primaryAddress":"192.0.2.1","primaryAddresses":["192.0.2.2"]}}""", "/cluster/bootstrap/primaryAddresses")]
         public void RejectsInvalidClusterDeclarationsWithoutAServer(string cluster, string diagnostic)
         {
             string path = WriteManifest($$"""{"schemaVersion":1,"cluster":{{cluster}} }""");

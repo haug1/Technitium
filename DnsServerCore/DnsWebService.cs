@@ -3551,7 +3551,7 @@ namespace DnsServerCore
                             _clusterManager.InitializePrimaryFromManifest(primary, bootstrapAdmin);
                         else if (bootstrap is ConfigurationClusterOptions.SecondaryBootstrap secondary)
                             await _clusterManager.InitializeAndJoinClusterAsync(secondary.Addresses, secondary.PrimaryUrl, secondary.Username,
-                                secondary.Password, secondary.Totp, secondary.PrimaryAddress is null ? null : [secondary.PrimaryAddress],
+                                secondary.Password, secondary.Totp, secondary.PrimaryAddresses,
                                 secondary.IgnoreCertificateErrors, expectedDomain: secondary.Domain);
                         else if (startupManifest is not null)
                         {

@@ -305,7 +305,7 @@ namespace DnsServerCore.Tests
             await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true, adminPassword: primary.AdminPassword);
             LoopbackWebService.AssertOk(await primary.CallAsync("settings/set?defaultRecordTtl=180", primary.AdminToken));
             JsonElement initialized = await primary.CallAsync(
-                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1", primary.AdminToken);
+                "admin/cluster/init?clusterDomain=cluster.test&primaryNodeIpAddresses=127.0.0.1,127.0.0.2", primary.AdminToken);
             LoopbackWebService.AssertOk(initialized);
             string primaryUrl = Assert.Single(initialized.GetProperty("response").GetProperty("clusterNodes").EnumerateArray())
                 .GetProperty("url").GetString()!;
@@ -355,6 +355,8 @@ namespace DnsServerCore.Tests
             JsonElement bootstrap = cluster.GetProperty("bootstrap");
             Assert.Equal("Secondary", bootstrap.GetProperty("role").GetString());
             Assert.Equal(primaryUrl, bootstrap.GetProperty("primaryUrl").GetString());
+            Assert.Equal(new[] { "127.0.0.1", "127.0.0.2" },
+                bootstrap.GetProperty("primaryAddresses").Deserialize<string[]>());
             Assert.False(bootstrap.TryGetProperty("password", out _));
             Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/cluster/bootstrap/password"));
 

@@ -68,6 +68,7 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{Path}: Only the Primary can declare cluster intervals.");
                 if (bootstrap.TryGetProperty("primaryUrl", out JsonElement url) && url.ValueKind == JsonValueKind.String)
                     ReadPrimaryUrl(url.GetString());
+                ReadPrimaryAddresses(bootstrap);
             }
 
             // A partial patch depends on the initialized node's current intervals.
@@ -86,7 +87,7 @@ namespace DnsServerCore.Configuration
 
         internal abstract record Bootstrap(string Domain, IPAddress[] Addresses);
         internal sealed record PrimaryBootstrap(string Domain, IPAddress[] Addresses, Settings Options, string[] Ownership) : Bootstrap(Domain, Addresses);
-        internal sealed record SecondaryBootstrap(string Domain, IPAddress[] Addresses, Uri PrimaryUrl, IPAddress PrimaryAddress,
+        internal sealed record SecondaryBootstrap(string Domain, IPAddress[] Addresses, Uri PrimaryUrl, IPAddress[] PrimaryAddresses,
             string Username, string Password, string Totp, bool IgnoreCertificateErrors) : Bootstrap(Domain, Addresses)
         {
             public override string ToString() => nameof(SecondaryBootstrap);
@@ -133,10 +134,10 @@ namespace DnsServerCore.Configuration
                 if (password is null)
                     throw new InvalidDataException("/cluster/bootstrap/password: A password reference is required.");
 
-                string address = ReadText("primaryAddress");
+                IPAddress[] primaryAddresses = ReadPrimaryAddresses(bootstrap);
                 bool ignoreCertificateErrors = bootstrap.TryGetProperty("ignoreCertificateErrors", out JsonElement ignore) &&
                     ignore.ValueKind == JsonValueKind.True;
-                return new SecondaryBootstrap(domain, addresses, url, address is null ? null : IPAddress.Parse(address),
+                return new SecondaryBootstrap(domain, addresses, url, primaryAddresses,
                     username, password, ResolveSecret("totp"), ignoreCertificateErrors);
             }
 
@@ -150,6 +151,16 @@ namespace DnsServerCore.Configuration
             string ReadText(string field) => bootstrap.TryGetProperty(field, out JsonElement value) ? value.GetString() : null;
             string ResolveSecret(string field) => bootstrap.TryGetProperty(field, out JsonElement reference) && reference.ValueKind != JsonValueKind.Null
                 ? manifest.ResolveReference(reference, $"{Path}/bootstrap/{field}") : null;
+        }
+
+        private static IPAddress[] ReadPrimaryAddresses(JsonElement bootstrap)
+        {
+            bool hasAddress = bootstrap.TryGetProperty("primaryAddress", out JsonElement address) && address.ValueKind == JsonValueKind.String;
+            if (!bootstrap.TryGetProperty("primaryAddresses", out JsonElement addresses))
+                return hasAddress ? [IPAddress.Parse(address.GetString())] : null;
+            if (hasAddress)
+                throw new InvalidDataException("/cluster/bootstrap/primaryAddresses: Declare either primaryAddress or primaryAddresses.");
+            return addresses.EnumerateArray().Select(value => IPAddress.Parse(value.GetString())).Distinct().ToArray();
         }
 
         internal static IPAddress[] GetDeclaredAddresses(ConfigurationManifest manifest) =>
@@ -273,6 +284,8 @@ namespace DnsServerCore.Configuration
                 bootstrap["primaryUrl"] = primary.Url.AbsoluteUri;
                 if (primary.IPAddresses.Count == 1)
                     bootstrap["primaryAddress"] = primary.IPAddresses[0].ToString();
+                else if (primary.IPAddresses.Count > 1)
+                    bootstrap["primaryAddresses"] = JsonSerializer.SerializeToNode(primary.IPAddresses.Select(address => address.ToString()));
 
                 missingInputs.Add(Path + "/bootstrap/username");
                 missingInputs.Add(Path + "/bootstrap/password");
