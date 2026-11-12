@@ -466,6 +466,47 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task CachePrefetchPreviewIncludesImplicitChangesAndProtectsOwnedFields()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?cachePrefetchTrigger=0", server.AdminToken));
+            const string manifest = """{"schemaVersion":1,"dns":{"cache":{"prefetch":{"enabled":true,"eligibility":4}}}}""";
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.Equal("/dns/cache/prefetch/eligibility", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dns/cache/prefetch/enabled", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dns/cache/prefetch/trigger", change.GetProperty("path").GetString()));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.True(settings.GetProperty("enableCachePrefetch").GetBoolean());
+            Assert.Equal(9, settings.GetProperty("cachePrefetchTrigger").GetInt32());
+            Assert.Equal(4, settings.GetProperty("cachePrefetchEligibility").GetInt32());
+            Assert.Equal(2, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            JsonNode exported = ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["cache"]!["prefetch"]!;
+            Assert.Equal(9, exported["trigger"]!.GetValue<int>());
+
+            JsonElement conflict = await server.CallAsync("settings/set?cachePrefetchTrigger=0", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/cache/prefetch/enabled", conflict.GetProperty("errorMessage").GetString());
+
+            const string disable = """{"schemaVersion":1,"dns":{"cache":{"prefetch":{"trigger":0}}}}""";
+            JsonElement disabled = await PreviewAsync(server, disable);
+            Assert.Equal(2, disabled.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, disable, disabled.GetProperty("revision").GetString()!));
+            settings = await server.GetSettingsAsync();
+            Assert.False(settings.GetProperty("enableCachePrefetch").GetBoolean());
+            Assert.Equal(0, settings.GetProperty("cachePrefetchTrigger").GetInt32());
+            Assert.Equal("/dns/cache/prefetch/trigger", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+
+            conflict = await server.CallAsync("settings/set?enableCachePrefetch=true", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/cache/prefetch/trigger", conflict.GetProperty("errorMessage").GetString());
+        }
+
+        [Fact]
         public async Task CachePolicyAppliesAndProtectsManagedTtls()
         {
             await using var server = await LoopbackWebService.StartAsync();

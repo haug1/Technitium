@@ -117,6 +117,11 @@ namespace DnsServerCore.Configuration
                 }
                 if (dns.TryGetProperty("recursion", out JsonElement recursion) && recursion.TryGetProperty("networkAcl", out JsonElement recursionAcl))
                     ReadNetworkAcl(recursionAcl, "/dns/recursion/networkAcl");
+                if (dns.TryGetProperty("cache", out JsonElement cache) && cache.TryGetProperty("prefetch", out JsonElement prefetch) &&
+                    prefetch.TryGetProperty("enabled", out JsonElement prefetchEnabled) && prefetchEnabled.ValueKind != JsonValueKind.False &&
+                    prefetch.TryGetProperty("trigger", out JsonElement prefetchTrigger) && prefetchTrigger.ValueKind == JsonValueKind.Number &&
+                    prefetchTrigger.GetDecimal() == 0)
+                    throw new InvalidDataException("/dns/cache/prefetch/trigger: Enabled prefetch requires a positive trigger.");
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))

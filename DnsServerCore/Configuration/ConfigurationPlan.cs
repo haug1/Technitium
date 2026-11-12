@@ -81,6 +81,9 @@ namespace DnsServerCore.Configuration
             ["/dns/cache/maximumRecordTtl"] = Field("cacheMaximumRecordTtl", 604800u, canApply: true),
             ["/dns/cache/negativeRecordTtl"] = Field("cacheNegativeRecordTtl", 300u, canApply: true),
             ["/dns/cache/failureRecordTtl"] = Field("cacheFailureRecordTtl", 10u, canApply: true),
+            ["/dns/cache/prefetch/enabled"] = Field("enableCachePrefetch", true, canApply: true),
+            ["/dns/cache/prefetch/eligibility"] = Field("cachePrefetchEligibility", 2, canApply: true),
+            ["/dns/cache/prefetch/trigger"] = Field("cachePrefetchTrigger", 9, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -306,24 +309,51 @@ namespace DnsServerCore.Configuration
                 return default;
 
             cache.TryGetProperty("serveStale", out JsonElement stale);
-            return new DnsServer.CachePolicy(
-                Read(cache, "saveToDisk", "saveToDisk") is JsonElement saveToDisk ? saveToDisk.GetBoolean() : null,
-                Read(stale, "enabled", "serveStale/enabled") is JsonElement serveStale ? serveStale.GetBoolean() : null,
-                Read(stale, "ttl", "serveStale/ttl") is JsonElement staleTtl ? decimal.ToUInt32(staleTtl.GetDecimal()) : null,
-                Read(stale, "answerTtl", "serveStale/answerTtl") is JsonElement staleAnswerTtl ? decimal.ToUInt32(staleAnswerTtl.GetDecimal()) : null,
-                Read(stale, "resetTtl", "serveStale/resetTtl") is JsonElement staleResetTtl ? decimal.ToUInt32(staleResetTtl.GetDecimal()) : null,
-                Read(stale, "maxWaitMs", "serveStale/maxWaitMs") is JsonElement staleMaxWait ? decimal.ToInt32(staleMaxWait.GetDecimal()) : null,
-                Read(cache, "maximumEntries", "maximumEntries") is JsonElement maximumEntries ? decimal.ToInt64(maximumEntries.GetDecimal()) : null,
-                Read(cache, "minimumRecordTtl", "minimumRecordTtl") is JsonElement minimumRecordTtl ? decimal.ToUInt32(minimumRecordTtl.GetDecimal()) : null,
-                Read(cache, "maximumRecordTtl", "maximumRecordTtl") is JsonElement maximumRecordTtl ? decimal.ToUInt32(maximumRecordTtl.GetDecimal()) : null,
-                Read(cache, "negativeRecordTtl", "negativeRecordTtl") is JsonElement negativeRecordTtl ? decimal.ToUInt32(negativeRecordTtl.GetDecimal()) : null,
-                Read(cache, "failureRecordTtl", "failureRecordTtl") is JsonElement failureRecordTtl ? decimal.ToUInt32(failureRecordTtl.GetDecimal()) : null);
+            DnsServer.CachePolicy prefetch = cache.TryGetProperty("prefetch", out JsonElement prefetchElement)
+                ? ReadCachePrefetch(prefetchElement) : default;
+            return prefetch with
+            {
+                SaveToDisk = Read(cache, "saveToDisk", "saveToDisk") is JsonElement saveToDisk ? saveToDisk.GetBoolean() : null,
+                ServeStale = Read(stale, "enabled", "serveStale/enabled") is JsonElement serveStale ? serveStale.GetBoolean() : null,
+                StaleTtl = Read(stale, "ttl", "serveStale/ttl") is JsonElement staleTtl ? decimal.ToUInt32(staleTtl.GetDecimal()) : null,
+                StaleAnswerTtl = Read(stale, "answerTtl", "serveStale/answerTtl") is JsonElement staleAnswerTtl ? decimal.ToUInt32(staleAnswerTtl.GetDecimal()) : null,
+                StaleResetTtl = Read(stale, "resetTtl", "serveStale/resetTtl") is JsonElement staleResetTtl ? decimal.ToUInt32(staleResetTtl.GetDecimal()) : null,
+                StaleMaxWait = Read(stale, "maxWaitMs", "serveStale/maxWaitMs") is JsonElement staleMaxWait ? decimal.ToInt32(staleMaxWait.GetDecimal()) : null,
+                MaximumEntries = Read(cache, "maximumEntries", "maximumEntries") is JsonElement maximumEntries ? decimal.ToInt64(maximumEntries.GetDecimal()) : null,
+                MinimumRecordTtl = Read(cache, "minimumRecordTtl", "minimumRecordTtl") is JsonElement minimumRecordTtl ? decimal.ToUInt32(minimumRecordTtl.GetDecimal()) : null,
+                MaximumRecordTtl = Read(cache, "maximumRecordTtl", "maximumRecordTtl") is JsonElement maximumRecordTtl ? decimal.ToUInt32(maximumRecordTtl.GetDecimal()) : null,
+                NegativeRecordTtl = Read(cache, "negativeRecordTtl", "negativeRecordTtl") is JsonElement negativeRecordTtl ? decimal.ToUInt32(negativeRecordTtl.GetDecimal()) : null,
+                FailureRecordTtl = Read(cache, "failureRecordTtl", "failureRecordTtl") is JsonElement failureRecordTtl ? decimal.ToUInt32(failureRecordTtl.GetDecimal()) : null,
+            };
 
             static JsonElement? Read(JsonElement section, string field, string path)
             {
                 if (section.ValueKind != JsonValueKind.Object || !section.TryGetProperty(field, out JsonElement value))
                     return null;
                 return value.ValueKind == JsonValueKind.Null ? _settings["/dns/cache/" + path].Default : value;
+            }
+        }
+
+        private static DnsServer.CachePolicy ReadCachePrefetch(JsonElement value)
+        {
+            return new DnsServer.CachePolicy
+            {
+                PrefetchEnabled = Read("enabled")?.GetBoolean(),
+                PrefetchEligibility = ReadInt("eligibility"),
+                PrefetchTrigger = ReadInt("trigger")
+            };
+
+            JsonElement? Read(string name)
+            {
+                if (!value.TryGetProperty(name, out JsonElement field))
+                    return null;
+                return field.ValueKind == JsonValueKind.Null ? _settings["/dns/cache/prefetch/" + name].Default : field;
+            }
+
+            int? ReadInt(string name)
+            {
+                JsonElement? field = Read(name);
+                return field.HasValue ? decimal.ToInt32(field.Value.GetDecimal()) : null;
             }
         }
 
@@ -730,6 +760,22 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path == "/dns/cache/prefetch")
+            {
+                DnsServer.CachePolicy prefetch = DnsServer.NormalizeCachePrefetch(ReadCachePrefetch(desired),
+                    currentSettings.GetProperty("cachePrefetchTrigger").GetInt32());
+                ComparePrefetch("enabled", prefetch.PrefetchEnabled);
+                ComparePrefetch("eligibility", prefetch.PrefetchEligibility);
+                ComparePrefetch("trigger", prefetch.PrefetchTrigger);
+                return;
+
+                void ComparePrefetch<T>(string field, T? value) where T : struct
+                {
+                    if (value.HasValue)
+                        Compare(JsonSerializer.SerializeToElement(value.Value), path + "/" + field, currentSettings, changes, log, declaredWebTlsPort);
+                }
+            }
+
             if (path == "/dns/clientSubnet")
             {
                 DnsServer.ClientSubnetSettings subnet = ReadClientSubnetSettings(desired);

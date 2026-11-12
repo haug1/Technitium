@@ -959,7 +959,7 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("resolverConcurrency", int.Parse, out int resolverConcurrency) ? resolverConcurrency : null,
                     request.TryGetQueryOrForm("resolverMaxStackCount", int.Parse, out int resolverMaxStackCount) ? resolverMaxStackCount : null));
 
-                DnsServer.CachePolicy cachePolicy = _dnsWebService._dnsServer.CheckManifestCachePolicy(new DnsServer.CachePolicy(
+                var requestedCache = new DnsServer.CachePolicy(
                     request.TryGetQueryOrForm("saveCache", bool.Parse, out bool saveCache) ? saveCache : null,
                     request.TryGetQueryOrForm("serveStale", bool.Parse, out bool serveStale) ? serveStale : null,
                     request.TryGetQueryOrForm("serveStaleTtl", ZoneFile.ParseTtl, out uint serveStaleTtl) ? serveStaleTtl : null,
@@ -970,7 +970,12 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("cacheMinimumRecordTtl", ZoneFile.ParseTtl, out uint cacheMinimumRecordTtl) ? cacheMinimumRecordTtl : null,
                     request.TryGetQueryOrForm("cacheMaximumRecordTtl", ZoneFile.ParseTtl, out uint cacheMaximumRecordTtl) ? cacheMaximumRecordTtl : null,
                     request.TryGetQueryOrForm("cacheNegativeRecordTtl", ZoneFile.ParseTtl, out uint cacheNegativeRecordTtl) ? cacheNegativeRecordTtl : null,
-                    request.TryGetQueryOrForm("cacheFailureRecordTtl", ZoneFile.ParseTtl, out uint cacheFailureRecordTtl) ? cacheFailureRecordTtl : null));
+                    request.TryGetQueryOrForm("cacheFailureRecordTtl", ZoneFile.ParseTtl, out uint cacheFailureRecordTtl) ? cacheFailureRecordTtl : null,
+                    request.TryGetQueryOrForm("enableCachePrefetch", bool.Parse, out bool enableCachePrefetch) ? enableCachePrefetch : null,
+                    request.TryGetQueryOrForm("cachePrefetchEligibility", int.Parse, out int cachePrefetchEligibility) ? cachePrefetchEligibility : null,
+                    request.TryGetQueryOrForm("cachePrefetchTrigger", int.Parse, out int cachePrefetchTrigger) ? cachePrefetchTrigger : null);
+                DnsServer.CachePolicy cachePolicy = _dnsWebService._dnsServer.CheckManifestCachePolicy(
+                    _dnsWebService._dnsServer.NormalizeCachePrefetch(requestedCache));
 
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
@@ -1751,15 +1756,6 @@ namespace DnsServerCore
                         #region cache
 
                         _dnsWebService._dnsServer.SetCachePolicy(cachePolicy);
-
-                        if (request.TryGetQueryOrForm("cachePrefetchEligibility", int.Parse, out int cachePrefetchEligibility))
-                            _dnsWebService._dnsServer.CachePrefetchEligibility = cachePrefetchEligibility;
-
-                        if (request.TryGetQueryOrForm("cachePrefetchTrigger", int.Parse, out int cachePrefetchTrigger))
-                            _dnsWebService._dnsServer.CachePrefetchTrigger = cachePrefetchTrigger;
-
-                        if (request.TryGetQueryOrForm("enableCachePrefetch", bool.Parse, out bool enableCachePrefetch))
-                            _dnsWebService._dnsServer.EnableCachePrefetch = enableCachePrefetch;
 
                         #endregion
 

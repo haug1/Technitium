@@ -176,7 +176,10 @@ namespace DnsServerCore.Dns
             CacheMinimumRecordTtl = 1UL << 45,
             CacheMaximumRecordTtl = 1UL << 46,
             CacheNegativeRecordTtl = 1UL << 47,
-            CacheFailureRecordTtl = 1UL << 48
+            CacheFailureRecordTtl = 1UL << 48,
+            CachePrefetchEnabled = 1UL << 49,
+            CachePrefetchEligibility = 1UL << 50,
+            CachePrefetchTrigger = 1UL << 51
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -200,7 +203,8 @@ namespace DnsServerCore.Dns
         internal readonly record struct CachePolicy(
             bool? SaveToDisk, bool? ServeStale, uint? StaleTtl, uint? StaleAnswerTtl, uint? StaleResetTtl,
             int? StaleMaxWait, long? MaximumEntries, uint? MinimumRecordTtl, uint? MaximumRecordTtl,
-            uint? NegativeRecordTtl, uint? FailureRecordTtl);
+            uint? NegativeRecordTtl, uint? FailureRecordTtl,
+            bool? PrefetchEnabled = null, int? PrefetchEligibility = null, int? PrefetchTrigger = null);
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -822,7 +826,8 @@ namespace DnsServerCore.Dns
         private const ManagedDnsSettings CacheOwnership = ManagedDnsSettings.CacheSaveToDisk | ManagedDnsSettings.CacheServeStale |
             ManagedDnsSettings.CacheStaleTtl | ManagedDnsSettings.CacheStaleAnswerTtl | ManagedDnsSettings.CacheStaleResetTtl |
             ManagedDnsSettings.CacheStaleMaxWait | ManagedDnsSettings.CacheMaximumEntries | ManagedDnsSettings.CacheMinimumRecordTtl |
-            ManagedDnsSettings.CacheMaximumRecordTtl | ManagedDnsSettings.CacheNegativeRecordTtl | ManagedDnsSettings.CacheFailureRecordTtl;
+            ManagedDnsSettings.CacheMaximumRecordTtl | ManagedDnsSettings.CacheNegativeRecordTtl | ManagedDnsSettings.CacheFailureRecordTtl |
+            ManagedDnsSettings.CachePrefetchEnabled | ManagedDnsSettings.CachePrefetchEligibility | ManagedDnsSettings.CachePrefetchTrigger;
         internal bool HasManagedCachePolicy => (_managedDnsSettings & CacheOwnership) != 0;
 
         internal bool HasManagedAuthoritativeDefaults =>
@@ -876,6 +881,12 @@ namespace DnsServerCore.Dns
                 yield return "/dns/cache/negativeRecordTtl";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheFailureRecordTtl))
                 yield return "/dns/cache/failureRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchEnabled))
+                yield return "/dns/cache/prefetch/enabled";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchEligibility))
+                yield return "/dns/cache/prefetch/eligibility";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchTrigger))
+                yield return "/dns/cache/prefetch/trigger";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1187,6 +1198,21 @@ namespace DnsServerCore.Dns
             }
         }
 
+        internal static CachePolicy NormalizeCachePrefetch(CachePolicy cache, int currentTrigger)
+        {
+            // The legacy settings API changes the trigger before it changes the enabled flag.
+            if (cache.PrefetchEnabled == true && cache.PrefetchTrigger is not < 0 && (cache.PrefetchTrigger ?? currentTrigger) < 1)
+                return cache with { PrefetchTrigger = 9 };
+            if (cache.PrefetchTrigger == 0 && !cache.PrefetchEnabled.HasValue)
+                return cache with { PrefetchEnabled = false };
+            return cache;
+        }
+
+        internal CachePolicy NormalizeCachePrefetch(CachePolicy cache)
+        {
+            return NormalizeCachePrefetch(cache, _cachePrefetchTrigger);
+        }
+
         internal CachePolicy CheckManifestCachePolicy(CachePolicy cache, bool validateRanges = true)
         {
             if (validateRanges)
@@ -1196,6 +1222,8 @@ namespace DnsServerCore.Dns
                 ValidateRange(cache.StaleResetTtl, 10, 900, "serveStale/resetTtl");
                 ValidateRange(cache.StaleMaxWait, 0, 1800, "serveStale/maxWaitMs");
                 ValidateRange(cache.MaximumEntries, 0, long.MaxValue, "maximumEntries");
+                ValidateRange(cache.PrefetchEligibility, 2, int.MaxValue, "prefetch/eligibility");
+                ValidateRange(cache.PrefetchTrigger, 0, int.MaxValue, "prefetch/trigger");
             }
 
             return cache with
@@ -1210,7 +1238,10 @@ namespace DnsServerCore.Dns
                 MinimumRecordTtl = Check(ManagedDnsSettings.CacheMinimumRecordTtl, cache.MinimumRecordTtl, _cacheZoneManager.MinimumRecordTtl, "minimumRecordTtl"),
                 MaximumRecordTtl = Check(ManagedDnsSettings.CacheMaximumRecordTtl, cache.MaximumRecordTtl, _cacheZoneManager.MaximumRecordTtl, "maximumRecordTtl"),
                 NegativeRecordTtl = Check(ManagedDnsSettings.CacheNegativeRecordTtl, cache.NegativeRecordTtl, _cacheZoneManager.NegativeRecordTtl, "negativeRecordTtl"),
-                FailureRecordTtl = Check(ManagedDnsSettings.CacheFailureRecordTtl, cache.FailureRecordTtl, _cacheZoneManager.FailureRecordTtl, "failureRecordTtl")
+                FailureRecordTtl = Check(ManagedDnsSettings.CacheFailureRecordTtl, cache.FailureRecordTtl, _cacheZoneManager.FailureRecordTtl, "failureRecordTtl"),
+                PrefetchEnabled = Check(ManagedDnsSettings.CachePrefetchEnabled, cache.PrefetchEnabled, _enableCachePrefetch, "prefetch/enabled"),
+                PrefetchEligibility = Check(ManagedDnsSettings.CachePrefetchEligibility, cache.PrefetchEligibility, _cachePrefetchEligibility, "prefetch/eligibility"),
+                PrefetchTrigger = Check(ManagedDnsSettings.CachePrefetchTrigger, cache.PrefetchTrigger, _cachePrefetchTrigger, "prefetch/trigger")
             };
 
             T? Check<T>(ManagedDnsSettings flag, T? candidate, T current, string field) where T : struct
@@ -1253,6 +1284,9 @@ namespace DnsServerCore.Dns
                 CacheZoneManager.NegativeRecordTtl = cache.NegativeRecordTtl.Value;
             if (cache.FailureRecordTtl.HasValue && cache.FailureRecordTtl != _cacheZoneManager.FailureRecordTtl)
                 CacheZoneManager.FailureRecordTtl = cache.FailureRecordTtl.Value;
+            _enableCachePrefetch = cache.PrefetchEnabled ?? _enableCachePrefetch;
+            _cachePrefetchEligibility = cache.PrefetchEligibility ?? _cachePrefetchEligibility;
+            _cachePrefetchTrigger = cache.PrefetchTrigger ?? _cachePrefetchTrigger;
         }
 
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
@@ -1845,37 +1879,25 @@ namespace DnsServerCore.Dns
             if (apply && !isConfigTransfer && (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CacheFailureRecordTtl)))
                 _cacheZoneManager.FailureRecordTtl = failureRecordTtl;
 
+            bool enableCachePrefetch = version < 7 || bR.ReadBoolean();
+            int cachePrefetchEligibility = bR.ReadInt32();
+            int cachePrefetchTrigger = bR.ReadInt32();
+            if (version < 7 && cachePrefetchTrigger < 1)
+                enableCachePrefetch = false;
+
+            if (apply && !isConfigTransfer)
+            {
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchEnabled))
+                    _enableCachePrefetch = enableCachePrefetch;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchEligibility))
+                    _cachePrefetchEligibility = cachePrefetchEligibility;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchTrigger))
+                    _cachePrefetchTrigger = cachePrefetchTrigger;
+            }
             if (!apply && !isConfigTransfer && HasManagedCachePolicy)
                 CheckManifestCachePolicy(new CachePolicy(saveCacheToDisk, serveStale, serveStaleTtl, serveStaleAnswerTtl, serveStaleResetTtl,
-                    serveStaleMaxWaitTime, cacheMaximumEntries, minimumRecordTtl, maximumRecordTtl, negativeRecordTtl, failureRecordTtl), validateRanges: false);
-
-            if (version >= 7)
-            {
-                bool enableCachePrefetch = bR.ReadBoolean();
-                if (apply && !isConfigTransfer)
-                    _enableCachePrefetch = enableCachePrefetch;
-            }
-            else
-            {
-                if (apply && !isConfigTransfer)
-                    _enableCachePrefetch = true;
-            }
-
-            int cachePrefetchEligibility = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _cachePrefetchEligibility = cachePrefetchEligibility;
-
-            int cachePrefetchTrigger = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-            {
-                _cachePrefetchTrigger = cachePrefetchTrigger;
-
-                if (version < 7)
-                {
-                    if (_cachePrefetchTrigger < 1)
-                        _enableCachePrefetch = false;
-                }
-            }
+                    serveStaleMaxWaitTime, cacheMaximumEntries, minimumRecordTtl, maximumRecordTtl, negativeRecordTtl, failureRecordTtl,
+                    enableCachePrefetch, cachePrefetchEligibility, cachePrefetchTrigger), validateRanges: false);
 
             if (version < 6)
             {
@@ -2250,9 +2272,9 @@ namespace DnsServerCore.Dns
             bW.Write(cache.NegativeRecordTtl ?? _cacheZoneManager.NegativeRecordTtl);
             bW.Write(cache.FailureRecordTtl ?? _cacheZoneManager.FailureRecordTtl);
 
-            bW.Write(_enableCachePrefetch);
-            bW.Write(_cachePrefetchEligibility);
-            bW.Write(_cachePrefetchTrigger);
+            bW.Write(cache.PrefetchEnabled ?? _enableCachePrefetch);
+            bW.Write(cache.PrefetchEligibility ?? _cachePrefetchEligibility);
+            bW.Write(cache.PrefetchTrigger ?? _cachePrefetchTrigger);
 
             //blocking
             bW.Write(_enableBlocking);
@@ -7958,6 +7980,14 @@ namespace DnsServerCore.Dns
                     if (cache.FailureRecordTtl.HasValue)
                         ownership |= ManagedDnsSettings.CacheFailureRecordTtl;
 
+                    if (cache.PrefetchEnabled.HasValue)
+                        ownership |= ManagedDnsSettings.CachePrefetchEnabled;
+                    if (cache.PrefetchEligibility.HasValue)
+                        ownership |= ManagedDnsSettings.CachePrefetchEligibility;
+                    if (cache.PrefetchTrigger.HasValue)
+                        ownership |= ManagedDnsSettings.CachePrefetchTrigger;
+                    cache = NormalizeCachePrefetch(cache);
+
                     bool cacheChanged = (cache.SaveToDisk.HasValue && cache.SaveToDisk != _saveCacheToDisk) ||
                         (cache.ServeStale.HasValue && cache.ServeStale != _serveStale) ||
                         (cache.StaleTtl.HasValue && cache.StaleTtl != _cacheZoneManager.ServeStaleTtl) ||
@@ -7968,7 +7998,10 @@ namespace DnsServerCore.Dns
                         (cache.MinimumRecordTtl.HasValue && cache.MinimumRecordTtl != _cacheZoneManager.MinimumRecordTtl) ||
                         (cache.MaximumRecordTtl.HasValue && cache.MaximumRecordTtl != _cacheZoneManager.MaximumRecordTtl) ||
                         (cache.NegativeRecordTtl.HasValue && cache.NegativeRecordTtl != _cacheZoneManager.NegativeRecordTtl) ||
-                        (cache.FailureRecordTtl.HasValue && cache.FailureRecordTtl != _cacheZoneManager.FailureRecordTtl);
+                        (cache.FailureRecordTtl.HasValue && cache.FailureRecordTtl != _cacheZoneManager.FailureRecordTtl) ||
+                        (cache.PrefetchEnabled.HasValue && cache.PrefetchEnabled != _enableCachePrefetch) ||
+                        (cache.PrefetchEligibility.HasValue && cache.PrefetchEligibility != _cachePrefetchEligibility) ||
+                        (cache.PrefetchTrigger.HasValue && cache.PrefetchTrigger != _cachePrefetchTrigger);
                     bool recursionChanged = (recursion.Mode.HasValue && recursion.Mode != _recursion) ||
                         (recursion.NetworkAcl is not null && !recursion.NetworkAcl.SequenceEqual(_recursionNetworkACL ?? [])) ||
                         (recursion.RandomizeName.HasValue && recursion.RandomizeName != _randomizeName) ||

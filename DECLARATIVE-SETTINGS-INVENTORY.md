@@ -188,7 +188,7 @@ These fields persist in `dns.config`, apply live, and remain local during cluste
 | `dns.cache.maximumRecordTtl` | `cacheMaximumRecordTtl` | Unsigned seconds, 604800 | Use the DNS TTL parser for legacy API input. |
 | `dns.cache.negativeRecordTtl` | `cacheNegativeRecordTtl` | Unsigned seconds, 300 | Use the DNS TTL parser for legacy API input. |
 | `dns.cache.failureRecordTtl` | `cacheFailureRecordTtl` | Unsigned seconds, 10 | Use the DNS TTL parser for legacy API input. |
-| `dns.cache.prefetch.enabled` | `enableCachePrefetch` | Boolean, true | Enabling with a trigger below 1 restores the default trigger. |
+| `dns.cache.prefetch.enabled` | `enableCachePrefetch` | Boolean, true | Enabling with an existing zero trigger restores the default trigger when the manifest omits it. A manifest cannot explicitly enable prefetch with a zero trigger. |
 | `dns.cache.prefetch.eligibility` | `cachePrefetchEligibility` | Integer seconds, 2 | Minimum 2. |
 | `dns.cache.prefetch.trigger` | `cachePrefetchTrigger` | Integer seconds, 9 | Nonnegative. Zero disables prefetch. |
 

@@ -194,6 +194,16 @@ namespace DnsServerCore.Tests
             Assert.Contains("/dns/cache/serveStale/" + setting, error.Message);
         }
 
+        [Fact]
+        public void CachePrefetchRejectsAnEnabledPolicyWithZeroTrigger()
+        {
+            string path = WriteManifest("""
+                {"schemaVersion":1,"dns":{"cache":{"prefetch":{"enabled":true,"trigger":0}}}}
+                """);
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+            Assert.Contains("/dns/cache/prefetch/trigger", error.Message);
+        }
+
         private string WriteManifest(string json)
         {
             string path = Path.Combine(_directory.FullName, ConfigurationManifest.DefaultFileName);
