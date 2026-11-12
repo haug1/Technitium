@@ -468,11 +468,13 @@ namespace DnsServerCore.Configuration
                     return;
                 }
 
+                bool appPackage = path.Split('/') is ["", "apps", "packages", _];
+                if (appPackage)
+                    ConfigurationApplications.ValidatePackageReferences(this, element, path);
+
                 if (IsReferencePath(path) && (element.TryGetProperty("environment", out _) || element.TryGetProperty("file", out _)))
                 {
-                    if (path.Split('/') is ["", "apps", "packages", _, "source"])
-                        ConfigurationApplications.ValidateLocalSource(this, element, path);
-                    else if (path.StartsWith(ConfigurationTsig.Path + "/", StringComparison.Ordinal))
+                    if (path.StartsWith(ConfigurationTsig.Path + "/", StringComparison.Ordinal))
                         ConfigurationTsig.ReadSecret(this, element, path);
                     else
                         ResolveReference(element, path);
@@ -480,7 +482,10 @@ namespace DnsServerCore.Configuration
                 }
 
                 foreach (JsonProperty property in element.EnumerateObject())
-                    ValidateReferences(property.Value, AppendPath(path, property.Name), deferClusterJoinSecrets);
+                {
+                    if (!appPackage || property.Name != "source")
+                        ValidateReferences(property.Value, AppendPath(path, property.Name), deferClusterJoinSecrets);
+                }
             }
             else if (element.ValueKind == JsonValueKind.Array)
             {

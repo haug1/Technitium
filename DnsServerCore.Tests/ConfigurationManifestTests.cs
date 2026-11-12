@@ -1,6 +1,7 @@
 using DnsServerCore.Configuration;
 using System;
 using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Xunit;
@@ -110,6 +111,41 @@ namespace DnsServerCore.Tests
             using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
             manifest.ValidateReferences();
+        }
+
+        [Fact]
+        public void ValidatesExportedAppPackageDigestAgainstLocalArchive()
+        {
+            string archivePath = Path.Combine(_directory.FullName, "app.zip");
+            using (ZipArchive archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+                archive.CreateEntry("dnsApp.config");
+
+            string digest = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(archivePath)));
+            string manifest = WriteManifest(Manifest(digest));
+            ConfigurationManifest.Load(manifest).ValidateReferences();
+
+            manifest = WriteManifest(Manifest(new string('0', 64)));
+            var error = Assert.Throws<InvalidDataException>(ConfigurationManifest.Load(manifest).ValidateReferences);
+            Assert.Contains("/apps/packages/Fixture/packageSha256", error.Message);
+            Assert.DoesNotContain("app.zip", error.Message);
+
+            static string Manifest(string hash) => $$"""
+                {"schemaVersion":1,"apps":{"packages":{"Fixture":{"packageSha256":"{{hash}}","source":{"file":"app.zip"} } } } }
+                """;
+        }
+
+        [Fact]
+        public void RejectsConflictingAppDigestPinsWithoutDownloading()
+        {
+            string packageDigest = new string('0', 64);
+            string sourceDigest = new string('1', 64);
+            string path = WriteManifest($$"""
+                {"schemaVersion":1,"apps":{"packages":{"Fixture":{"packageSha256":"{{packageDigest}}",
+                 "source":{"url":"https://example.test/app.zip","sha256":"{{sourceDigest}}"} } } } }
+                """);
+
+            var error = Assert.Throws<InvalidDataException>(ConfigurationManifest.Load(path).ValidateReferences);
+            Assert.Contains("/apps/packages/Fixture/source/sha256", error.Message);
         }
 
         [Fact]

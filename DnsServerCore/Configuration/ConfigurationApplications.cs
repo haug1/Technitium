@@ -98,10 +98,7 @@ namespace DnsServerCore.Configuration
                 string pin = item.Value.TryGetProperty("version", out JsonElement requested) ? requested.GetString() : null;
                 if (pin is not null && !System.Version.TryParse(pin, out _))
                     throw new InvalidDataException($"{path}/version: Invalid app version.");
-                string sourceDigest = source.ValueKind == JsonValueKind.Object ? ReadPackageSha256(source) : null;
-                string packageDigest = item.Value.TryGetProperty("packageSha256", out JsonElement digest) ? digest.GetString() : null;
-                if (sourceDigest is not null && packageDigest is not null && !sourceDigest.Equals(packageDigest, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException($"{path}/source/sha256: The source digest differs from packageSha256.");
+                var (packageDigest, sourceDigest) = ReadPackagePins(item.Value, source, path);
                 string before = app?.ReadManifestConfig();
                 bool versionDiffers = app is not null && pin is not null && pin != DnsWebService.GetCleanVersion(app.Version) &&
                     new System.Version(pin) != app.Version;
@@ -136,7 +133,7 @@ namespace DnsServerCore.Configuration
 
                     string sha256 = packageDigest ?? sourceDigest;
                     if (package is not null && sha256 is not null)
-                        CheckPackageHash(sha256, SHA256.HashData(package), path + "/source");
+                        CheckPackageHash(sha256, SHA256.HashData(package), path + "/source/sha256");
 
                     entries.Add(new Entry(app, before, ReadConfig(item.Value, before, path), InstallName: item.Name,
                         Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _), RemoteSource: remoteSource,
@@ -167,13 +164,21 @@ namespace DnsServerCore.Configuration
             config.TryGetProperty("text", out JsonElement text) ? text.GetString() :
             manifest.ResolveReference(config.TryGetProperty("secret", out JsonElement secret) ? secret : config, path);
 
-        internal static void ValidateLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
+        internal static void ValidatePackageReferences(ConfigurationManifest manifest, JsonElement declaration, string path)
         {
-            string sha256 = ReadPackageSha256(source);
+            declaration.TryGetProperty("source", out JsonElement source);
+            var (packageDigest, sourceDigest) = ReadPackagePins(declaration, source, path);
+            if (source.ValueKind == JsonValueKind.Object && source.TryGetProperty("file", out _))
+                ValidateLocalSource(manifest, source, path, packageDigest, sourceDigest);
+        }
+
+        private static void ValidateLocalSource(ConfigurationManifest manifest, JsonElement source, string path, string packageDigest, string sourceDigest)
+        {
+            string sha256 = packageDigest ?? sourceDigest;
             byte[] hash = null;
             try
             {
-                using FileStream input = OpenLocalSource(manifest, source, path);
+                using FileStream input = OpenLocalSource(manifest, source, path + "/source");
                 if (sha256 is not null)
                 {
                     hash = SHA256.HashData(input);
@@ -185,20 +190,26 @@ namespace DnsServerCore.Configuration
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
             {
-                throw new InvalidDataException($"{path}: Expected a readable, nonempty ZIP package.");
+                throw new InvalidDataException($"{path}/source: Expected a readable, nonempty ZIP package.");
             }
 
             if (hash is not null)
-                CheckPackageHash(sha256, hash, path);
+                CheckPackageHash(sha256, hash, path + (packageDigest is null ? "/source/sha256" : "/packageSha256"));
         }
 
-        private static string ReadPackageSha256(JsonElement source) =>
-            source.TryGetProperty("sha256", out JsonElement hash) ? hash.GetString() : null;
+        private static (string Package, string Source) ReadPackagePins(JsonElement declaration, JsonElement source, string path)
+        {
+            string packageDigest = declaration.TryGetProperty("packageSha256", out JsonElement digest) ? digest.GetString() : null;
+            string sourceDigest = source.ValueKind == JsonValueKind.Object && source.TryGetProperty("sha256", out JsonElement hash) ? hash.GetString() : null;
+            if (sourceDigest is not null && packageDigest is not null && !sourceDigest.Equals(packageDigest, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"{path}/source/sha256: The source digest differs from packageSha256.");
+            return (packageDigest, sourceDigest);
+        }
 
-        private static void CheckPackageHash(string expected, byte[] actual, string sourcePath)
+        private static void CheckPackageHash(string expected, byte[] actual, string path)
         {
             if (!Convert.ToHexString(actual).Equals(expected, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException($"{sourcePath}/sha256: The package does not match the declared SHA-256 digest.");
+                throw new InvalidDataException($"{path}: The package does not match the declared SHA-256 digest.");
         }
 
         private static FileStream OpenLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
@@ -340,7 +351,7 @@ namespace DnsServerCore.Configuration
                         throw new InvalidDataException($"{entry.SettingPath}/source: Could not download the app package.");
                     }
                     if (entry.PackageSha256 is not null)
-                        CheckPackageHash(entry.PackageSha256, SHA256.HashData(downloaded), entry.SettingPath + "/source");
+                        CheckPackageHash(entry.PackageSha256, SHA256.HashData(downloaded), entry.SettingPath + "/source/sha256");
                     packages.Add(entry.Name, downloaded);
                 }
 
