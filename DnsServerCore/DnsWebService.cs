@@ -914,6 +914,13 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
+                if (isConfigTransfer && dnsSettings && _dnsServer.HasManagedRecordTtls &&
+                    backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
+                {
+                    using Stream dnsConfiguration = dnsEntry.Open();
+                    CheckRestoreManifestDnsSettings(dnsConfiguration, isConfigTransfer: true);
+                }
+
                 bool restartWebService = false;
 
                 try
@@ -2958,6 +2965,9 @@ namespace DnsServerCore
 
                 //init cluster manager and load config file
                 _clusterManager = new ClusterManager(this);
+                if (startupManifest is not null)
+                    ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
+
 
                 //cert may have changed so update cluster certs when loading
                 if (_clusterManager.ClusterInitialized)

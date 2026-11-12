@@ -191,18 +191,21 @@ namespace DnsServerCore
             return DnsServer.NormalizeLocalEndPoints(endpoints);
         }
 
-        private void CheckRestoreManifestLocalEndPoints(Stream stream)
+        private void CheckRestoreManifestDnsSettings(Stream stream, bool isConfigTransfer = false)
         {
             var reader = new BinaryReader(stream);
             string format = Encoding.ASCII.GetString(stream.ReadExactly(2));
             if (format == "DC")
             {
-                _dnsServer.CheckRestoreManifestLocalEndPoints(reader);
+                _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
                 return;
             }
 
             if (format == "DS")
             {
+                if (_dnsServer.HasManagedRecordTtls)
+                    throw new InvalidDataException("/dns/authoritative: Cannot verify record TTL defaults in this combined backup format.");
+
                 int version = reader.ReadByte();
                 if (version is >= 28 and <= 42)
                 {

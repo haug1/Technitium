@@ -180,6 +180,46 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task AuthoritativeTtlDefaultsPersistAndRejectConflictingWrites()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"authoritative":{"defaultRecordTtl":600,"defaultNsRecordTtl":7200,"defaultSoaRecordTtl":null}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal(600u, current.GetProperty("defaultRecordTtl").GetUInt32());
+            Assert.Equal(7200u, current.GetProperty("defaultNsRecordTtl").GetUInt32());
+            Assert.Equal(900u, current.GetProperty("defaultSoaRecordTtl").GetUInt32());
+            Assert.Equal(3, current.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement rejected = await server.CallAsync("settings/set?defaultRecordTtl=601&maxLogFileDays=180", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/authoritative/defaultRecordTtl", rejected.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restore = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restore.GetProperty("status").GetString());
+            Assert.Contains("/dns/authoritative/defaultRecordTtl", restore.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=10m&maxLogFileDays=180", server.AdminToken));
+            Assert.Equal(180, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

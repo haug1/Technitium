@@ -123,7 +123,21 @@ namespace DnsServerCore.Dns
         readonly string _configFolder;
         readonly string _dohwwwFolder;
         IReadOnlyList<IPEndPoint> _localEndPoints;
-        bool _manifestOwnsLocalEndPoints;
+        ManagedDnsSettings _managedDnsSettings;
+
+        [Flags]
+        private enum ManagedDnsSettings : byte
+        {
+            LocalEndPoints = 1,
+            RecordTtl = 2,
+            NsTtl = 4,
+            SoaTtl = 8
+        }
+
+        internal readonly record struct RecordTtls(uint? Record, uint? Ns, uint? Soa)
+        {
+            internal bool HasValues => Record.HasValue || Ns.HasValue || Soa.HasValue;
+        }
         readonly LogManager _log;
 
         MailAddress _defaultResponsiblePerson;
@@ -672,19 +686,72 @@ namespace DnsServerCore.Dns
             return endpoints;
         }
 
-        internal bool ManifestOwnsLocalEndPoints => _manifestOwnsLocalEndPoints;
+        internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
+        internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
+        internal bool HasManagedRecordTtls => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
+
+        internal IEnumerable<string> GetManagedDnsPaths()
+        {
+            if (ManifestOwnsLocalEndPoints)
+                yield return "/dns/localEndpoints";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl))
+                yield return "/dns/authoritative/defaultRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl))
+                yield return "/dns/authoritative/defaultNsRecordTtl";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SoaTtl))
+                yield return "/dns/authoritative/defaultSoaRecordTtl";
+        }
+
+        internal void CheckManifestRecordTtls(RecordTtls ttls)
+        {
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl) && ttls.Record.HasValue && ttls.Record != _authZoneManager.DefaultRecordTtl)
+                throw new DnsWebServiceException("/dns/authoritative/defaultRecordTtl: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl) && ttls.Ns.HasValue && ttls.Ns != _authZoneManager.DefaultNsRecordTtl)
+                throw new DnsWebServiceException("/dns/authoritative/defaultNsRecordTtl: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.SoaTtl) && ttls.Soa.HasValue && ttls.Soa != _authZoneManager.DefaultSoaRecordTtl)
+                throw new DnsWebServiceException("/dns/authoritative/defaultSoaRecordTtl: Setting is managed by the configuration manifest.");
+        }
+
+        private static RecordTtls ReadRecordTtls(BinaryReader reader, int version)
+        {
+            return new RecordTtls(reader.ReadUInt32(), version >= 2 ? reader.ReadUInt32() : 14400u,
+                version >= 2 ? reader.ReadUInt32() : 900u);
+        }
+
+        private RecordTtls GetRecordTtls()
+        {
+            return new RecordTtls(_authZoneManager.DefaultRecordTtl, _authZoneManager.DefaultNsRecordTtl, _authZoneManager.DefaultSoaRecordTtl);
+        }
+
+        internal void SetRecordTtls(RecordTtls ttls)
+        {
+            if (ttls.Record.HasValue && ttls.Record != _authZoneManager.DefaultRecordTtl)
+                _authZoneManager.DefaultRecordTtl = ttls.Record.Value;
+            if (ttls.Ns.HasValue && ttls.Ns != _authZoneManager.DefaultNsRecordTtl)
+                _authZoneManager.DefaultNsRecordTtl = ttls.Ns.Value;
+            if (ttls.Soa.HasValue && ttls.Soa != _authZoneManager.DefaultSoaRecordTtl)
+                _authZoneManager.DefaultSoaRecordTtl = ttls.Soa.Value;
+        }
 
         internal void CheckManifestLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints)
         {
-            if (_manifestOwnsLocalEndPoints && !HaveSameLocalEndPoints(_localEndPoints, endpoints))
+            if (ManifestOwnsLocalEndPoints && !HaveSameLocalEndPoints(_localEndPoints, endpoints))
                 throw new DnsWebServiceException("/dns/localEndpoints: Setting is managed by the configuration manifest.");
         }
 
-        internal void CheckRestoreManifestLocalEndPoints(BinaryReader reader)
+        internal void CheckRestoreManifestDnsSettings(BinaryReader reader, bool isConfigTransfer)
         {
-            ReadConfigVersion(reader);
+            int version = ReadConfigVersion(reader);
             reader.BaseStream.ReadShortString(); // server domain
-            CheckManifestLocalEndPoints(ReadLocalEndPoints(reader));
+            IReadOnlyList<IPEndPoint> endpoints = ReadLocalEndPoints(reader);
+            if (!isConfigTransfer)
+                CheckManifestLocalEndPoints(endpoints);
+            if (HasManagedRecordTtls)
+            {
+                AuthZoneInfo.ReadNetworkAddressesFrom(reader);
+                AuthZoneInfo.ReadNetworkAddressesFrom(reader);
+                CheckManifestRecordTtls(ReadRecordTtls(reader, version));
+            }
         }
 
         private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false)
@@ -711,7 +778,7 @@ namespace DnsServerCore.Dns
             }
 
             IReadOnlyList<IPEndPoint> localEndPoints = ReadLocalEndPoints(bR);
-            if (!isConfigTransfer && (readOwnership || !_manifestOwnsLocalEndPoints))
+            if (!isConfigTransfer && (readOwnership || !ManifestOwnsLocalEndPoints))
                 _localEndPoints = localEndPoints;
 
             NetworkAddress[] ipv4SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
@@ -722,18 +789,7 @@ namespace DnsServerCore.Dns
             if (!isConfigTransfer)
                 DnsClientConnection.IPv6SourceAddresses = ipv6SourceAddresses;
 
-            _authZoneManager.DefaultRecordTtl = bR.ReadUInt32();
-
-            if (version >= 2)
-            {
-                _authZoneManager.DefaultNsRecordTtl = bR.ReadUInt32();
-                _authZoneManager.DefaultSoaRecordTtl = bR.ReadUInt32();
-            }
-            else
-            {
-                _authZoneManager.DefaultNsRecordTtl = 14400;
-                _authZoneManager.DefaultSoaRecordTtl = 900;
-            }
+            SetRecordTtls(ReadRecordTtls(bR, version));
 
             string rp = bR.ReadString();
             if (rp.Length == 0)
@@ -1240,7 +1296,10 @@ namespace DnsServerCore.Dns
                 _statsManager.MaxStatFileDays = maxStatFileDays;
 
             if (readOwnership)
-                _manifestOwnsLocalEndPoints = (version == 7) && (s.ReadByte() == 1);
+                {
+                int ownership = version == 7 ? s.ReadByte() : -1;
+                _managedDnsSettings = ownership is >= 0 and <= 15 ? (ManagedDnsSettings)ownership : 0;
+            }
         }
 
         private void WriteConfigTo(Stream s)
@@ -1533,8 +1592,8 @@ namespace DnsServerCore.Dns
             bW.Write(_statsManager.EnableInMemoryStats);
             bW.Write(_statsManager.MaxStatFileDays);
             // Existing version 7 readers stop after maxStatFileDays.
-            if (_manifestOwnsLocalEndPoints)
-                bW.Write((byte)1);
+            if (_managedDnsSettings != 0)
+                bW.Write((byte)_managedDnsSettings);
         }
 
         #endregion
@@ -7000,7 +7059,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestLocalEndPointsAsync(IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, RecordTtls ttls, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7016,15 +7075,27 @@ namespace DnsServerCore.Dns
 
                 lock (_saveLock)
                 {
-                    bool previouslyOwned = _manifestOwnsLocalEndPoints;
-                    if (!changed && (owned == previouslyOwned))
+                    ManagedDnsSettings previousOwnership = _managedDnsSettings;
+                    ManagedDnsSettings ownership = owned ? ManagedDnsSettings.LocalEndPoints : 0;
+                    if (ttls.Record.HasValue)
+                        ownership |= ManagedDnsSettings.RecordTtl;
+                    if (ttls.Ns.HasValue)
+                        ownership |= ManagedDnsSettings.NsTtl;
+                    if (ttls.Soa.HasValue)
+                        ownership |= ManagedDnsSettings.SoaTtl;
+
+                    RecordTtls previousTtls = GetRecordTtls();
+                    var effectiveTtls = new RecordTtls(ttls.Record ?? previousTtls.Record,
+                        ttls.Ns ?? previousTtls.Ns, ttls.Soa ?? previousTtls.Soa);
+                    if (!changed && (ownership == previousOwnership) && (effectiveTtls == previousTtls))
                     {
                         persist(null);
                         return;
                     }
 
                     _localEndPoints = changed ? endpoints : previous;
-                    _manifestOwnsLocalEndPoints = owned;
+                    _managedDnsSettings = ownership;
+                    SetRecordTtls(effectiveTtls);
                     try
                     {
                         persist(SaveConfigFileInternal);
@@ -7033,7 +7104,8 @@ namespace DnsServerCore.Dns
                     catch
                     {
                         _localEndPoints = previous;
-                        _manifestOwnsLocalEndPoints = previouslyOwned;
+                        _managedDnsSettings = previousOwnership;
+                        SetRecordTtls(previousTtls);
                         throw;
                     }
                 }

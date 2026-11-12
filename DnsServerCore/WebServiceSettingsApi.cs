@@ -464,8 +464,8 @@ namespace DnsServerCore
                 jsonWriter.WriteString("logFolder", _dnsWebService._log.LogFolder);
                 jsonWriter.WriteNumber("maxLogFileDays", _dnsWebService._log.MaxLogFileDays);
                 jsonWriter.WriteStartArray("managedSettings");
-                if (_dnsWebService._dnsServer.ManifestOwnsLocalEndPoints)
-                    jsonWriter.WriteStringValue("/dns/localEndpoints");
+                foreach (string path in _dnsWebService._dnsServer.GetManagedDnsPaths())
+                    jsonWriter.WriteStringValue(path);
                 foreach (string path in _dnsWebService._log.GetManagedManifestPaths())
                     jsonWriter.WriteStringValue(path);
                 jsonWriter.WriteEndArray();
@@ -546,6 +546,7 @@ namespace DnsServerCore
                     if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                         throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
 
+                    ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
                     await ConfigurationPlan.ApplyAsync(manifest, _dnsWebService._log, _dnsWebService._dnsServer, manifest.GetDnsLocalEndPoints());
                 }
                 catch (InvalidDataException ex)
@@ -644,6 +645,12 @@ namespace DnsServerCore
                     _dnsWebService._dnsServer.CheckManifestLocalEndPoints(requestedDnsEndpoints);
                 }
 
+                var recordTtls = new DnsServer.RecordTtls(
+                    request.TryGetQueryOrForm("defaultRecordTtl", ZoneFile.ParseTtl, out uint defaultRecordTtl) ? defaultRecordTtl : null,
+                    request.TryGetQueryOrForm("defaultNsRecordTtl", ZoneFile.ParseTtl, out uint defaultNsRecordTtl) ? defaultNsRecordTtl : null,
+                    request.TryGetQueryOrForm("defaultSoaRecordTtl", ZoneFile.ParseTtl, out uint defaultSoaRecordTtl) ? defaultSoaRecordTtl : null);
+                _dnsWebService._dnsServer.CheckManifestRecordTtls(recordTtls);
+
                 try
                 {
                     try
@@ -681,26 +688,13 @@ namespace DnsServerCore
                         if (request.TryQueryOrFormArray("dnsServerIPv6SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] dnsServerIPv6SourceAddresses))
                             DnsClientConnection.IPv6SourceAddresses = dnsServerIPv6SourceAddresses;
 
-                        if (request.TryGetQueryOrForm("defaultRecordTtl", ZoneFile.ParseTtl, out uint defaultRecordTtl))
-                        {
-                            _dnsWebService._dnsServer.AuthZoneManager.DefaultRecordTtl = defaultRecordTtl;
-
+                        _dnsWebService._dnsServer.SetRecordTtls(recordTtls);
+                        if (recordTtls.Record.HasValue)
                             clusterParameters.Add("defaultRecordTtl", defaultRecordTtl.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("defaultNsRecordTtl", ZoneFile.ParseTtl, out uint defaultNsRecordTtl))
-                        {
-                            _dnsWebService._dnsServer.AuthZoneManager.DefaultNsRecordTtl = defaultNsRecordTtl;
-
+                        if (recordTtls.Ns.HasValue)
                             clusterParameters.Add("defaultNsRecordTtl", defaultNsRecordTtl.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("defaultSoaRecordTtl", ZoneFile.ParseTtl, out uint defaultSoaRecordTtl))
-                        {
-                            _dnsWebService._dnsServer.AuthZoneManager.DefaultSoaRecordTtl = defaultSoaRecordTtl;
-
+                        if (recordTtls.Soa.HasValue)
                             clusterParameters.Add("defaultSoaRecordTtl", defaultSoaRecordTtl.ToString());
-                        }
 
                         string defaultResponsiblePerson = request.QueryOrForm("defaultResponsiblePerson");
                         if (defaultResponsiblePerson is not null)
@@ -2040,7 +2034,7 @@ namespace DnsServerCore
                             fS.Position = 0;
 
                             bool checkLog = logSettings && _dnsWebService._log.HasManagedLoggingSettings;
-                            bool checkDns = dnsSettings && _dnsWebService._dnsServer.ManifestOwnsLocalEndPoints;
+                            bool checkDns = dnsSettings && _dnsWebService._dnsServer.HasManagedDnsSettings;
                             if (checkLog || checkDns)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
@@ -2053,7 +2047,7 @@ namespace DnsServerCore
                                     if (checkDns && archive.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                                     {
                                         using Stream dnsConfiguration = dnsEntry.Open();
-                                        _dnsWebService.CheckRestoreManifestLocalEndPoints(dnsConfiguration);
+                                        _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
                                     }
                                 }
 

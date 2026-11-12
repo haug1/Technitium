@@ -62,15 +62,15 @@ Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config export http
 
 To reproduce the exported settings, validate the file, preview it against the destination, then apply using the destination revision. Check the declared DNS listener addresses and log directory against the destination host before applying.
 
-## Applying DNS listener and logging settings
+## Applying DNS and logging settings
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config apply path/to/technitium.json https://dns.example.test <revision>` with the revision printed by `config plan` and a token with Settings modify permission. Generate a new preview if the revision becomes stale.
 
-This implementation applies `dns.localEndpoints`, `logging.destination`, `logging.folder`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Other declarations are rejected before mutation. The server persists the values and their ownership in `dns.config` and `log.config`. A failed DNS bind restores the previous listeners and rejects the apply. Applying a manifest that omits a previously managed field releases ownership and keeps the current value. The Settings screen displays managed manifest paths for the selected server. The settings API returns the same paths in `managedSettings`. Settings edits and backup restores that would change an owned value are rejected before other settings in the request are changed. If a backup uses a combined configuration format whose listener values cannot be verified (versions 6–27), release DNS listener ownership before restoring it.
+This implementation applies `dns.localEndpoints`, the three `dns.authoritative` record TTL defaults, `logging.destination`, `logging.folder`, `logging.noStackTrace`, `logging.retentionDays`, and `logging.useLocalTime` together. Record TTL defaults can be applied on standalone servers. Other declarations are rejected before mutation. The server persists the values and their ownership in `dns.config` and `log.config`. A failed DNS bind restores the previous listeners and rejects the apply. Applying a manifest that omits a previously managed field releases ownership and keeps the current value. The Settings screen displays managed manifest paths for the selected server. The settings API returns the same paths in `managedSettings`. Settings edits and backup restores that would change an owned value are rejected before other settings in the request are changed. If a backup uses a combined configuration format whose listener values cannot be verified (versions 6–27), release DNS listener ownership before restoring it. Combined backups also require releasing ownership of record TTL defaults.
 
 ### Startup
 
-Place `technitium.json` in the server's configuration directory to reconcile the supported DNS listener and logging settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. The server binds the declared DNS listeners before committing values and ownership.
+Place `technitium.json` in the server's configuration directory to reconcile the supported DNS and logging settings at startup. The console host and Windows service both use this path. Startup rejects invalid manifests and unsupported sections before opening listeners. The server binds the declared DNS listeners before committing values and ownership.
 
 The startup file takes effect again at the next restart. Update that file when changing the desired startup settings. With no startup file, the server continues with persisted values and ownership. To release all managed settings, apply or start with a manifest containing only `schemaVersion`.
 

@@ -34,9 +34,9 @@ namespace DnsServerCore.Configuration
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
             [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }, canApply: true),
-            ["/dns/authoritative/defaultRecordTtl"] = Field("defaultRecordTtl", 3600),
-            ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400),
-            ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900),
+            ["/dns/authoritative/defaultRecordTtl"] = Field("defaultRecordTtl", 3600, canApply: true),
+            ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400, canApply: true),
+            ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900, canApply: true),
             ["/dns/authoritative/defaultResponsiblePerson"] = new("defaultResponsiblePerson",
                 JsonSerializer.SerializeToElement<string>(null), false, NormalizeResponsiblePerson),
             ["/dns/authoritative/minSoaRefresh"] = Field("minSoaRefresh", 300),
@@ -120,13 +120,37 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestLocalEndPointsAsync(endpoints, alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetRecordTtls(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
                 writeDnsConfig));
+        }
+
+        private static DnsServer.RecordTtls GetRecordTtls(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) ||
+                !dns.TryGetProperty("authoritative", out JsonElement authoritative))
+                return default;
+
+            return new DnsServer.RecordTtls(ReadTtl("defaultRecordTtl"), ReadTtl("defaultNsRecordTtl"), ReadTtl("defaultSoaRecordTtl"));
+
+            uint? ReadTtl(string name)
+            {
+                if (!authoritative.TryGetProperty(name, out JsonElement ttl))
+                    return null;
+                if (ttl.ValueKind == JsonValueKind.Null)
+                    ttl = _settings["/dns/authoritative/" + name].Default;
+                return decimal.ToUInt32(ttl.GetDecimal());
+            }
+        }
+
+        internal static void CheckClusterApplySupport(ConfigurationManifest manifest, bool clusterInitialized)
+        {
+            if (clusterInitialized && GetRecordTtls(manifest).HasValues)
+                throw new InvalidDataException("/dns/authoritative: Applying record TTL defaults to a cluster is not implemented.");
         }
 
         internal static void CheckApplySupport(ConfigurationManifest manifest)
