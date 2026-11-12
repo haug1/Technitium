@@ -2806,7 +2806,7 @@ namespace DnsServerCore.Tests
             await using var server = await LoopbackWebService.StartAsync();
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.60&subnetMask=255.255.255.0" +
-                "&leaseTimeDays=3&exclusions=192.0.2.45%7C192.0.2.47&genericOptions=224%7CAA%3ABB", server.AdminToken));
+                "&leaseTimeDays=3&exclusions=192.0.2.45%7C192.0.2.47&genericOptions=224%7CAA%3ABB&ignoreClientIdentifierOption=false", server.AdminToken));
             LoopbackWebService.AssertOk(await server.CallAsync(
                 "dhcp/scopes/addReservedLease?name=Lab&hardwareAddress=02-00-00-00-00-0A&ipAddress=192.0.2.30&hostName=reserved", server.AdminToken));
             await server.RestartAsync(null, () =>
@@ -2849,6 +2849,19 @@ namespace DnsServerCore.Tests
             Assert.Equal(export.GetProperty("dhcp").GetRawText(),
                 destinationExport.GetProperty("response").GetProperty("manifest").GetProperty("dhcp").GetRawText());
 
+            using (FileStream persisted = File.OpenRead(Path.Combine(destination.ConfigurationDirectory, "scopes", "Lab.scope")))
+            using (var migratedScope = new Scope(persisted, null, null, resolveLocalDns: false))
+            {
+                DhcpMessage request = ClientRequest([0xAA, 0xBB]);
+                Lease reserved = migratedScope.GetReservedLease(request);
+                Assert.Equal(IPAddress.Parse("192.0.2.31"), reserved.Address);
+                Assert.True(migratedScope.HasReservedLeaseHostName(reserved));
+                Assert.Equal(IPAddress.Parse("192.0.2.30"), migratedScope.GetReservedLease(ClientRequest([0xCC])).Address);
+
+                migratedScope.IgnoreClientIdentifierOption = true;
+                Assert.Equal(IPAddress.Parse("192.0.2.30"), migratedScope.GetReservedLease(request).Address);
+            }
+
             JsonElement legacyEdit = await destination.CallAsync(
                 "dhcp/scopes/set?name=Lab&reservedLeases=reserved%7C02-00-00-00-00-0A%7C192.0.2.30%7C", destination.AdminToken);
             Assert.Equal("error", legacyEdit.GetProperty("status").GetString());
@@ -2873,6 +2886,11 @@ namespace DnsServerCore.Tests
             JsonElement removal = await PreviewAsync(server, reset);
             Assert.Contains(removal.GetProperty("changes").EnumerateArray(), change =>
                 change.GetProperty("path").GetString() == "/dhcp/scopes/Lab" && change.GetProperty("kind").GetString() == "Remove");
+
+            static DhcpMessage ClientRequest(byte[] identifier) =>
+                new(DhcpMessageOpCode.BootRequest, DhcpMessageHardwareAddressType.Ethernet, new byte[4], new byte[2],
+                    DhcpMessageFlags.None, IPAddress.Any, IPAddress.Any, IPAddress.Any, IPAddress.Any,
+                    Convert.FromHexString("02000000000A"), null, null, [new ClientIdentifierOption(0, identifier)]);
         }
 
         [Fact]

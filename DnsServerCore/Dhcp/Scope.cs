@@ -921,36 +921,32 @@ namespace DnsServerCore.Dhcp
 
         internal Lease GetReservedLease(DhcpMessage request)
         {
-            return GetReservedLease(new ClientIdentifierOption((byte)request.HardwareAddressType, request.ClientHardwareAddress), request.GetClientIdentifier(_ignoreClientIdentifierOption));
-        }
-
-        private Lease GetReservedLease(ClientIdentifierOption reservedLeasesClientIdentifier, ClientIdentifierOption clientIdentifier)
-        {
-            if (_reservedLeases.TryGetValue(reservedLeasesClientIdentifier, out Lease reservedLease))
+            ClientIdentifierOption hardwareIdentifier = request.GetClientIdentifier(true);
+            ClientIdentifierOption clientIdentifier = request.GetClientIdentifier(_ignoreClientIdentifierOption);
+            Lease reservedLease = FindReservedLease(clientIdentifier, hardwareIdentifier);
+            if (reservedLease is not null && IsAddressAlreadyAllocated(reservedLease.Address, clientIdentifier))
             {
-                //reserved address exists
-                if (IsAddressAlreadyAllocated(reservedLease.Address, clientIdentifier))
-                {
-                    //reserved lease address is already allocated so ignore reserved lease
-                    _log.Write("DHCP Server cannot allocate reserved lease [" + reservedLease.Address.ToString() + "] to " + BitConverter.ToString(reservedLeasesClientIdentifier.Identifier) + " for scope '" + _name + "': The IP address is already allocated.");
-
-                    return null;
-                }
-
-                return reservedLease;
+                _log.Write("DHCP Server cannot allocate reserved lease [" + reservedLease.Address.ToString() + "] to " + BitConverter.ToString(hardwareIdentifier.Identifier) + " for scope '" + _name + "': The IP address is already allocated.");
+                return null;
             }
 
-            return null;
+            return reservedLease;
         }
 
         internal bool HasReservedLeaseHostName(Lease lease)
         {
-            ClientIdentifierOption reservedLeasesClientIdentifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress);
+            var hardwareIdentifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress);
+            Lease reservation = FindReservedLease(_ignoreClientIdentifierOption ? hardwareIdentifier : lease.ClientIdentifier, hardwareIdentifier);
+            return reservation is not null && reservation.Address.Equals(lease.Address) && !string.IsNullOrWhiteSpace(reservation.HostName);
+        }
 
-            if (_reservedLeases.TryGetValue(reservedLeasesClientIdentifier, out Lease reservedLease) && reservedLease.Address.Equals(lease.Address))
-                return !string.IsNullOrWhiteSpace(reservedLease.HostName);
-
-            return false;
+        private Lease FindReservedLease(ClientIdentifierOption clientIdentifier, ClientIdentifierOption hardwareIdentifier)
+        {
+            if (_reservedLeases.TryGetValue(clientIdentifier, out Lease reservation))
+                return reservation;
+            if (!clientIdentifier.Equals(hardwareIdentifier))
+                _reservedLeases.TryGetValue(hardwareIdentifier, out reservation);
+            return reservation;
         }
 
         internal async Task<Lease> GetOfferAsync(DhcpMessage request)
