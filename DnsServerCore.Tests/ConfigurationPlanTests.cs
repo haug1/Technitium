@@ -926,7 +926,7 @@ namespace DnsServerCore.Tests
                     if (state != "pending")
                         return state;
                 }
-                catch (HttpRequestException)
+                catch (Exception ex) when (ex is HttpRequestException or SocketException)
                 {
                     // The old and new listeners can both be unavailable briefly during restart.
                 }

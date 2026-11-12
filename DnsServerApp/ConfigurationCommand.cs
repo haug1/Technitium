@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -65,7 +66,7 @@ namespace DnsServerApp
                 Console.Error.WriteLine(ex.Message);
                 return 1;
             }
-            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException)
+            catch (Exception ex) when (ex is HttpRequestException or SocketException or OperationCanceledException or JsonException)
             {
                 Console.Error.WriteLine("Could not read current settings from the server.");
                 return 1;
@@ -179,7 +180,7 @@ namespace DnsServerApp
                             if (result.GetProperty("state").GetString() != "pending")
                                 return PrintApplyStatus(result);
                         }
-                        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException or InvalidDataException)
+                        catch (Exception ex) when (ex is HttpRequestException or SocketException or OperationCanceledException or JsonException or InvalidDataException)
                         {
                             // The server may be switching listeners, or this origin may no longer serve the operation.
                         }
