@@ -1,7 +1,9 @@
+using System;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -194,7 +196,17 @@ namespace DnsServerCore.Tests
             await File.WriteAllBytesAsync(Path.Combine(server.ConfigurationDirectory, "filter-package.zip"), package.ToArray());
             JsonNode install = JsonNode.Parse(BuildManifest(version,
                 """{"enableFilterAaaa":true,"defaultTtl":30,"filterDomains":[]}"""))!;
-            install["apps"]!["packages"]!["FilterAaaa"]!["source"] = new JsonObject { ["file"] = "filter-package.zip" };
+            install["apps"]!["packages"]!["FilterAaaa"]!["source"] = new JsonObject
+            {
+                ["file"] = "filter-package.zip",
+                ["sha256"] = Convert.ToHexString(SHA256.HashData(package.ToArray())).ToLowerInvariant()
+            };
+            JsonNode wrongHash = install.DeepClone();
+            wrongHash["apps"]!["packages"]!["FilterAaaa"]!["source"]!["sha256"] = new string('0', 64);
+            await File.WriteAllTextAsync(startupPath, wrongHash.ToJsonString());
+            InvalidDataException digestMismatch = await Assert.ThrowsAsync<InvalidDataException>(() => server.RestartAsync());
+            Assert.Contains("/apps/packages/FilterAaaa/source/sha256", digestMismatch.Message);
+            Assert.False(Directory.Exists(appFolder));
             JsonNode wrongVersion = install.DeepClone();
             wrongVersion["apps"]!["packages"]!["FilterAaaa"]!["version"] = "999.0";
             await File.WriteAllTextAsync(startupPath, wrongVersion.ToJsonString());

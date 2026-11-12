@@ -1171,13 +1171,19 @@
                 {
                   "type": "object",
                   "additionalProperties": false,
-                  "properties": {"file": {"type": "string", "minLength": 1}},
+                  "properties": {
+                    "file": {"type": "string", "minLength": 1},
+                    "sha256": {"type": "string", "pattern": "^[0-9A-Fa-f]{64}$"}
+                  },
                   "required": ["file"]
                 },
                 {
                   "type": "object",
                   "additionalProperties": false,
-                  "properties": {"url": {"type": "string", "pattern": "^https://"}},
+                  "properties": {
+                    "url": {"type": "string", "pattern": "^https://"},
+                    "sha256": {"type": "string", "pattern": "^[0-9A-Fa-f]{64}$"}
+                  },
                   "required": ["url"]
                 }
               ]

@@ -43,7 +43,7 @@ namespace DnsServerCore.Configuration
             return paths.ToArray();
         }
 
-        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false, string InstallName = null, byte[] Package = null, string Version = null, bool HasConfig = false, Uri RemoteSource = null)
+        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false, string InstallName = null, byte[] Package = null, string Version = null, bool HasConfig = false, Uri RemoteSource = null, string PackageSha256 = null)
         {
             internal string Name => InstallName ?? Application.Name;
             internal string SettingPath => AppPath(Name) + (Remove || InstallName is not null ? "" : "/configuration");
@@ -121,8 +121,13 @@ namespace DnsServerCore.Configuration
                         }
                     }
 
+                    string sha256 = ReadPackageSha256(source);
+                    if (package is not null && sha256 is not null)
+                        CheckPackageHash(sha256, SHA256.HashData(package), path + "/source");
+
                     entries.Add(new Entry(app, before, ReadConfig(item.Value, before, path), InstallName: item.Name,
-                        Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _), RemoteSource: remoteSource));
+                        Package: package, Version: pin, HasConfig: item.Value.TryGetProperty("configuration", out _), RemoteSource: remoteSource,
+                        PackageSha256: sha256));
                     continue;
                 }
                 string after = ReadConfig(item.Value, before, path);
@@ -151,9 +156,16 @@ namespace DnsServerCore.Configuration
 
         internal static void ValidateLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
         {
+            string sha256 = ReadPackageSha256(source);
+            byte[] hash = null;
             try
             {
                 using FileStream input = OpenLocalSource(manifest, source, path);
+                if (sha256 is not null)
+                {
+                    hash = SHA256.HashData(input);
+                    input.Position = 0;
+                }
                 using var archive = new ZipArchive(input, ZipArchiveMode.Read);
                 if (archive.Entries.Count == 0)
                     throw new InvalidDataException();
@@ -162,6 +174,18 @@ namespace DnsServerCore.Configuration
             {
                 throw new InvalidDataException($"{path}: Expected a readable, nonempty ZIP package.");
             }
+
+            if (hash is not null)
+                CheckPackageHash(sha256, hash, path);
+        }
+
+        private static string ReadPackageSha256(JsonElement source) =>
+            source.TryGetProperty("sha256", out JsonElement hash) ? hash.GetString() : null;
+
+        private static void CheckPackageHash(string expected, byte[] actual, string sourcePath)
+        {
+            if (!Convert.ToHexString(actual).Equals(expected, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"{sourcePath}/sha256: The package does not match the declared SHA-256 digest.");
         }
 
         private static FileStream OpenLocalSource(ConfigurationManifest manifest, JsonElement source, string path)
@@ -276,14 +300,18 @@ namespace DnsServerCore.Configuration
                         packages.Add(entry.Name, entry.Package);
                         continue;
                     }
+                    byte[] downloaded;
                     try
                     {
-                        packages.Add(entry.Name, await manager.DownloadManifestPackageAsync(entry.RemoteSource));
+                        downloaded = await manager.DownloadManifestPackageAsync(entry.RemoteSource);
                     }
                     catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or OperationCanceledException)
                     {
                         throw new InvalidDataException($"{entry.SettingPath}/source: Could not download the app package.");
                     }
+                    if (entry.PackageSha256 is not null)
+                        CheckPackageHash(entry.PackageSha256, SHA256.HashData(downloaded), entry.SettingPath + "/source");
+                    packages.Add(entry.Name, downloaded);
                 }
 
                 Entry[] changed = entries.Where(entry => entry.InstallName is null && !entry.Remove && entry.Before != entry.After).ToArray();

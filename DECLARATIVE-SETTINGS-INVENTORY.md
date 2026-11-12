@@ -403,6 +403,7 @@ App packages and configuration live under `apps/<name>/`. The app manager applie
 | --- | --- | --- |
 | `apps.packages.<name>` | `name` on app install, update, and uninstall | Named package, no apps by default. Reuse the app manager's folder-name validation and enforce unique names. |
 | `apps.packages.<name>.source` | `url` or uploaded ZIP | Optional package reference for existing installs, required to install a missing package. The download API uses HTTPS. An installed package's ZIP can be reused when available, and the original URL is not reliably persisted. |
+| `apps.packages.<name>.source.sha256` | Package ZIP bytes | Optional 64-digit hexadecimal digest. Verify local or downloaded ZIP bytes before installation or replacement. |
 | `apps.packages.<name>.version` | Installed app version in list response and package assembly | Optional version for existing apps. Verify the version against the installed or supplied package. Reconcile explicit pins with the global automatic update flag. |
 | `apps.packages.<name>.configuration` | `config` in the app config API | Optional native text or file reference. Default comes from the package when present. The manager calls each loaded implementation's initializer and saves `dnsApp.config`; empty clears the file if the app accepts it. Use file or secret references for sensitive app settings. |
 
