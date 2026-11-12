@@ -436,6 +436,13 @@ namespace DnsServerCore.Tests
                 beforeJoin.GetProperty("response").GetProperty("revision").GetString());
             Assert.Equal("error", blockedApply.GetProperty("status").GetString());
             Assert.Contains("has not advertised support", blockedApply.GetProperty("errorMessage").GetString());
+            const string apps = """{"schemaVersion":1,"apps":{"packages":{"RemovedFixture":null}}}""";
+            using (var appsBody = new StringContent(apps, Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejectedApps = await primary.CallAsync("settings/config/plan", primary.AdminToken, appsBody);
+                Assert.Equal("error", rejectedApps.GetProperty("status").GetString());
+                Assert.Contains("has not advertised support for declarative apps", rejectedApps.GetProperty("errorMessage").GetString());
+            }
             JsonElement state = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
             LoopbackWebService.AssertOk(state);
             Assert.Equal(900, state.GetProperty("response").GetProperty("configRefreshIntervalSeconds").GetInt32());
@@ -465,7 +472,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task IncrementalClusterTransferClearsAppConfigurationWithoutUninstallingTheApp()
+        public async Task PrimaryManifestClearsAppConfigurationAndReplicatesOwnership()
         {
             await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
             await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true,
@@ -495,7 +502,7 @@ namespace DnsServerCore.Tests
             ]);
             LoopbackWebService.AssertOk(await secondary.CallAsync("admin/cluster/initJoin", secondary.AdminToken, join));
             string token = await secondary.LoginAsync("admin", primary.AdminPassword);
-            Assert.Equal("fixture configuration", (await ReadSecondaryConfigAsync()).GetString());
+            Assert.Equal("fixture configuration", (await ReadSecondaryAppAsync()).GetProperty("config").GetString());
 
             using var catalog = new FormUrlEncodedContent([
                 new("zone", "cluster-catalog.cluster.test"),
@@ -503,21 +510,53 @@ namespace DnsServerCore.Tests
                 new("primaryNameServerAddresses", $"127.0.0.1:{primary.DnsPort}")
             ]);
             LoopbackWebService.AssertOk(await secondary.CallAsync("zones/options/set", token, catalog));
-            LoopbackWebService.AssertOk(await secondary.CallAsync("zones/resync?zone=cluster-catalog.cluster.test", token));
             Assert.True(await WaitForAsync(async () =>
-                (await secondary.CallAsync("zones/options/get?zone=cluster.test", token)).GetProperty("status").ValueEquals("ok")),
+            {
+                if ((await secondary.CallAsync("zones/options/get?zone=cluster.test", token)).GetProperty("status").ValueEquals("ok"))
+                    return true;
+                LoopbackWebService.AssertOk(await secondary.CallAsync("zones/resync?zone=cluster-catalog.cluster.test", token));
+                return false;
+            }),
                 "The Secondary did not transfer the cluster zone.");
 
-            using var clear = new FormUrlEncodedContent([new("config", "")]);
-            LoopbackWebService.AssertOk(await primary.CallAsync("apps/config/set?name=Fixture", primary.AdminToken, clear));
-            Assert.True(await WaitForAsync(async () => (await ReadSecondaryConfigAsync()).ValueKind == JsonValueKind.Null),
+            const string clear = """{"schemaVersion":1,"apps":{"packages":{"Fixture":{"configuration":null}}}}""";
+            using (var secondaryBody = new StringContent(clear, Encoding.UTF8, "application/json"))
+            {
+                JsonElement denied = await secondary.CallAsync("settings/config/plan", token, secondaryBody);
+                Assert.Equal("error", denied.GetProperty("status").GetString());
+                Assert.Contains("Only the Primary", denied.GetProperty("errorMessage").GetString());
+            }
+            await ApplyPrimaryAsync(clear);
+            Assert.True(await WaitForAsync(async () => (await ReadSecondaryAppAsync()).GetProperty("config").ValueKind == JsonValueKind.Null),
                 "The Secondary did not clear the installed app's configuration.");
+            Assert.Contains((await ReadSecondaryAppAsync()).GetProperty("managedSettings").EnumerateArray(),
+                path => path.ValueEquals("/apps/packages/Fixture/configuration"));
+            using (var edit = new FormUrlEncodedContent([new("config", "local replacement")]))
+            {
+                JsonElement denied = await secondary.CallAsync("apps/config/set?name=Fixture", token, edit);
+                Assert.Equal("error", denied.GetProperty("status").GetString());
+                Assert.Contains("/apps/packages/Fixture/configuration", denied.GetProperty("errorMessage").GetString());
+            }
 
-            async Task<JsonElement> ReadSecondaryConfigAsync()
+            await ApplyPrimaryAsync("""{"schemaVersion":1}""");
+            Assert.True(await WaitForAsync(async () => (await ReadSecondaryAppAsync()).GetProperty("managedSettings").GetArrayLength() == 0),
+                "The Secondary did not release app ownership.");
+
+            async Task ApplyPrimaryAsync(string manifest)
+            {
+                using var planBody = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement plan = await primary.CallAsync("settings/config/plan", primary.AdminToken, planBody);
+                LoopbackWebService.AssertOk(plan);
+                using var body = new StringContent(manifest, Encoding.UTF8, "application/json");
+                LoopbackWebService.AssertOk(await primary.CallAsync("settings/config/apply", primary.AdminToken, body,
+                    plan.GetProperty("response").GetProperty("revision").GetString()));
+            }
+
+            async Task<JsonElement> ReadSecondaryAppAsync()
             {
                 JsonElement result = await secondary.CallAsync("apps/config/get?name=Fixture", token);
                 LoopbackWebService.AssertOk(result);
-                return result.GetProperty("response").GetProperty("config");
+                return result.GetProperty("response");
             }
 
             static async Task<bool> WaitForAsync(Func<Task<bool>> condition)
@@ -527,7 +566,7 @@ namespace DnsServerCore.Tests
                 {
                     if (await condition())
                         return true;
-                    await Task.Delay(200);
+                    await Task.Delay(1000);
                 }
                 while (DateTime.UtcNow < deadline);
                 return false;

@@ -5359,7 +5359,7 @@ Standalone servers support LDAP preview and apply with Administration Delete per
 
 Standalone servers can preview and apply OpenID Connect provider settings under `auth.sso` with Administration Delete permission. Changes that restart the web service return an operation ID for the configuration status endpoint. Exports include the provider settings for callers with Administration View permission and list the client secret as a missing input. SSO responses list managed paths in `managedSettings`. Conflicting legacy edits and auth restores fail before mutation.
 
-Standalone servers support manifest preview and apply for installed DNS app configuration with Apps Modify permission. A version differing from the installed app requires a replacement package source. The server checks the package version before activation. A local startup manifest can install a missing app from a ZIP file under `source.file`. Startup and live apply can download missing packages from HTTPS URLs under `source.url`. Preview validates the URL and apply performs the download. A null package entry removes the named app. A null package collection removes all apps. Both require Apps Delete permission. The app validates its native configuration during apply. App responses list managed paths in `managedSettings`. Conflicting configuration writes, package updates, removals, and backup restores are rejected while managed. Export requires Apps View permission and reports the package source and opaque configuration as missing inputs.
+Standalone servers and cluster Primaries support manifest preview and apply for installed DNS app configuration with Apps Modify permission. Cluster members must advertise `supportsDeclarativeApps` before the Primary can change cluster app ownership or managed packages. A version differing from the installed app requires a replacement package source. The server checks the package version before activation. A local startup manifest can install a missing app from a ZIP file under `source.file`. Startup and live apply can download missing packages from HTTPS URLs under `source.url`. Preview validates the URL and apply performs the download. A null package entry removes the named app. A null package collection removes all apps. Both require Apps Delete permission. The app validates its native configuration during apply. App responses list managed paths in `managedSettings`. Conflicting configuration writes, package updates, removals, and backup restores are rejected while managed. Export requires Apps View permission and reports the package source and opaque configuration as missing inputs.
 
 The initialized cluster Primary supports preview and apply of heartbeat and configuration intervals with Administration Modify permission. The Primary exports current intervals to callers with Administration View permission. Secondaries reject interval declarations.
 
@@ -7472,6 +7472,7 @@ WHERE:
 - `supportsDeclarativeGroups` (optional): Set to true when the Secondary can inherit manifest ownership of authentication groups.
 - `supportsDeclarativeUsers` (optional): Set to true when the Secondary can inherit manifest ownership of user accounts.
 - `supportsDeclarativePermissions` (optional): Set to true when the Secondary can inherit manifest ownership of section-level permission grants.
+- `supportsDeclarativeApps` (optional): Set to true when the Secondary can inherit manifest ownership of DNS app packages and configuration.
 
 RESPONSE:
 ```
@@ -7677,7 +7678,7 @@ The Transfer Config call is used by Secondary nodes to  sync the complete config
 
 The transfer ZIP uses an empty `apps/<name>/.config-absent` entry when an installed app has no configuration file. A Secondary that recognizes this entry clears any stored configuration for the app and keeps the package installed. Older Secondaries ignore this entry.
 
-App entries use the paths `apps/<name>/<name>.zip` for a package and `apps/<name>/dnsApp.config` for its configuration. An empty `apps/<name>/.exists` entry represents an installed app with no file changes in the transfer. The Secondary checks for malformed, duplicate, and contradictory app entries before applying the archive.
+App entries use the paths `apps/<name>/<name>.zip` for a package and `apps/<name>/dnsApp.config` for its configuration. An empty `apps/<name>/.exists` entry represents an installed app with no file changes in the transfer. The Secondary checks for malformed, duplicate, and contradictory app entries before applying the archive. The top-level `app-ownership.config` entry lists managed app paths. A Secondary commits inherited ownership with the app changes.
 
 URL:\
 `http://localhost:5380/api/admin/cluster/primary/transferConfig?includeZones=`

@@ -18,9 +18,11 @@ namespace DnsServerCore.Configuration
         private const string AppActivationPendingName = ".manifest-app-activation-pending";
         private const string AppActivationStagingName = ".manifest-app-activation-staging";
 
+        private static readonly object _persistLock = new();
+
         private static readonly HashSet<string> _configurationFiles = new(StringComparer.Ordinal)
         {
-            "dns.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile, "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config", "auth.config", "allowed.config", "blocked.config", Dns.ZoneManagers.AuthZoneManager.ManifestOwnershipFile, Auth.AuthManager.LdapOwnershipFile, Auth.AuthManager.SsoOwnershipFile, Auth.AuthManager.GroupOwnershipFile, Auth.AuthManager.UserOwnershipFile, Auth.AuthManager.PermissionOwnershipFile, ConfigurationStaticSessions.FileName, ConfigurationApplications.OwnershipFile
+            "dns.config", "cluster.config", ConfigurationClusterOptions.OwnershipFile, "log.config", "self-signed-cert.pfx", "blocklist.config", "webservice.config", "auth.config", "allowed.config", "blocked.config", Dns.ZoneManagers.AuthZoneManager.ManifestOwnershipFile, Auth.AuthManager.LdapOwnershipFile, Auth.AuthManager.SsoOwnershipFile, Auth.AuthManager.GroupOwnershipFile, Auth.AuthManager.UserOwnershipFile, Auth.AuthManager.PermissionOwnershipFile, ConfigurationStaticSessions.FileName, ConfigurationApplications.OwnershipFile, ConfigurationApplications.PrimaryOwnershipFile
         };
 
         internal static void Recover(string configFolder)
@@ -87,19 +89,22 @@ namespace DnsServerCore.Configuration
 
         internal static void Persist(string configFolder, Action write, params string[] fileNames)
         {
-            string pending = Path.Combine(configFolder, PendingName);
-            string staging = Path.Combine(configFolder, StagingName);
-            Begin(configFolder, pending, staging, fileNames);
-            try
+            lock (_persistLock)
             {
-                write();
-                // Rename before cleanup so a partially deleted journal is never replayed.
-                Directory.Move(pending, staging);
-            }
-            catch
-            {
-                Recover(configFolder);
-                throw;
+                string pending = Path.Combine(configFolder, PendingName);
+                string staging = Path.Combine(configFolder, StagingName);
+                Begin(configFolder, pending, staging, fileNames);
+                try
+                {
+                    write();
+                    // Rename before cleanup so a partially deleted journal is never replayed.
+                    Directory.Move(pending, staging);
+                }
+                catch
+                {
+                    Recover(configFolder, pending, staging);
+                    throw;
+                }
             }
         }
 

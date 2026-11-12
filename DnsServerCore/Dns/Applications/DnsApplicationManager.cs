@@ -69,6 +69,7 @@ namespace DnsServerCore.Dns.Applications
 
         private string[] _manifestOwnedPaths = [];
         internal IReadOnlyList<string> ManagedPaths => _manifestOwnedPaths;
+        internal bool OwnershipFromPrimary { get; private set; }
 
         SemaphoreSlim _opsLock = new SemaphoreSlim(1, 1);
 
@@ -81,7 +82,10 @@ namespace DnsServerCore.Dns.Applications
             _dnsServer = dnsServer;
 
             _appsPath = Path.Combine(_dnsServer.ConfigFolder, "apps");
-            string ownershipFile = Path.Combine(dnsServer.ConfigFolder, ConfigurationApplications.OwnershipFile);
+            string ownershipFile = Path.Combine(dnsServer.ConfigFolder, ConfigurationApplications.PrimaryOwnershipFile);
+            OwnershipFromPrimary = File.Exists(ownershipFile);
+            if (!OwnershipFromPrimary)
+                ownershipFile = Path.Combine(dnsServer.ConfigFolder, ConfigurationApplications.OwnershipFile);
             if (File.Exists(ownershipFile))
                 _manifestOwnedPaths = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(ownershipFile))
                     ?? throw new InvalidDataException("Invalid app manifest ownership file.");
@@ -457,15 +461,19 @@ namespace DnsServerCore.Dns.Applications
             await _opsLock.WaitAsync();
             try
             {
+                using (Stream stream = backupZip.CreateEntry(ConfigurationApplications.OwnershipFile).Open())
+                    JsonSerializer.Serialize(stream, _manifestOwnedPaths);
+
                 string[] appDirectories = Directory.GetDirectories(_appsPath);
                 foreach (string appDirectory in appDirectories)
                 {
                     string applicationName = Path.GetFileName(appDirectory);
+                    string path = ConfigurationApplications.AppPath(applicationName);
                     string applicationZipFile = Path.Combine(appDirectory, applicationName + ".zip");
                     string configFile = Path.Combine(appDirectory, DnsApplication.ConfigurationFileName);
                     bool fileAdded = false;
 
-                    if (File.Exists(applicationZipFile) && (File.GetLastWriteTimeUtc(applicationZipFile) > ifModifiedSince))
+                    if (File.Exists(applicationZipFile) && (_manifestOwnedPaths.Contains(path) || File.GetLastWriteTimeUtc(applicationZipFile) > ifModifiedSince))
                     {
                         string entryName = "apps/" + applicationName + "/" + applicationName + ".zip";
                         backupZip.CreateEntryFromFile(applicationZipFile, entryName);
@@ -477,7 +485,7 @@ namespace DnsServerCore.Dns.Applications
                         _ = backupZip.CreateEntry("apps/" + applicationName + "/" + ClusterConfigAbsentEntry);
                         fileAdded = true;
                     }
-                    else if (File.GetLastWriteTimeUtc(configFile) > ifModifiedSince)
+                    else if (_manifestOwnedPaths.Contains(path + "/configuration") || File.GetLastWriteTimeUtc(configFile) > ifModifiedSince)
                     {
                         string entryName = "apps/" + applicationName + "/" + DnsApplication.ConfigurationFileName;
                         backupZip.CreateEntryFromFile(configFile, entryName);
@@ -541,7 +549,111 @@ namespace DnsServerCore.Dns.Applications
             return transfers;
         }
 
-        internal async Task ApplyClusterTransferAsync(Dictionary<string, ClusterAppTransfer> transfers)
+        internal string[] ReadClusterOwnership(ZipArchive archive, IReadOnlyDictionary<string, ClusterAppTransfer> transfers)
+        {
+            ZipArchiveEntry entry = null;
+            foreach (ZipArchiveEntry candidate in archive.Entries)
+            {
+                if (candidate.FullName != ConfigurationApplications.OwnershipFile)
+                    continue;
+                if (entry is not null)
+                    throw new InvalidDataException("/apps/packages: Duplicate cluster ownership entry.");
+                entry = candidate;
+            }
+            if (entry is null)
+            {
+                if (OwnershipFromPrimary)
+                    throw new InvalidDataException("/apps/packages: The Primary did not send app ownership.");
+                return null;
+            }
+
+            using Stream stream = entry.Open();
+            string[] paths = JsonSerializer.Deserialize<string[]>(stream) ??
+                throw new InvalidDataException("/apps/packages: Invalid cluster app ownership.");
+            var declared = new HashSet<string>(paths, StringComparer.Ordinal);
+            if (declared.Count != paths.Length)
+                throw new InvalidDataException("/apps/packages: Duplicate cluster app ownership path.");
+
+            const string prefix = ConfigurationApplications.Path + "/";
+            foreach (string path in paths)
+            {
+                if (path == ConfigurationApplications.Path && paths.Length == 1 && transfers.Count == 0)
+                    continue;
+                if (path is null || !path.StartsWith(prefix, StringComparison.Ordinal))
+                    throw new InvalidDataException("/apps/packages: Invalid cluster app ownership path.");
+                string[] segments = path[prefix.Length..].Split('/');
+                string name = segments[0].Replace("~1", "/").Replace("~0", "~");
+                string appPath = ConfigurationApplications.AppPath(name);
+                if (!ConfigurationApplications.IsSafeName(name) || !declared.Contains(appPath) ||
+                    (segments.Length != 1 || path != appPath) &&
+                    (segments.Length != 2 || segments[1] is not ("configuration" or "version") || path != appPath + "/" + segments[1]))
+                    throw new InvalidDataException("/apps/packages: Invalid cluster app ownership path.");
+                if (!transfers.TryGetValue(name, out ClusterAppTransfer transfer))
+                {
+                    if (segments.Length == 1)
+                        continue; // owned absence
+                    throw new InvalidDataException($"{appPath}: Cluster transfer omitted the managed app.");
+                }
+                if (transfer.Package is null || segments.Length == 2 && segments[1] == "configuration" &&
+                    transfer.Configuration is null && !transfer.ClearConfiguration)
+                    throw new InvalidDataException($"{appPath}: Cluster transfer omitted managed app files.");
+            }
+            if (paths.Length != 0 && !OwnershipFromPrimary && ManagedPaths.Count != 0)
+                throw new InvalidDataException("/apps/packages: Release local app ownership before accepting Primary ownership.");
+            return paths;
+        }
+
+        internal async Task ApplyClusterTransferAsync(Dictionary<string, ClusterAppTransfer> transfers, string[] ownership)
+        {
+            if (ownership is { Length: > 0 } || OwnershipFromPrimary)
+            {
+                await ApplyManagedClusterTransferAsync(transfers, ownership);
+                return;
+            }
+            await ApplyLegacyClusterTransferAsync(transfers);
+        }
+
+        private async Task ApplyManagedClusterTransferAsync(Dictionary<string, ClusterAppTransfer> transfers, string[] ownership)
+        {
+            var changes = new List<ConfigurationApplications.Entry>();
+            foreach (var (name, transfer) in transfers)
+            {
+                _applications.TryGetValue(name, out DnsApplication app);
+                string before = app?.ReadManifestConfig();
+                string after = transfer.ClearConfiguration ? null : before;
+                if (transfer.Configuration is not null)
+                {
+                    using var reader = new StreamReader(transfer.Configuration.Open(), true);
+                    after = await reader.ReadToEndAsync();
+                }
+                bool hasConfig = transfer.ClearConfiguration || transfer.Configuration is not null;
+                if (transfer.Package is not null && (app is null ||
+                    !MatchesFile(Path.Combine(app.DnsServer.ApplicationFolder, name + ".zip"), transfer.Package)))
+                {
+                    using Stream source = transfer.Package.Open();
+                    using var package = new MemoryStream();
+                    await source.CopyToAsync(package);
+                    changes.Add(new(app, before, after, InstallName: name, Package: package.ToArray(), HasConfig: hasConfig));
+                }
+                else if (app is not null && before != after)
+                {
+                    changes.Add(new(app, before, after));
+                }
+            }
+            foreach (DnsApplication app in _applications.Values)
+            {
+                if (!transfers.ContainsKey(app.Name))
+                    changes.Add(new(app, app.ReadManifestConfig(), null, Remove: true));
+            }
+            await ConfigurationApplications.ApplyAsync(this, changes.ToArray(), ownership, (write, files) =>
+            {
+                if (write is not null)
+                    ConfigurationJournal.Persist(ConfigurationFolder, write, files);
+                return Task.CompletedTask;
+            }, fromPrimary: true);
+        }
+
+        private async Task ApplyLegacyClusterTransferAsync(Dictionary<string, ClusterAppTransfer> transfers)
         {
             foreach (var (name, transfer) in transfers)
             {
@@ -588,7 +700,7 @@ namespace DnsServerCore.Dns.Applications
         internal void CheckClusterTransfer(IReadOnlyDictionary<string, ClusterAppTransfer> transfers)
         {
             var paths = _manifestOwnedPaths;
-            if (paths.Length == 0)
+            if (paths.Length == 0 || OwnershipFromPrimary)
                 return;
 
             foreach (string name in transfers.Keys)
@@ -673,9 +785,12 @@ namespace DnsServerCore.Dns.Applications
             return SHA256.HashData(current).AsSpan().SequenceEqual(SHA256.HashData(candidate));
         }
 
-        internal void WriteManifestOwnership(string[] paths)
+        internal void WriteManifestOwnership(string[] paths, bool fromPrimary)
         {
-            string file = Path.Combine(_dnsServer.ConfigFolder, ConfigurationApplications.OwnershipFile);
+            string local = Path.Combine(_dnsServer.ConfigFolder, ConfigurationApplications.OwnershipFile);
+            string primary = Path.Combine(_dnsServer.ConfigFolder, ConfigurationApplications.PrimaryOwnershipFile);
+            string file = fromPrimary ? primary : local;
+            File.Delete(fromPrimary ? local : primary);
             if (paths.Length == 0)
             {
                 File.Delete(file);
@@ -690,7 +805,11 @@ namespace DnsServerCore.Dns.Applications
             File.Move(temporary, file, true);
         }
 
-        internal void PublishManifestOwnership(string[] paths) => _manifestOwnedPaths = paths;
+        internal void PublishManifestOwnership(string[] paths, bool fromPrimary)
+        {
+            _manifestOwnedPaths = paths;
+            OwnershipFromPrimary = fromPrimary && paths.Length > 0;
+        }
 
         internal async Task<byte[]> DownloadManifestPackageAsync(Uri uri)
         {

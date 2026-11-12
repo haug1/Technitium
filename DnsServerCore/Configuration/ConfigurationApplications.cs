@@ -17,6 +17,7 @@ namespace DnsServerCore.Configuration
     {
         internal const string Path = "/apps/packages";
         internal const string OwnershipFile = "app-ownership.config";
+        internal const string PrimaryOwnershipFile = "app-primary-ownership.config";
 
         internal static string AppPath(string name) => ConfigurationPlan.AppendPath(Path, name);
 
@@ -238,9 +239,11 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
-        internal static async Task ApplyAsync(DnsApplicationManager manager, Entry[] entries, string[] ownership, Func<Action, string[], Task> commit)
+        internal static async Task ApplyAsync(DnsApplicationManager manager, Entry[] entries, string[] ownership, Func<Action, string[], Task> commit,
+            bool fromPrimary = false)
         {
-            if ((entries is null || entries.Length == 0) && manager.ManagedPaths.SequenceEqual(ownership))
+            if ((entries is null || entries.Length == 0) && (ownership is null ||
+                manager.ManagedPaths.SequenceEqual(ownership) && manager.OwnershipFromPrimary == (fromPrimary && ownership.Length > 0)))
             {
                 await commit(null, []);
                 return;
@@ -252,7 +255,8 @@ namespace DnsServerCore.Configuration
             var installed = new List<(DnsApplication App, DnsApplication Previous)>();
             try
             {
-                bool ownershipChanged = !manager.ManagedPaths.SequenceEqual(ownership);
+                bool ownershipChanged = ownership is not null && (!manager.ManagedPaths.SequenceEqual(ownership) ||
+                    manager.OwnershipFromPrimary != (fromPrimary && ownership.Length > 0));
                 entries ??= [];
                 foreach (Entry entry in entries)
                 {
@@ -314,9 +318,9 @@ namespace DnsServerCore.Configuration
                     .. installed.Select(entry => entry.Previous is null ? ConfigurationJournal.AppInstallPath(entry.App.Name) :
                         ConfigurationJournal.AppUpgradePath(entry.App.Name))];
                 await commit(resources.Length > 0 || ownershipChanged ? Write : null,
-                    ownershipChanged ? [.. resources, OwnershipFile] : resources);
+                    ownershipChanged ? [.. resources, OwnershipFile, PrimaryOwnershipFile] : resources);
                 if (ownershipChanged)
-                    manager.PublishManifestOwnership(ownership);
+                    manager.PublishManifestOwnership(ownership, fromPrimary);
                 foreach (DnsApplication app in removed)
                     manager.DisposeManifestApp(app);
                 foreach (var (_, previous) in installed)
@@ -330,7 +334,7 @@ namespace DnsServerCore.Configuration
                     foreach (Entry entry in removals)
                         ConfigurationJournal.StageAppRemoval(manager.ConfigurationFolder, entry.Application.Name);
                     if (ownershipChanged)
-                        manager.WriteManifestOwnership(ownership);
+                        manager.WriteManifestOwnership(ownership, fromPrimary);
                     foreach (var (app, previous) in installed)
                     {
                         if (previous is null)

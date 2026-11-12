@@ -168,6 +168,8 @@ def verify(current, previous, folder, propagation, graceful):
         user_revision = ok(primary.call("settings/config/plan", manifest=user_policy))["revision"]
         permission_policy = {"schemaVersion": 1, "auth": {"permissions": {"Settings": {"groups": {"Everyone": None}}}}}
         permission_revision = ok(primary.call("settings/config/plan", manifest=permission_policy))["revision"]
+        app_policy = {"schemaVersion": 1, "apps": {"packages": {"RemovedFixture": None}}}
+        app_revision = ok(primary.call("settings/config/plan", manifest=app_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -186,11 +188,23 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeGroups"] is True
             assert joined["supportsDeclarativeUsers"] is True
             assert joined["supportsDeclarativePermissions"] is True
+            assert joined["supportsDeclarativeApps"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
+        assert not joined.get("supportsDeclarativeApps"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=app_policy),
+            primary.call("settings/config/apply", manifest=app_policy, revision=app_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative apps" in rejected["errorMessage"], rejected
+        if joined.get("supportsDeclarativePermissions"):
+            plan = ok(primary.call("settings/config/plan", manifest=permission_policy))
+            ok(primary.call("settings/config/apply", manifest=permission_policy, revision=plan["revision"]))
+            print("Mixed-build check passed. Existing permission support allowed grants and rejected app ownership changes.")
+            return
         assert not joined.get("supportsDeclarativePermissions"), joined
         for rejected in (
             primary.call("settings/config/plan", manifest=permission_policy),

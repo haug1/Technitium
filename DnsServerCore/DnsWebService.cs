@@ -953,8 +953,12 @@ namespace DnsServerCore
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
                 var appTransfers = isConfigTransfer && apps ? DnsApplicationManager.ReadClusterTransfer(backupZip) : null;
+                string[] appOwnership = null;
                 if (appTransfers is not null)
+                {
+                    appOwnership = _dnsServer.DnsApplicationManager.ReadClusterOwnership(backupZip, appTransfers);
                     _dnsServer.DnsApplicationManager.CheckClusterTransfer(appTransfers);
+                }
 
                 if (isConfigTransfer && authConfig && _authManager.HasManagedAuthSettings &&
                     backupZip.GetEntry("auth.config") is ZipArchiveEntry managedAuth)
@@ -1352,7 +1356,7 @@ namespace DnsServerCore
                     {
                         if (isConfigTransfer)
                         {
-                            await _dnsServer.DnsApplicationManager.ApplyClusterTransferAsync(appTransfers);
+                            await _dnsServer.DnsApplicationManager.ApplyClusterTransferAsync(appTransfers, appOwnership);
                         }
                         else
                         {
@@ -3228,16 +3232,24 @@ namespace DnsServerCore
                     clusterFiles.AddRange(clusterChange.ZoneRecords.Select(record => Path.Combine("zones", record.Zone + ".zone")).Distinct());
                 DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
                 apps ??= ConfigurationApplications.Prepare(manifest, manager);
-                await ConfigurationApplications.ApplyAsync(manager, apps, ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>
+                int[] appPeers = ConfigurationPlan.CheckClusterAppSupport(manifest, _clusterManager, apps);
+                Action checkAppPeers = appPeers is null ? null : () =>
+                {
+                    if (!_clusterManager.CheckDeclarativeAppPeers().SequenceEqual(appPeers))
+                        throw new InvalidDataException("/apps/packages: Cluster membership changed during apply. Create a new preview.");
+                };
+                await ConfigurationApplications.ApplyAsync(manager, apps, secondary ? null : ConfigurationApplications.GetOwnedPaths(manifest), (writeApps, appFiles) =>
                     _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + checkDnsPolicyPeers + checkLdapPeers + checkSsoPeers + checkGroupPeers + checkUserPeers + checkPermissionPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, checkBlockListPeers + checkDomainListPeers + checkDnsPolicyPeers + checkLdapPeers + checkSsoPeers + checkGroupPeers + checkUserPeers + checkPermissionPeers + checkAppPeers + writeApps + writeScopes + zones.Write + (clusterFiles.Count == 0 ? null : () => writeCluster?.Invoke()), [.. appFiles, .. scopeFiles, .. zones.Files, .. clusterFiles],
                         persist => _clusterManager.ApplyManifestOptions(clusterOptions, write =>
                         {
                             writeCluster = write;
                             zones.Commit(persist);
                         }), isClusterSecondary: secondary)));
+                if (appPeers is not null)
+                    _clusterManager.TriggerNotifyAllSecondaryNodesIfPrimarySelfNode();
             }
             catch
             {

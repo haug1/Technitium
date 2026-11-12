@@ -1073,14 +1073,18 @@ namespace DnsServerCore
 
             private ConfigurationApplications.Entry[] PrepareAppsForSession(ConfigurationManifest manifest, User user)
             {
-                if (!ConfigurationApplications.IsDeclared(manifest))
+                var manager = _dnsWebService._dnsServer.DnsApplicationManager;
+                bool declared = ConfigurationApplications.IsDeclared(manifest);
+                bool secondary = _dnsWebService._clusterManager.ClusterInitialized &&
+                    _dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Secondary;
+                if (!declared && (manifest is null || secondary || manager.ManagedPaths.Count == 0))
                     return null;
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, user, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
-                if (ConfigurationApplications.DeclaresRemovals(manifest) &&
+                if (declared && ConfigurationApplications.DeclaresRemovals(manifest) &&
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, user, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
-                return ConfigurationApplications.Prepare(manifest, _dnsWebService._dnsServer.DnsApplicationManager);
+                return ConfigurationApplications.Prepare(manifest, manager);
             }
 
             private void CheckRevision(ConfigurationManifest manifest, JsonElement snapshot, string expected)
@@ -1182,6 +1186,11 @@ namespace DnsServerCore
                     writer.WritePropertyName("manifestApplicationOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._dnsServer.DnsApplicationManager.ManagedPaths);
                     var apps = preparedApps ?? PrepareAppsForSession(manifest, sessionUser);
+                    if (manifest is not null && ConfigurationPlan.CheckClusterAppSupport(manifest, _dnsWebService._clusterManager, apps) is { } appPeers)
+                    {
+                        writer.WritePropertyName("appPeers");
+                        JsonSerializer.Serialize(writer, appPeers);
+                    }
                     if (apps is not null)
                         ConfigurationApplications.WriteSnapshot(writer, apps, _configurationRevisionKey);
                     writer.WritePropertyName("manifestPermissionOwnership");

@@ -310,6 +310,8 @@ namespace DnsServerCore.Configuration
                     userPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("permissionPeers", out JsonElement permissionPeers))
                     permissionPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("appPeers", out JsonElement appPeers))
+                    appPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -889,8 +891,7 @@ namespace DnsServerCore.Configuration
             CheckClusterPermissionRole(manifest, cluster);
             CheckClusterUserRole(manifest, cluster);
             CheckClusterGroupRole(manifest, cluster);
-            if (ConfigurationApplications.IsDeclared(manifest))
-                throw new InvalidDataException("/apps/packages: Applying app packages to a cluster is not implemented.");
+            CheckClusterAppRole(manifest, cluster);
             CheckClusterSsoRole(manifest, cluster);
             CheckClusterLdapRole(manifest, cluster);
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
@@ -901,6 +902,37 @@ namespace DnsServerCore.Configuration
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        private static void CheckClusterAppRole(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (ConfigurationApplications.IsDeclared(manifest) && cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new InvalidDataException("/apps/packages: Only the Primary can apply cluster app settings.");
+        }
+
+        internal static int[] CheckClusterAppSupport(ConfigurationManifest manifest, ClusterManager cluster, ConfigurationApplications.Entry[] entries)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            CheckClusterAppRole(manifest, cluster);
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                return null;
+
+            var manager = cluster.DnsWebService.DnsServer.DnsApplicationManager;
+            if (entries is not null)
+            {
+                foreach (var entry in entries)
+                {
+                    if (entry.InstallName is null && !entry.Remove && !File.Exists(Path.Combine(entry.Application.DnsServer.ApplicationFolder, entry.Name + ".zip")))
+                        throw new InvalidDataException($"{entry.SettingPath}: The Primary needs a stored package ZIP for cluster replication.");
+                }
+            }
+
+            if (!manager.OwnershipFromPrimary && manager.ManagedPaths.SequenceEqual(ConfigurationApplications.GetOwnedPaths(manifest)) &&
+                (entries is null || !entries.Any(entry => entry.Remove || entry.InstallName is not null || entry.Before != entry.After)))
+                return null;
+            return cluster.CheckDeclarativeAppPeers();
         }
 
         private static void CheckClusterPermissionRole(ConfigurationManifest manifest, ClusterManager cluster)
