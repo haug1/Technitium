@@ -57,6 +57,9 @@ namespace DnsServerCore.Configuration
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true, canApplyAtStartup: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true, canApplyAtStartup: true),
             ["/web/tlsPort"] = Field("webServiceTlsPort", 53443, restartWebService: true, canApplyAtStartup: true),
+            ["/web/tlsEnabled"] = Field("webServiceEnableTls", false, restartWebService: true, canApplyAtStartup: true),
+            ["/web/http3Enabled"] = Field("webServiceEnableHttp3", false, restartWebService: true, canApplyAtStartup: true),
+            ["/web/redirectHttpToTls"] = Field("webServiceHttpToTlsRedirect", false, restartWebService: true, canApplyAtStartup: true),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
@@ -294,13 +297,20 @@ namespace DnsServerCore.Configuration
 
             IReadOnlyList<IPAddress> addresses = web.TryGetProperty("localAddresses", out JsonElement value)
                 ? NormalizeWebAddresses(value) : null;
-            return new DnsWebService.WebListeners(addresses, ReadPort("httpPort"), ReadPort("tlsPort"));
+            return new DnsWebService.WebListeners(addresses, ReadPort("httpPort"), ReadPort("tlsPort"),
+                ReadValue("tlsEnabled")?.GetBoolean(), ReadValue("http3Enabled")?.GetBoolean(), ReadValue("redirectHttpToTls")?.GetBoolean());
 
             int? ReadPort(string name)
             {
-                if (!web.TryGetProperty(name, out JsonElement port))
+                JsonElement? value = ReadValue(name);
+                return value.HasValue ? decimal.ToInt32(value.Value.GetDecimal()) : null;
+            }
+
+            JsonElement? ReadValue(string name)
+            {
+                if (!web.TryGetProperty(name, out JsonElement value))
                     return null;
-                return decimal.ToInt32((port.ValueKind == JsonValueKind.Null ? _settings["/web/" + name].Default : port).GetDecimal());
+                return value.ValueKind == JsonValueKind.Null ? _settings["/web/" + name].Default : value;
             }
         }
 

@@ -226,7 +226,8 @@ namespace DnsServerCore
                 if (version is >= 28 and <= 42)
                 {
                     LegacyWebConfiguration web = ReadLegacyWebConfiguration(reader, version);
-                    CheckManifestWebLiveSettings(new WebLiveSettings(web.RealIpHeader, null, Listeners: new WebListeners(web.Addresses, web.HttpPort, web.TlsPort)));
+                    CheckManifestWebLiveSettings(new WebLiveSettings(web.RealIpHeader, null, Listeners: new WebListeners(web.Addresses, web.HttpPort, web.TlsPort, web.EnableTls, web.EnableHttp3, web.RedirectToTls)));
+                    CheckManifestWebTlsDependencies(web.EnableTls, web.UseSelfSignedCertificate || web.CertificatePath is not null);
                     string domain = stream.ReadShortString();
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
@@ -312,9 +313,12 @@ namespace DnsServerCore
                 _webServiceTlsPort = web.TlsPort;
             if ((_managedWebListeners & ManagedWebAddresses) == 0)
                 _webServiceLocalAddresses = web.Addresses;
-            _webServiceEnableTls = web.EnableTls;
-            _webServiceEnableHttp3 = web.EnableHttp3;
-            _webServiceHttpToTlsRedirect = web.RedirectToTls;
+            if ((_managedWebListeners & ManagedWebTlsEnabled) == 0)
+                _webServiceEnableTls = web.EnableTls;
+            if ((_managedWebListeners & ManagedWebHttp3) == 0)
+                _webServiceEnableHttp3 = web.EnableHttp3;
+            if ((_managedWebListeners & ManagedWebRedirect) == 0)
+                _webServiceHttpToTlsRedirect = web.RedirectToTls;
             _webServiceUseSelfSignedTlsCertificate = web.UseSelfSignedCertificate;
             _webServiceTlsCertificatePath = web.CertificatePath;
             _webServiceTlsCertificatePassword = web.CertificatePassword;

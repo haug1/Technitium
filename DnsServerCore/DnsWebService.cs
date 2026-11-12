@@ -142,13 +142,20 @@ namespace DnsServerCore
         bool _manifestOwnsRealIpHeader;
         bool _manifestOwnsFrameAncestors;
         bool _manifestOwnsReverseProxyAcl;
-        byte _managedWebListeners;
+        ushort _managedWebListeners;
         private const byte ManagedWebAddresses = 8;
         private const byte ManagedWebHttpPort = 16;
-        private const byte ManagedWebTlsPort = 32;
-        internal readonly record struct WebListeners(IReadOnlyList<IPAddress> Addresses, int? HttpPort, int? TlsPort)
+        private const ushort ManagedWebTlsPort = 32;
+        private const ushort ManagedWebTlsEnabled = 64;
+        private const ushort ManagedWebHttp3 = 128;
+        private const ushort ManagedWebRedirect = 256;
+        private const ushort ManagedWebListenerMask = ManagedWebAddresses | ManagedWebHttpPort | ManagedWebTlsPort |
+            ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect;
+        internal readonly record struct WebListeners(IReadOnlyList<IPAddress> Addresses, int? HttpPort, int? TlsPort,
+            bool? TlsEnabled = null, bool? Http3Enabled = null, bool? RedirectToTls = null)
         {
-            internal bool HasValues => Addresses is not null || HttpPort.HasValue || TlsPort.HasValue;
+            internal bool HasValues => Addresses is not null || HttpPort.HasValue || TlsPort.HasValue ||
+                TlsEnabled.HasValue || Http3Enabled.HasValue || RedirectToTls.HasValue;
         }
         internal readonly record struct WebLiveSettings(string RealIp, string FrameAncestors, IReadOnlyCollection<NetworkAccessControl> ReverseProxyAcl = null, WebListeners Listeners = default);
         string _webServiceRealIpHeader = "X-Real-IP";
@@ -518,9 +525,12 @@ namespace DnsServerCore
             NetworkAccessControl[] proxyAddresses = version >= 2 ? AuthZoneInfo.ReadNetworkACLFrom(bR) ?? [] : CreateDefaultReverseProxyAcl();
             string certificatePath = s.ReadShortString();
             string certificatePassword = s.ReadShortString();
-            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses, new WebListeners(addresses, httpPort, tlsPort));
+            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses, new WebListeners(addresses, httpPort, tlsPort, tlsEnabled, http3Enabled, redirectToTls));
             if (!apply)
+            {
+                CheckManifestWebTlsDependencies(tlsEnabled, selfSignedCertificate || certificatePath.Length > 0);
                 return headers;
+            }
 
             if (readOwnership || (_managedWebListeners & ManagedWebHttpPort) == 0)
                 _webServiceHttpPort = httpPort;
@@ -532,9 +542,12 @@ namespace DnsServerCore
             _webServiceHttpUnixSocket = httpSocket.Length == 0 ? null : httpSocket;
             _webServiceEnableTlsUnixSocket = tlsSocketEnabled;
             _webServiceTlsUnixSocket = tlsSocket.Length == 0 ? null : tlsSocket;
-            _webServiceEnableTls = tlsEnabled;
-            _webServiceEnableHttp3 = http3Enabled;
-            _webServiceHttpToTlsRedirect = redirectToTls;
+            if (readOwnership || (_managedWebListeners & ManagedWebTlsEnabled) == 0)
+                _webServiceEnableTls = tlsEnabled;
+            if (readOwnership || (_managedWebListeners & ManagedWebHttp3) == 0)
+                _webServiceEnableHttp3 = http3Enabled;
+            if (readOwnership || (_managedWebListeners & ManagedWebRedirect) == 0)
+                _webServiceHttpToTlsRedirect = redirectToTls;
             _webServiceUseSelfSignedTlsCertificate = selfSignedCertificate;
 
             _webServiceTlsCertificatePath = certificatePath;
@@ -571,7 +584,8 @@ namespace DnsServerCore
                 _manifestOwnsRealIpHeader = ownership >= 0 && (ownership & 1) != 0;
                 _manifestOwnsFrameAncestors = ownership >= 0 && (ownership & 2) != 0;
                 _manifestOwnsReverseProxyAcl = ownership >= 0 && (ownership & 4) != 0;
-                _managedWebListeners = ownership < 0 ? (byte)0 : (byte)(ownership & (ManagedWebAddresses | ManagedWebHttpPort | ManagedWebTlsPort));
+                int extendedOwnership = ownership >= 0 ? s.ReadByte() : -1;
+                _managedWebListeners = (ushort)((Math.Max(0, ownership) | (Math.Max(0, extendedOwnership) << 8)) & ManagedWebListenerMask);
             }
             if (readOwnership || !_manifestOwnsRealIpHeader)
                 _webServiceRealIpHeader = headers.RealIp;
@@ -626,7 +640,11 @@ namespace DnsServerCore
             s.WriteShortString(_webServiceRealIpHeader);
             s.WriteShortString(_webServiceCspFrameAncestorsHeader);
             if (_manifestOwnsRealIpHeader || _manifestOwnsFrameAncestors || _manifestOwnsReverseProxyAcl || _managedWebListeners != 0)
+            {
                 bW.Write((byte)((_manifestOwnsRealIpHeader ? 1 : 0) | (_manifestOwnsFrameAncestors ? 2 : 0) | (_manifestOwnsReverseProxyAcl ? 4 : 0) | _managedWebListeners));
+                if (_managedWebListeners > byte.MaxValue)
+                    bW.Write((byte)(_managedWebListeners >> 8));
+            }
         }
 
         #endregion
@@ -2743,6 +2761,14 @@ namespace DnsServerCore
             if (serverCertificate is null)
                 throw new ArgumentException("Web Service TLS certificate file must contain a certificate with private key.");
 
+            ConfigureWebTlsOptions(SslStreamCertificateContext.Create(serverCertificate, certificateCollection, false));
+            _webServiceCertificateLastModifiedOn = fileInfo.LastWriteTimeUtc;
+
+            _log.Write("Web Service TLS certificate was loaded: " + tlsCertificatePath);
+        }
+
+        private void ConfigureWebTlsOptions(SslStreamCertificateContext certificate)
+        {
             List<SslApplicationProtocol> applicationProtocols = new List<SslApplicationProtocol>();
 
             if (_webServiceEnableHttp3)
@@ -2756,12 +2782,8 @@ namespace DnsServerCore
             _webServiceSslServerAuthenticationOptions = new SslServerAuthenticationOptions
             {
                 ApplicationProtocols = applicationProtocols,
-                ServerCertificateContext = SslStreamCertificateContext.Create(serverCertificate, certificateCollection, false)
+                ServerCertificateContext = certificate
             };
-
-            _webServiceCertificateLastModifiedOn = fileInfo.LastWriteTimeUtc;
-
-            _log.Write("Web Service TLS certificate was loaded: " + tlsCertificatePath);
         }
 
         private void RemoveWebServiceTlsCertificate()
@@ -2817,6 +2839,40 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/httpPort: Setting is managed by the configuration manifest.");
             if ((_managedWebListeners & ManagedWebTlsPort) != 0 && listeners.TlsPort.HasValue && listeners.TlsPort != _webServiceTlsPort)
                 throw new DnsWebServiceException("/web/tlsPort: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebTlsEnabled) != 0 && listeners.TlsEnabled.HasValue && listeners.TlsEnabled != _webServiceEnableTls)
+                throw new DnsWebServiceException("/web/tlsEnabled: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebHttp3) != 0 && listeners.Http3Enabled.HasValue && listeners.Http3Enabled != _webServiceEnableHttp3)
+                throw new DnsWebServiceException("/web/http3Enabled: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebRedirect) != 0 && listeners.RedirectToTls.HasValue && listeners.RedirectToTls != _webServiceHttpToTlsRedirect)
+                throw new DnsWebServiceException("/web/redirectHttpToTls: Setting is managed by the configuration manifest.");
+        }
+
+        private void CheckManifestWebTlsDependencies(bool tlsEnabled, bool hasCertificate)
+        {
+            if ((_managedWebListeners & ManagedWebTlsEnabled) != 0 && _webServiceEnableTls && !hasCertificate)
+                throw new DnsWebServiceException("/web/tlsEnabled: A certificate is required by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebHttp3) != 0 && _webServiceEnableHttp3 && (!tlsEnabled || !hasCertificate))
+                throw new DnsWebServiceException("/web/http3Enabled: Web TLS is required by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebRedirect) != 0 && _webServiceHttpToTlsRedirect && (!tlsEnabled || !hasCertificate))
+                throw new DnsWebServiceException("/web/redirectHttpToTls: Web TLS is required by the configuration manifest.");
+        }
+
+        private void ValidateManifestWebListeners(WebListeners listeners)
+        {
+            if (!listeners.TlsEnabled.HasValue && !listeners.Http3Enabled.HasValue && !listeners.RedirectToTls.HasValue)
+                return;
+
+            bool tls = listeners.TlsEnabled ?? _webServiceEnableTls;
+            bool http3 = listeners.Http3Enabled ?? _webServiceEnableHttp3;
+            bool redirect = listeners.RedirectToTls ?? _webServiceHttpToTlsRedirect;
+            if (listeners.Http3Enabled == true && !tls)
+                throw new InvalidDataException("/web/http3Enabled: HTTP/3 requires web TLS.");
+            if (listeners.RedirectToTls == true && !tls)
+                throw new InvalidDataException("/web/redirectHttpToTls: Redirecting HTTP to HTTPS requires web TLS.");
+            if (tls && (listeners.TlsEnabled.HasValue || http3 || redirect) && _webServiceSslServerAuthenticationOptions is null)
+                throw new InvalidDataException("/web/tlsEnabled: Configure a web TLS certificate before enabling TLS.");
+            if (tls && http3)
+                DnsServer.ValidateQuicSupport("HTTP/3");
         }
 
         private bool StageWebListeners(WebListeners listeners)
@@ -2835,6 +2891,21 @@ namespace DnsServerCore
             if (listeners.TlsPort.HasValue && listeners.TlsPort != _webServiceTlsPort)
             {
                 _webServiceTlsPort = listeners.TlsPort.Value;
+                changed = true;
+            }
+            if (listeners.TlsEnabled.HasValue && listeners.TlsEnabled != _webServiceEnableTls)
+            {
+                _webServiceEnableTls = listeners.TlsEnabled.Value;
+                changed = true;
+            }
+            if (listeners.Http3Enabled.HasValue && listeners.Http3Enabled != _webServiceEnableHttp3)
+            {
+                _webServiceEnableHttp3 = listeners.Http3Enabled.Value;
+                changed = true;
+            }
+            if (listeners.RedirectToTls.HasValue && listeners.RedirectToTls != _webServiceHttpToTlsRedirect)
+            {
+                _webServiceHttpToTlsRedirect = listeners.RedirectToTls.Value;
                 changed = true;
             }
             return changed;
@@ -2863,9 +2934,11 @@ namespace DnsServerCore
                 bool oldAncestorsOwned = _manifestOwnsFrameAncestors;
                 var oldAcl = _webServiceReverseProxyAddresses;
                 bool oldAclOwned = _manifestOwnsReverseProxyAcl;
-                byte oldManagedListeners = _managedWebListeners;
-                byte managedListeners = (byte)((listeners.Addresses is not null ? ManagedWebAddresses : 0) |
-                    (listeners.HttpPort.HasValue ? ManagedWebHttpPort : 0) | (listeners.TlsPort.HasValue ? ManagedWebTlsPort : 0));
+                ushort oldManagedListeners = _managedWebListeners;
+                ushort managedListeners = (ushort)((listeners.Addresses is not null ? ManagedWebAddresses : 0) |
+                    (listeners.HttpPort.HasValue ? ManagedWebHttpPort : 0) | (listeners.TlsPort.HasValue ? ManagedWebTlsPort : 0) |
+                    (listeners.TlsEnabled.HasValue ? ManagedWebTlsEnabled : 0) | (listeners.Http3Enabled.HasValue ? ManagedWebHttp3 : 0) |
+                    (listeners.RedirectToTls.HasValue ? ManagedWebRedirect : 0));
                 bool aclChanged = headers.ReverseProxyAcl is not null && !headers.ReverseProxyAcl.SequenceEqual(oldAcl ?? []);
                 string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
                 string ancestors = headers.FrameAncestors ?? oldAncestors;
@@ -3123,15 +3196,18 @@ namespace DnsServerCore
                 }
 
                 WebListeners listeners = ConfigurationPlan.GetWebListeners(startupManifest);
-                IReadOnlyList<IPAddress> previousWebAddresses = _webServiceLocalAddresses;
-                int previousWebHttpPort = _webServiceHttpPort;
-                int previousWebTlsPort = _webServiceTlsPort;
+                var previousWebListeners = new WebListeners(_webServiceLocalAddresses, _webServiceHttpPort, _webServiceTlsPort,
+                    _webServiceEnableTls, _webServiceEnableHttp3, _webServiceHttpToTlsRedirect);
+                SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
                 try
                 {
                     await _settingsApi.WithConfigurationLockAsync(async () =>
                     {
                         // Start the web service and bind the DNS candidate before committing the manifest.
+                        ValidateManifestWebListeners(listeners);
                         bool listenersChanged = StageWebListeners(listeners);
+                        if (previousWebListeners.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
+                            ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
                         if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0)
                             await StartWebServiceAsync(false);
                         else
@@ -3143,7 +3219,7 @@ namespace DnsServerCore
                         _dhcpServer.Start();
                         if (startupManifest is not null)
                         {
-                            bool webAddressesChanged = !previousWebAddresses.HasSameItems(_webServiceLocalAddresses);
+                            bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
                             await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true, listeners, listenersChanged, webAddressesChanged);
                         }
                     });
@@ -3153,9 +3229,8 @@ namespace DnsServerCore
                     await StopAsync();
                     if (listeners.HasValues)
                     {
-                        _webServiceLocalAddresses = previousWebAddresses;
-                        _webServiceHttpPort = previousWebHttpPort;
-                        _webServiceTlsPort = previousWebTlsPort;
+                        StageWebListeners(previousWebListeners);
+                        _webServiceSslServerAuthenticationOptions = previousTlsOptions;
                     }
                     throw;
                 }

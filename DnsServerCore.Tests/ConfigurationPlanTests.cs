@@ -749,6 +749,43 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task StartupWebProtocolSettingsPersistAndRejectConflictingEdits()
+        {
+            await using var server = await LoopbackWebService.StartAsync(enableTls: true);
+            string path = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            const string invalid = """{"schemaVersion":1,"web":{"tlsEnabled":false,"http3Enabled":true}}""";
+            using (var content = new StringContent(invalid, Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/web/http3Enabled", rejected.GetProperty("errorMessage").GetString());
+            }
+
+            await File.WriteAllTextAsync(path, """{"schemaVersion":1,"web":{"tlsEnabled":true}}""");
+            await server.RestartAsync();
+            JsonElement removeCertificate = await server.CallAsync("settings/set?webServiceUseSelfSignedTlsCertificate=false", server.AdminToken);
+            Assert.Equal("error", removeCertificate.GetProperty("status").GetString());
+            Assert.Contains("/web/tlsEnabled", removeCertificate.GetProperty("errorMessage").GetString());
+
+            const string manifest = """{"schemaVersion":1,"web":{"tlsEnabled":false,"http3Enabled":false,"redirectHttpToTls":false}}""";
+            await File.WriteAllTextAsync(path, manifest);
+            await server.RestartAsync();
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.False(settings.GetProperty("webServiceEnableTls").GetBoolean());
+            Assert.False(settings.GetProperty("webServiceEnableHttp3").GetBoolean());
+            Assert.False(settings.GetProperty("webServiceHttpToTlsRedirect").GetBoolean());
+
+            File.Delete(path);
+            await server.RestartAsync();
+            settings = await server.GetSettingsAsync();
+            Assert.Equal(3, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Contains(settings.GetProperty("managedSettings").EnumerateArray(), path => path.GetString() == "/web/redirectHttpToTls");
+            JsonElement edit = await server.CallAsync("settings/set?webServiceEnableTls=true", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/web/tlsEnabled", edit.GetProperty("errorMessage").GetString());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -928,7 +965,7 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
-        public async Task UnsupportedStartupManifestLeavesThePreviousLoggingConfigurationIntact()
+        public async Task InvalidStartupTlsManifestLeavesPreviousLoggingConfigurationIntact()
         {
             await using var server = await LoopbackWebService.StartAsync();
             string manifest = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);

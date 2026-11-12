@@ -476,6 +476,12 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue("/web/httpPort");
                 if ((_dnsWebService._managedWebListeners & ManagedWebTlsPort) != 0)
                     jsonWriter.WriteStringValue("/web/tlsPort");
+                if ((_dnsWebService._managedWebListeners & ManagedWebRedirect) != 0)
+                    jsonWriter.WriteStringValue("/web/redirectHttpToTls");
+                if ((_dnsWebService._managedWebListeners & ManagedWebHttp3) != 0)
+                    jsonWriter.WriteStringValue("/web/http3Enabled");
+                if ((_dnsWebService._managedWebListeners & ManagedWebTlsEnabled) != 0)
+                    jsonWriter.WriteStringValue("/web/tlsEnabled");
                 foreach (string path in _dnsWebService._dnsServer.GetManagedDnsPaths())
                     jsonWriter.WriteStringValue(path);
                 if (_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
@@ -517,6 +523,7 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
+                    _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest));
                     using JsonDocument current = CaptureConfigurationSnapshot();
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
@@ -666,12 +673,22 @@ namespace DnsServerCore
                     request.TryQueryOrFormArray("webServiceLocalAddresses", IPAddress.Parse, out IPAddress[] webServiceLocalAddresses)
                         ? NormalizeWebLocalAddresses(webServiceLocalAddresses) : null,
                     request.TryGetQueryOrForm("webServiceHttpPort", int.Parse, out int webServiceHttpPort) ? webServiceHttpPort : null,
-                    request.TryGetQueryOrForm("webServiceTlsPort", int.Parse, out int webServiceTlsPort) ? webServiceTlsPort : null);
+                    request.TryGetQueryOrForm("webServiceTlsPort", int.Parse, out int webServiceTlsPort) ? webServiceTlsPort : null,
+                    request.TryGetQueryOrForm("webServiceEnableTls", bool.Parse, out bool webServiceEnableTls) ? webServiceEnableTls : null,
+                    request.TryGetQueryOrForm("webServiceEnableHttp3", bool.Parse, out bool webServiceEnableHttp3) ? webServiceEnableHttp3 : null,
+                    request.TryGetQueryOrForm("webServiceHttpToTlsRedirect", bool.Parse, out bool webServiceHttpToTlsRedirect) ? webServiceHttpToTlsRedirect : null);
 
                 var webHeaders = new WebLiveSettings(
                     request.TryGetQueryOrForm("webServiceRealIpHeader", out string realIpHeader) ? NormalizeWebHeader(realIpHeader, realIp: true) : null,
                     request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null, reverseProxyAcl, webListeners);
                 _dnsWebService.CheckManifestWebLiveSettings(webHeaders);
+                if ((_dnsWebService._managedWebListeners & (ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect)) != 0)
+                {
+                    bool selfSigned = request.GetQueryOrForm("webServiceUseSelfSignedTlsCertificate", bool.Parse, _dnsWebService._webServiceUseSelfSignedTlsCertificate);
+                    string certificatePath = request.QueryOrForm("webServiceTlsCertificatePath") ?? _dnsWebService._webServiceTlsCertificatePath;
+                    _dnsWebService.CheckManifestWebTlsDependencies(webListeners.TlsEnabled ?? _dnsWebService._webServiceEnableTls,
+                        selfSigned || !string.IsNullOrWhiteSpace(certificatePath));
+                }
 
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
                 request.TryGetQueryOrForm("logFolder", out string logFolder);
@@ -1113,7 +1130,7 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryGetQueryOrForm("webServiceEnableTls", bool.Parse, out bool webServiceEnableTls))
+                        if (webListeners.TlsEnabled.HasValue && (_dnsWebService._managedWebListeners & ManagedWebTlsEnabled) == 0)
                         {
                             if (_dnsWebService._webServiceEnableTls != webServiceEnableTls)
                             {
@@ -1123,7 +1140,7 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryGetQueryOrForm("webServiceEnableHttp3", bool.Parse, out bool webServiceEnableHttp3))
+                        if (webListeners.Http3Enabled.HasValue && (_dnsWebService._managedWebListeners & ManagedWebHttp3) == 0)
                         {
                             if (_dnsWebService._webServiceEnableHttp3 != webServiceEnableHttp3)
                             {
@@ -1135,7 +1152,7 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryGetQueryOrForm("webServiceHttpToTlsRedirect", bool.Parse, out bool webServiceHttpToTlsRedirect))
+                        if (webListeners.RedirectToTls.HasValue && (_dnsWebService._managedWebListeners & ManagedWebRedirect) == 0)
                         {
                             if (_dnsWebService._webServiceHttpToTlsRedirect != webServiceHttpToTlsRedirect)
                             {
