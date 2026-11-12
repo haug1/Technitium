@@ -907,6 +907,24 @@ namespace DnsServerCore.Tests
             Assert.False(migrationResponse.GetProperty("manifest").GetProperty("web").TryGetProperty("rootPath", out _));
             Assert.Contains(migrationResponse.GetProperty("missingInputs").EnumerateArray(), item => item.GetString() == "/web/rootPath");
 
+            await using (var destination = await LoopbackWebService.StartAsync())
+            {
+                string destinationRoot = Path.Combine(destination.ConfigurationDirectory, "migrated-assets");
+                Directory.CreateDirectory(destinationRoot);
+                File.Copy(Path.Combine(root, "root-fixture.txt"), Path.Combine(destinationRoot, "root-fixture.txt"));
+                var migrated = new JsonObject
+                {
+                    ["schemaVersion"] = migrationResponse.GetProperty("manifest").GetProperty("schemaVersion").GetInt32(),
+                    ["web"] = new JsonObject { ["rootPath"] = "migrated-assets" }
+                };
+                await File.WriteAllTextAsync(Path.Combine(destination.ConfigurationDirectory, ConfigurationManifest.DefaultFileName),
+                    migrated.ToJsonString());
+                await destination.RestartAsync();
+                Assert.Equal(marker, await destination.Client.GetStringAsync("/root-fixture.txt"));
+                Assert.Equal(destinationRoot, (await destination.GetSettingsAsync()).GetProperty("webServiceRootPath").GetString());
+                Assert.Empty((await PreviewAsync(destination, migrated.ToJsonString())).GetProperty("changes").EnumerateArray());
+            }
+
             File.Delete(startup);
             await server.RestartAsync();
             Assert.Equal(marker, await server.Client.GetStringAsync("/root-fixture.txt"));

@@ -138,6 +138,8 @@ Regular export includes primary, conditional forwarder, secondary, secondary for
 
 When export lists `/blocklists/sources` in `missingInputs`, supply the original ordered source array under `blocklists.sources`. Preserve any `!` allowlist prefixes and comments. Make file sources available on the destination and keep manifests containing credential-bearing URLs private.
 
+When export lists `/web/rootPath`, copy the custom web assets to the destination and set `web.rootPath` in its local startup manifest. Use the destination path. A relative path resolves from the destination configuration directory.
+
 To reproduce the exported settings, validate the file, preview it against the destination, then apply using the destination revision. Check the declared DNS listener addresses and log directory against the destination host before applying.
 
 ## Applying DNS, web, logging, and blocklist settings
