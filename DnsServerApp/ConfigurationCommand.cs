@@ -42,14 +42,15 @@ namespace DnsServerApp
 
                     case "export" when args.Length == 3 || (args.Length == 4 && args[3] == "--include-preview-only"):
                         bool includePreviewOnly = args.Length == 4;
-                        JsonElement snapshot = await ReadServerResponseAsync(ParseServerUrl(args[2]), "/api/settings/get");
-                        Console.WriteLine(ConfigurationPlan.Export(snapshot, includePreviewOnly).ToJsonString(_exportOptions));
+                        string exportPath = includePreviewOnly
+                            ? "/api/settings/config/export?includePreviewOnly=true" : "/api/settings/config/export";
+                        JsonElement exported = await ReadServerResponseAsync(ParseServerUrl(args[2]), exportPath);
+                        Console.WriteLine(JsonSerializer.Serialize(exported.GetProperty("manifest"), _exportOptions));
                         Console.Error.WriteLine(includePreviewOnly
                             ? "Partial export includes preview-only settings."
                             : "Partial export includes settings supported by config apply.");
-                        if (snapshot.TryGetProperty("blockListUrls", out JsonElement sources) &&
-                            sources.ValueKind == JsonValueKind.Array && sources.GetArrayLength() > 0)
-                            Console.Error.WriteLine("Blocklist sources were omitted because URLs can contain credentials. Supply blocklists.sources separately.");
+                        foreach (JsonElement input in exported.GetProperty("missingInputs").EnumerateArray())
+                            Console.Error.WriteLine($"Supply separately {input.GetString()}");
                         return 0;
 
                     default:

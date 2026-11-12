@@ -80,7 +80,7 @@ namespace DnsServerCore
 
             #region private
 
-            private void WriteDnsSettings(Utf8JsonWriter jsonWriter)
+            private void WriteDnsSettings(Utf8JsonWriter jsonWriter, bool includeSecrets = true)
             {
                 //info
                 jsonWriter.WriteString("version", _dnsWebService.GetServerVersion());
@@ -294,7 +294,8 @@ namespace DnsServerCore
                             jsonWriter.WriteStartObject();
 
                             jsonWriter.WriteString("keyName", tsigKey.Key);
-                            jsonWriter.WriteString("sharedSecret", tsigKey.Value.SharedSecret);
+                            if (includeSecrets)
+                                jsonWriter.WriteString("sharedSecret", tsigKey.Value.SharedSecret);
                             jsonWriter.WriteString("algorithmName", tsigKey.Value.AlgorithmName);
 
                             jsonWriter.WriteEndObject();
@@ -425,7 +426,8 @@ namespace DnsServerCore
                     if (credential != null)
                     {
                         jsonWriter.WriteString("username", credential.UserName);
-                        jsonWriter.WriteString("password", credential.Password);
+                        if (includeSecrets)
+                            jsonWriter.WriteString("password", credential.Password);
                     }
 
                     jsonWriter.WritePropertyName("bypass");
@@ -539,6 +541,45 @@ namespace DnsServerCore
 
                 Utf8JsonWriter jsonWriter = context.GetCurrentJsonWriter();
                 WriteDnsSettings(jsonWriter);
+            }
+
+            public Task ExportConfigurationAsync(HttpContext context)
+            {
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.View))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                bool includePreviewOnly = context.Request.TryGetQueryOrForm("includePreviewOnly", bool.Parse, out bool include) && include;
+                using JsonDocument snapshot = CaptureConfigurationSnapshot();
+                var manifest = ConfigurationPlan.Export(snapshot.RootElement, includePreviewOnly);
+                var missingInputs = new SortedSet<string>(StringComparer.Ordinal);
+                DnsServer dns = _dnsWebService._dnsServer;
+
+                if (dns.BlockListZoneManager.BlockListUrls.Count > 0)
+                    missingInputs.Add("/blocklists/sources");
+                if (dns.Forwarders?.Count > 0 && manifest["dns"]?["forwarding"]?["servers"] is null)
+                    missingInputs.Add("/dns/forwarding/servers");
+                if (!string.IsNullOrEmpty(dns.Proxy?.Credential?.Password))
+                    missingInputs.Add("/dns/proxy/password");
+                if (!string.IsNullOrEmpty(dns.DnsTlsCertificatePassword))
+                    missingInputs.Add("/dns/listeners/certificate/password");
+                if (!string.IsNullOrEmpty(_dnsWebService._webServiceTlsCertificatePassword))
+                    missingInputs.Add("/web/certificate/password");
+                if (dns.TsigKeys is not null)
+                {
+                    foreach (string name in dns.TsigKeys.Keys)
+                        missingInputs.Add(ConfigurationPlan.AppendPath("/dns/tsigKeys", name) + "/secret");
+                }
+
+                context.Response.Headers.CacheControl = "no-store";
+                Utf8JsonWriter writer = context.GetCurrentJsonWriter();
+                writer.WritePropertyName("manifest");
+                manifest.WriteTo(writer);
+                writer.WriteStartArray("missingInputs");
+                foreach (string path in missingInputs)
+                    writer.WriteStringValue(path);
+                writer.WriteEndArray();
+                return Task.CompletedTask;
             }
 
             public async Task PreviewConfigurationAsync(HttpContext context)
@@ -734,7 +775,7 @@ namespace DnsServerCore
                 using (var writer = new Utf8JsonWriter(snapshot))
                 {
                     writer.WriteStartObject();
-                    WriteDnsSettings(writer);
+                    WriteDnsSettings(writer, includeSecrets: false);
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
                     if (manifest is not null && manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) && dhcp.TryGetProperty("scopes", out JsonElement scopes))

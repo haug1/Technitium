@@ -2250,6 +2250,7 @@ namespace DnsServerCore
 
             //settings
             _webService.MapGetAndPost("/api/settings/get", _settingsApi.GetDnsSettings);
+            _webService.MapGet("/api/settings/config/export", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.ExportConfigurationAsync));
             _webService.MapPost("/api/settings/config/plan", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.PreviewConfigurationAsync));
             _webService.MapPost("/api/settings/config/apply", context => _settingsApi.WithConfigurationLockAsync(context, _settingsApi.ApplyConfigurationAsync));
             _webService.MapGet("/api/settings/config/status", _settingsApi.GetConfigurationApplyStatus);

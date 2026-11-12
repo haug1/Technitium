@@ -466,6 +466,47 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ConfigurationExportEndpointReportsMissingInputsWithoutReturningSecrets()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string proxyPassword = "fixture-proxy-secret";
+            const string forwarderToken = "fixture-doh-token";
+            const string tsigSecret = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?proxyType=Http&proxyAddress=127.0.0.1&proxyPort=8080&proxyUsername=fixture&proxyPassword=" + proxyPassword +
+                "&forwarderProtocol=Https&forwarders=" + Uri.EscapeDataString("https://fixture.net/dns-query?token=" + forwarderToken) +
+                "&tsigKeys=" + Uri.EscapeDataString("migration-key.test|" + tsigSecret + "|hmac-sha256"), server.AdminToken));
+
+            JsonElement legacy = await server.GetSettingsAsync();
+            Assert.Equal(proxyPassword, legacy.GetProperty("proxy").GetProperty("password").GetString());
+
+            JsonElement first = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(first);
+            JsonElement response = first.GetProperty("response");
+            Assert.DoesNotContain(proxyPassword, first.GetRawText());
+            Assert.DoesNotContain(tsigSecret, first.GetRawText());
+            Assert.DoesNotContain(forwarderToken, first.GetRawText());
+            Assert.Collection(response.GetProperty("missingInputs").EnumerateArray(),
+                entry => Assert.Equal("/dns/forwarding/servers", entry.GetString()),
+                entry => Assert.Equal("/dns/proxy/password", entry.GetString()),
+                entry => Assert.Equal("/dns/tsigKeys/migration-key.test/secret", entry.GetString()));
+            JsonElement manifest = response.GetProperty("manifest");
+            Assert.Equal(ConfigurationManifest.CurrentSchemaVersion, manifest.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(ConfigurationPlan.Export(legacy, includePreviewOnly: false).ToJsonString(), manifest.GetRawText());
+
+            JsonElement repeat = await server.CallAsync("settings/config/export", server.AdminToken);
+            LoopbackWebService.AssertOk(repeat);
+            Assert.Equal(response.GetRawText(), repeat.GetProperty("response").GetRawText());
+
+            using var user = new FormUrlEncodedContent([new("user", "export-viewer"), new("pass", "fixture-password")]);
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/users/create", server.AdminToken, user));
+            string token = await server.LoginAsync("export-viewer", "fixture-password");
+            JsonElement rejected = await server.CallAsync("settings/config/export", token);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.False(rejected.TryGetProperty("response", out JsonElement denied) && denied.TryGetProperty("manifest", out _));
+        }
+
+        [Fact]
         public async Task DnsTuningRestartsListenersAndPreservesSettingsAcrossReload()
         {
             await using var server = await LoopbackWebService.StartAsync();

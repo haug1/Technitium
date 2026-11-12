@@ -5301,6 +5301,12 @@ Send a versioned manifest as the JSON body of `POST /api/settings/config/plan`. 
 
 The response contains a `revision` and a `changes` array. Each change contains a manifest `path` as a JSON Pointer, a `kind` of `Add`, `Update`, or `Remove`, and the `restartWebService` and `restartDnsService` booleans. The revision identifies the manifest and settings snapshot on the current server process. The operation reads the snapshot and leaves settings untouched. An optional `warnings` array identifies legacy environment settings overridden by the manifest. Zone previews also require Zones view permission and access to the declared existing zones. Record additions and metadata updates for existing primary zones use paths such as `/zones/example.test/records/0`. A record list that would remove an existing record of unknown ownership returns an error. The response omits record data. Preview also compares primary-zone query, transfer, notification, and dynamic update modes, ACLs, and notification addresses for zones outside catalogs and cluster infrastructure. The response reports paths and omits ACL and address values. DHCP scope previews require DHCP Server view permission and cover scope lifecycle, enabled state, address ranges, and reservations. Reservation additions, updates, and removals use paths under `/dhcp/scopes/<name>/reservations`. Changes that would overlap another scope or exclude existing leases, reservations, or exclusions return an error.
 
+### Export Declarative Configuration
+
+Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
+
+The response contains a versioned `manifest` and a sorted `missingInputs` array of JSON Pointer paths. The array identifies configured inputs omitted from the export, including proxy and certificate passwords, TSIG secrets, blocklist source URLs, and forwarder lists containing potentially credential-bearing URLs. The export response omits the values of those inputs.
+
 ### Apply Declarative Configuration
 
 Send the same manifest as the JSON body of `POST /api/settings/config/apply`. Authenticate with a bearer token that has Settings modify permission and send the quoted preview `revision` in the `If-Match` header.
