@@ -264,6 +264,8 @@ namespace DnsServerCore.Configuration
                     ownership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
                     zones.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestTsigKeys", out JsonElement tsigKeys))
+                    tsigKeys.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
                     scopes.WriteTo(writer);
                 writer.WriteEndArray();
@@ -951,6 +953,15 @@ namespace DnsServerCore.Configuration
                 section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
             }
 
+            if (includePreviewOnly && currentSettings.TryGetProperty("tsigKeys", out JsonElement keys) && keys.GetArrayLength() > 0)
+            {
+                string catalogKey = currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain)
+                    ? ConfigurationTsig.GetCatalogKey(clusterDomain.GetString()) : null;
+                JsonObject exportedKeys = ConfigurationTsig.Export(keys, catalogKey);
+                if (exportedKeys.Count > 0)
+                    manifest["dns"]!.AsObject().Add("tsigKeys", exportedKeys);
+            }
+
             if (currentSettings.TryGetProperty("proxy", out JsonElement currentProxy))
             {
                 var proxy = new JsonObject();
@@ -1148,6 +1159,12 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path == ConfigurationTsig.Path)
+            {
+                ConfigurationTsig.Compare(currentSettings, changes);
+                return;
+            }
+
             if (path == ConfigurationWebCertificate.Path)
             {
                 ConfigurationWebCertificate.Compare(desired, currentSettings, changes);

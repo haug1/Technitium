@@ -636,6 +636,69 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task TsigPreviewReportsKeyChangesWithoutExposingSecrets()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_TSIG_PASSWORD";
+            const string currentSecret = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+            const string nextSecret = "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=";
+            string keys = $"current.test|{currentSecret}|hmac-sha256|remove.test|{currentSecret}|hmac-sha256";
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?tsigKeys=" + Uri.EscapeDataString(keys), server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"tsigKeys":{
+                  "CURRENT.TEST.":{"secret":{"environment":"TECHNITIUM_TEST_TSIG_PASSWORD"}},
+                  "new.test":{"algorithm":"hmac-sha512","secret":{"environment":"TECHNITIUM_TEST_TSIG_PASSWORD"}},
+                  "remove.test":null}}}
+                """;
+            string? original = Environment.GetEnvironmentVariable(variable);
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, currentSecret);
+                JsonElement first = await PreviewAsync(server, manifest);
+                Assert.Equal(2, first.GetProperty("changes").GetArrayLength());
+
+                Environment.SetEnvironmentVariable(variable, nextSecret);
+                JsonElement rotated = await PreviewAsync(server, manifest);
+                Assert.NotEqual(first.GetProperty("revision").GetString(), rotated.GetProperty("revision").GetString());
+                Assert.Collection(rotated.GetProperty("changes").EnumerateArray(),
+                    change => AssertChange(change, "/dns/tsigKeys/current.test/secret", "Update"),
+                    change => AssertChange(change, "/dns/tsigKeys/new.test", "Add"),
+                    change => AssertChange(change, "/dns/tsigKeys/remove.test", "Remove"));
+                Assert.DoesNotContain(currentSecret, rotated.GetRawText());
+                Assert.DoesNotContain(nextSecret, rotated.GetRawText());
+                Assert.Equal(2, (await server.GetSettingsAsync()).GetProperty("tsigKeys").GetArrayLength());
+
+                JsonElement inspection = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
+                LoopbackWebService.AssertOk(inspection);
+                JsonElement exported = inspection.GetProperty("response").GetProperty("manifest").GetProperty("dns").GetProperty("tsigKeys");
+                Assert.Equal("hmac-sha256", exported.GetProperty("current.test").GetProperty("algorithm").GetString());
+                Assert.False(exported.GetProperty("current.test").TryGetProperty("secret", out _));
+                Assert.DoesNotContain(currentSecret, inspection.GetRawText());
+
+                Environment.SetEnvironmentVariable(variable, "invalid-fixture-secret");
+                InvalidDataException invalid = Assert.Throws<InvalidDataException>(() => Load(manifest).ValidateReferences());
+                Assert.Contains("/secret", invalid.Message);
+                Assert.DoesNotContain("invalid-fixture-secret", invalid.Message);
+                using var content = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/secret", rejected.GetProperty("errorMessage").GetString());
+                Assert.DoesNotContain("invalid-fixture-secret", rejected.GetRawText());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, original);
+            }
+
+            static void AssertChange(JsonElement change, string path, string kind)
+            {
+                Assert.Equal(path, change.GetProperty("path").GetString());
+                Assert.Equal(kind, change.GetProperty("kind").GetString());
+            }
+        }
+
+        [Fact]
         public async Task ConfigurationExportEndpointReportsMissingInputsWithoutReturningSecrets()
         {
             await using var server = await LoopbackWebService.StartAsync();

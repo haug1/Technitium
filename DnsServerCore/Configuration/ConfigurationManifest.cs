@@ -97,6 +97,8 @@ namespace DnsServerCore.Configuration
             if (root.TryGetProperty("dns", out JsonElement dns))
             {
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
+                if (dns.TryGetProperty("tsigKeys", out JsonElement keys))
+                    ConfigurationTsig.Validate(keys);
                 if (dns.TryGetProperty("serverDomain", out JsonElement serverDomain))
                     ReadServerDomain(serverDomain);
                 if (dns.TryGetProperty("localEndpoints", out JsonElement endpoints))
@@ -450,7 +452,10 @@ namespace DnsServerCore.Configuration
             {
                 if (IsReferencePath(path) && (element.TryGetProperty("environment", out _) || element.TryGetProperty("file", out _)))
                 {
-                    ResolveReference(element, path);
+                    if (path.StartsWith(ConfigurationTsig.Path + "/", StringComparison.Ordinal))
+                        ConfigurationTsig.ReadSecret(this, element, path);
+                    else
+                        ResolveReference(element, path);
                     return;
                 }
 

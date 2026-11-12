@@ -578,8 +578,13 @@ namespace DnsServerCore
                     missingInputs.Add("/web/certificate/password");
                 if (dns.TsigKeys is not null)
                 {
+                    string catalogKey = _dnsWebService._clusterManager.ClusterInitialized
+                        ? ConfigurationTsig.GetCatalogKey(_dnsWebService._clusterManager.ClusterDomain) : null;
                     foreach (string name in dns.TsigKeys.Keys)
-                        missingInputs.Add(ConfigurationPlan.AppendPath("/dns/tsigKeys", name) + "/secret");
+                    {
+                        if (!string.Equals(name, catalogKey, StringComparison.OrdinalIgnoreCase))
+                            missingInputs.Add(ConfigurationPlan.AppendPath(ConfigurationTsig.Path, name) + "/secret");
+                    }
                 }
 
                 context.Response.Headers.CacheControl = "no-store";
@@ -825,6 +830,16 @@ namespace DnsServerCore
                                 : ConfigurationProxy.ResolvePassword(manifest, reference);
                         }
                         ConfigurationProxy.WritePasswordSnapshot(writer, password, _dnsWebService._dnsServer.Proxy, _configurationRevisionKey);
+                    }
+                    if (ConfigurationTsig.TryGetDeclaration(manifest, out JsonElement tsig))
+                    {
+                        if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                            throw new DnsWebServiceException("Access was denied.");
+                        var keys = _dnsWebService._dnsServer.TsigKeys;
+                        string protectedKey = _dnsWebService._clusterManager.ClusterInitialized
+                            ? ConfigurationTsig.GetCatalogKey(_dnsWebService._clusterManager.ClusterDomain) : null;
+                        var candidate = ConfigurationTsig.Prepare(manifest, tsig, keys, protectedKey);
+                        ConfigurationTsig.WriteSnapshot(writer, keys, candidate, _configurationRevisionKey);
                     }
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);

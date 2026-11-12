@@ -409,8 +409,8 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                      "algorithm": {"anyOf": [{"type": "string", "maxLength": 255}, {"type": "null"}]},
-                      "secret": {"anyOf": [{"$ref": "#/$defs/secretReference"}, {"type": "null"}]}
+                      "algorithm": {"type": "string", "minLength": 1, "maxLength": 255},
+                      "secret": {"$ref": "#/$defs/secretReference"}
                     }
                   },
                   {"type": "null"}
