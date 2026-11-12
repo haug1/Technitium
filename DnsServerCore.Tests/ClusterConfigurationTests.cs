@@ -209,7 +209,7 @@ namespace DnsServerCore.Tests
         public async Task JoiningSecondaryReceivesDnsSettingsAndKeepsItsLocalWebConfiguration()
         {
             await using var primary = await LoopbackWebService.StartAsync("primary.cluster.test", enableTls: true);
-            await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true);
+            await using var secondary = await LoopbackWebService.StartAsync("secondary.cluster.test", enableTls: true, adminPassword: primary.AdminPassword);
             LoopbackWebService.AssertOk(await primary.CallAsync("settings/set?defaultRecordTtl=180", primary.AdminToken));
             LoopbackWebService.AssertOk(await secondary.CallAsync("settings/set?defaultRecordTtl=240", secondary.AdminToken));
 
@@ -347,6 +347,41 @@ namespace DnsServerCore.Tests
             JsonElement secondarySettings = await secondary.CallAsync("settings/get", syncedAdmin);
             LoopbackWebService.AssertOk(secondarySettings);
             Assert.Equal(secondary.Client.BaseAddress!.Port, secondarySettings.GetProperty("response").GetProperty("webServiceHttpPort").GetInt32());
+
+            const string addresses = """{"schemaVersion":1,"cluster":{"node":{"addresses":["127.0.0.1","127.0.0.2"]}}}""";
+            JsonElement addressPreview = await PlanAsync(secondary, syncedAdmin, addresses);
+            LoopbackWebService.AssertOk(addressPreview);
+            Assert.Contains(addressPreview.GetProperty("response").GetProperty("changes").EnumerateArray(),
+                change => change.GetProperty("path").ValueEquals("/cluster/node/addresses"));
+            using var addressBody = new StringContent(addresses, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, addressBody,
+                addressPreview.GetProperty("response").GetProperty("revision").GetString()));
+
+            JsonElement addressRepeat = await PlanAsync(secondary, syncedAdmin, addresses);
+            LoopbackWebService.AssertOk(addressRepeat);
+            Assert.Empty(addressRepeat.GetProperty("response").GetProperty("changes").EnumerateArray());
+            JsonElement secondaryExport = await secondary.CallAsync("settings/config/export", syncedAdmin);
+            LoopbackWebService.AssertOk(secondaryExport);
+            Assert.Contains(secondaryExport.GetProperty("response").GetProperty("manifest").GetProperty("cluster")
+                .GetProperty("node").GetProperty("addresses").EnumerateArray(), value => value.ValueEquals("127.0.0.2"));
+
+            await secondary.RestartAsync();
+            syncedAdmin = secondary.AdminToken;
+            JsonElement persisted = await secondary.CallAsync("admin/cluster/state", syncedAdmin);
+            LoopbackWebService.AssertOk(persisted);
+            Assert.Contains(persisted.GetProperty("response").GetProperty("managedOptionPaths").EnumerateArray(),
+                value => value.ValueEquals("/cluster/node/addresses"));
+
+            JsonElement blockedAddress = await secondary.CallAsync("admin/cluster/updateIpAddress?ipAddresses=127.0.0.1", syncedAdmin);
+            Assert.Equal("error", blockedAddress.GetProperty("status").GetString());
+            Assert.Contains("/cluster/node/addresses", blockedAddress.GetProperty("errorMessage").GetString());
+
+            JsonElement addressRelease = await PlanAsync(secondary, syncedAdmin, release);
+            LoopbackWebService.AssertOk(addressRelease);
+            using var addressReleaseBody = new StringContent(release, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await secondary.CallAsync("settings/config/apply", syncedAdmin, addressReleaseBody,
+                addressRelease.GetProperty("response").GetProperty("revision").GetString()));
+            LoopbackWebService.AssertOk(await secondary.CallAsync("admin/cluster/updateIpAddress?ipAddresses=127.0.0.1", syncedAdmin));
 
             static async Task<JsonElement> PlanAsync(LoopbackWebService server, string token, string declaration)
             {

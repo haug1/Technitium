@@ -51,6 +51,7 @@ namespace DnsServerCore.Cluster
 
     class ClusterNode : IComparable<ClusterNode>, IDisposable
     {
+        internal const int MaxAdvertisedAddresses = 10;
         #region variables
 
         readonly ClusterManager _clusterManager;
@@ -101,7 +102,7 @@ namespace DnsServerCore.Cluster
             if (!url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Cluster node URL must use HTTPS scheme.", nameof(url));
 
-            if (ipAddresses.Count > 10)
+            if (ipAddresses.Count > MaxAdvertisedAddresses)
                 throw new ArgumentException("Cluster node cannot have more than 10 IP addresses.", nameof(ipAddresses));
 
             _clusterManager = clusterManager;
@@ -274,7 +275,7 @@ namespace DnsServerCore.Cluster
             if (_state != ClusterNodeState.Self)
                 throw new InvalidOperationException();
 
-            if (ipAddresses.Count > 10)
+            if (ipAddresses.Count > MaxAdvertisedAddresses)
                 throw new ArgumentException("Cluster node cannot have more than 10 IP addresses.", nameof(ipAddresses));
 
             _ipAddresses = ipAddresses;
@@ -304,7 +305,7 @@ namespace DnsServerCore.Cluster
             if (!url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Cluster node URL must use HTTPS scheme.", nameof(url));
 
-            if (ipAddresses.Count > 10)
+            if (ipAddresses.Count > MaxAdvertisedAddresses)
                 throw new ArgumentException("Cluster node cannot have more than 10 IP addresses.", nameof(ipAddresses));
 
             bool changed = false;
@@ -689,15 +690,16 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        public void WriteTo(BinaryWriter bW)
+        public void WriteTo(BinaryWriter bW, IReadOnlyList<IPAddress> advertisedAddresses = null)
         {
             bW.Write((byte)2); //version
             bW.Write(_id);
             bW.BaseStream.WriteShortString(_url.OriginalString);
 
-            bW.Write(Convert.ToByte(_ipAddresses.Count));
+            IReadOnlyList<IPAddress> addresses = advertisedAddresses ?? _ipAddresses;
+            bW.Write(Convert.ToByte(addresses.Count));
 
-            foreach (IPAddress ipAddress in _ipAddresses)
+            foreach (IPAddress ipAddress in addresses)
                 ipAddress.WriteTo(bW);
 
             bW.Write((byte)_type);

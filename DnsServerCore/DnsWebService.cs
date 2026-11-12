@@ -2366,12 +2366,12 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/primary/transferConfig", _clusterApi.TransferConfigAsync);
             _webService.MapGetAndPost("/api/admin/cluster/primary/setOptions", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.SetClusterOptions));
             _webService.MapGetAndPost("/api/admin/cluster/initJoin", _clusterApi.InitializeAndJoinClusterAsync);
-            _webService.MapGetAndPost("/api/admin/cluster/secondary/leave", _clusterApi.LeaveClusterAsync);
+            _webService.MapGetAndPost("/api/admin/cluster/secondary/leave", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.LeaveClusterAsync));
             _webService.MapGetAndPost("/api/admin/cluster/secondary/notify", _clusterApi.ConfigUpdateNotificationAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/resync", _clusterApi.ResyncCluster);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/updatePrimary", _clusterApi.UpdatePrimaryNodeAsync);
             _webService.MapGetAndPost("/api/admin/cluster/secondary/promote", _clusterApi.PromoteToPrimaryNodeAsync);
-            _webService.MapGetAndPost("/api/admin/cluster/updateIpAddress", _clusterApi.UpdateSelfNodeIPAddress);
+            _webService.MapGetAndPost("/api/admin/cluster/updateIpAddress", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.UpdateSelfNodeIPAddress));
 
             //logs
             _webService.MapGetAndPost("/api/logs/list", _logsApi.ListLogs);
@@ -3268,7 +3268,7 @@ namespace DnsServerCore
                 var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager);
                 Action writeCluster = null;
                 var clusterFiles = new List<string>(2);
-                if (clusterOptions is { ValuesChanged: true })
+                if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true })
                     clusterFiles.Add("cluster.config");
                 if (clusterOptions is { OwnershipChanged: true })
                     clusterFiles.Add(ConfigurationClusterOptions.OwnershipFile);

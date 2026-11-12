@@ -617,7 +617,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "addresses": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "maxItems": 255}, {"type": "null"}]}
+            "addresses": {"type": "array", "items": {"$ref": "#/$defs/ipAddress"}, "minItems": 1, "maxItems": 10}
           }
         },
         "heartbeatRefreshSeconds": {"anyOf": [{"type": "integer", "minimum": 10, "maximum": 300}, {"type": "null"}]},

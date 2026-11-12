@@ -278,7 +278,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void SaveConfigFileInternal(ConfigurationClusterOptions.Settings? options = null)
+        private void SaveConfigFileInternal(ConfigurationClusterOptions.Settings? options = null, IReadOnlyList<IPAddress> selfAddresses = null)
         {
             if (!ClusterInitialized)
                 throw new InvalidOperationException();
@@ -288,8 +288,8 @@ namespace DnsServerCore.Cluster
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, options);
-                if (options.HasValue)
+                WriteConfigTo(fS, options, selfAddresses);
+                if (options.HasValue || selfAddresses is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -350,6 +350,12 @@ namespace DnsServerCore.Cluster
                     _dnsWebService.LogManager.Write("DNS Server encountered an error while deleting the Cluster config file: " + configFile, ex);
                 }
 
+                if (_managedOptionNames.Length != 0)
+                {
+                    WriteManifestOwnership([]);
+                    _managedOptionNames = [];
+                }
+
                 _pendingSave = false;
             }
         }
@@ -394,7 +400,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void WriteConfigTo(Stream s, ConfigurationClusterOptions.Settings? options = null)
+        private void WriteConfigTo(Stream s, ConfigurationClusterOptions.Settings? options = null, IReadOnlyList<IPAddress> selfAddresses = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -419,7 +425,7 @@ namespace DnsServerCore.Cluster
                 bW.Write(Convert.ToByte(clusterNodes.Count));
 
                 foreach (KeyValuePair<int, ClusterNode> node in clusterNodes)
-                    node.Value.WriteTo(bW);
+                    node.Value.WriteTo(bW, node.Value.State == ClusterNodeState.Self ? selfAddresses : null);
             }
         }
 
@@ -958,7 +964,7 @@ namespace DnsServerCore.Cluster
                 {
                     JsonElement currentOptions = ConfigurationClusterOptions.Export(current);
                     JsonElement desiredOptions = ConfigurationClusterOptions.Export(desired);
-                    foreach (string name in _managedOptionNames)
+                    foreach (string name in _managedOptionNames.Where(ConfigurationClusterOptions.IsInterval))
                     {
                         if (!JsonElement.DeepEquals(currentOptions.GetProperty(name), desiredOptions.GetProperty(name)))
                             throw new DnsServerException($"/cluster/{name}: This setting is managed by the configuration manifest.");
@@ -1012,7 +1018,7 @@ namespace DnsServerCore.Cluster
 
         internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
         {
-            if (candidate is not { } change || (!change.ValuesChanged && !change.OwnershipChanged))
+            if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.OwnershipChanged))
             {
                 persist(null);
                 return;
@@ -1020,18 +1026,21 @@ namespace DnsServerCore.Cluster
 
             lock (_saveLock)
             {
-                if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Primary || GetSelfNode().Id != change.NodeId ||
-                    GetManifestOptions() != change.Current || !_managedOptionNames.SequenceEqual(change.CurrentOwnership))
+                if (!ClusterInitialized || GetSelfNode().Type != change.NodeType || GetSelfNode().Id != change.NodeId ||
+                    !ConfigurationClusterOptions.SameAddresses(GetSelfNode().IPAddresses, change.CurrentAddresses) || GetManifestOptions() != change.Current || !_managedOptionNames.SequenceEqual(change.CurrentOwnership))
                     throw new InvalidDataException("/cluster: Cluster options changed during apply. Create a new preview.");
 
                 persist(() =>
                 {
-                    if (change.ValuesChanged)
-                        SaveConfigFileInternal(change.Desired);
+                    if (change.ValuesChanged || change.AddressesChanged)
+                        SaveConfigFileInternal(change.ValuesChanged ? change.Desired : null, change.AddressesChanged ? change.DesiredAddresses : null);
                     if (change.OwnershipChanged)
                         WriteManifestOwnership(change.DesiredOwnership);
                 });
-                SetManifestOptions(change.Desired);
+                if (change.ValuesChanged)
+                    SetManifestOptions(change.Desired);
+                if (change.AddressesChanged)
+                    GetSelfNode().UpdateSelfNodeIPAddresses(change.DesiredAddresses);
                 _managedOptionNames = change.DesiredOwnership;
             }
 
@@ -1040,6 +1049,8 @@ namespace DnsServerCore.Cluster
                 UpdateHeartbeatTimerForAllClusterNodes();
                 TriggerNotifyAllSecondaryNodes();
             }
+            if (change.AddressesChanged)
+                TriggerClusterUpdateForSecondaryNodeChanges();
         }
 
         private void WriteManifestOwnership(string[] names)
@@ -1608,6 +1619,8 @@ namespace DnsServerCore.Cluster
 
             if (secondaryNode.Type != ClusterNodeType.Secondary)
                 throw new DnsServerException("Failed to leave Cluster: only Secondary nodes can leave the Cluster.");
+
+            CheckManifestTopologyChange();
 
             if (!forceLeave)
             {
@@ -2224,6 +2237,13 @@ namespace DnsServerCore.Cluster
         public ClusterNode UpdateSelfNodeIPAddresses(IReadOnlyList<IPAddress> ipAddresses)
         {
             ClusterNode selfNode = GetSelfNode();
+
+            if (_managedOptionNames.Contains(ConfigurationClusterOptions.AddressName))
+            {
+                if (ConfigurationClusterOptions.SameAddresses(selfNode.IPAddresses, ipAddresses))
+                    return selfNode;
+                throw new DnsServerException("/cluster/node/addresses: This setting is managed by the configuration manifest.");
+            }
 
             switch (selfNode.Type)
             {

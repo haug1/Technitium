@@ -12,19 +12,21 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationClusterOptions
     {
         internal const string Path = "/cluster";
+        internal const string AddressName = "node/addresses";
         internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses)
         {
             internal bool ValuesChanged => Current != Desired;
+            internal bool AddressesChanged => !SameAddresses(CurrentAddresses, DesiredAddresses);
             internal bool OwnershipChanged => !CurrentOwnership.SequenceEqual(DesiredOwnership);
         }
 
         internal static bool IsDeclared(ConfigurationManifest manifest) => manifest is not null &&
             manifest.Settings.TryGetProperty("cluster", out _);
 
-        private static bool IsInterval(string name) => name is
+        internal static bool IsInterval(string name) => name is
             "heartbeatRefreshSeconds" or "heartbeatRetrySeconds" or "configRefreshSeconds" or "configRetrySeconds";
 
         internal static void CheckApplySupport(JsonElement section)
@@ -120,7 +122,10 @@ namespace DnsServerCore.Configuration
                 return null;
             if (addresses.ValueKind == JsonValueKind.Null)
                 throw new InvalidDataException("/cluster/node/addresses: Supply a list of advertised addresses.");
-            return addresses.EnumerateArray().Select(value => IPAddress.Parse(value.GetString())).Distinct().ToArray();
+            IPAddress[] parsed = addresses.EnumerateArray().Select(value => IPAddress.Parse(value.GetString())).Distinct().ToArray();
+            if (parsed.Length is 0 or > ClusterNode.MaxAdvertisedAddresses)
+                throw new InvalidDataException($"/cluster/{AddressName}: Supply between 1 and {ClusterNode.MaxAdvertisedAddresses} advertised addresses.");
+            return parsed;
         }
 
         private static string[] GetDeclaredIntervals(JsonElement section) => section.ValueKind == JsonValueKind.Object
@@ -158,17 +163,23 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{Path}/bootstrap/role: The declared role does not match the current node.");
 
             IPAddress[] addresses = declared ? ReadAddresses(section) : null;
-            if (addresses is not null && !new HashSet<IPAddress>(self.IPAddresses).SetEquals(addresses))
-                throw new InvalidDataException("/cluster/node/addresses: The declared addresses do not match the current node.");
+            IReadOnlyList<IPAddress> currentAddresses = self.IPAddresses;
+            if (addresses is not null && self.Type == ClusterNodeType.Primary && !SameAddresses(currentAddresses, addresses))
+                throw new InvalidDataException($"/cluster/{AddressName}: Declarative address changes on the Primary are pending.");
 
-            string[] ownership = GetDeclaredIntervals(section);
+            string[] intervals = GetDeclaredIntervals(section);
             IReadOnlyList<string> currentOwnership = cluster.ManagedOptionNames;
-            if ((ownership.Length != 0 || currentOwnership.Count != 0) && self.Type != ClusterNodeType.Primary)
+            if ((intervals.Length != 0 || currentOwnership.Any(IsInterval)) && self.Type != ClusterNodeType.Primary)
                 throw new InvalidDataException($"{Path}: Only an initialized Primary node can apply cluster options.");
 
+            string[] ownership = addresses is not null && self.Type == ClusterNodeType.Secondary ? [.. intervals, AddressName] : intervals;
             Settings current = cluster.GetManifestOptions();
-            return new Candidate(current, ReadOptions(section, current), self.Id, self.Type, currentOwnership, ownership);
+            return new Candidate(current, ReadOptions(section, current), self.Id, self.Type, currentOwnership, ownership,
+                currentAddresses, addresses ?? currentAddresses);
         }
+
+        internal static bool SameAddresses(IReadOnlyList<IPAddress> current, IReadOnlyList<IPAddress> desired) =>
+            new HashSet<IPAddress>(current).SetEquals(desired);
 
         private static Settings ReadOptions(JsonElement section, Settings current)
         {
@@ -240,6 +251,9 @@ namespace DnsServerCore.Configuration
             Export(candidate.Current).WriteTo(writer);
             writer.WritePropertyName("desired");
             Export(candidate.Desired).WriteTo(writer);
+            writer.WritePropertyName("currentAddresses");
+            JsonSerializer.Serialize(writer, candidate.CurrentAddresses.Select(address => address.ToString()).Order(StringComparer.Ordinal));
+            writer.WriteBoolean("addressesChanged", candidate.AddressesChanged);
             writer.WritePropertyName("currentOwnership");
             JsonSerializer.Serialize(writer, candidate.CurrentOwnership);
             writer.WriteEndObject();
@@ -247,6 +261,9 @@ namespace DnsServerCore.Configuration
 
         internal static void Compare(JsonElement snapshot, List<ConfigurationChange> changes)
         {
+            if (snapshot.GetProperty("addressesChanged").GetBoolean())
+                changes.Add(new ConfigurationChange($"{Path}/{AddressName}", ConfigurationChangeKind.Update, false));
+
             JsonElement current = snapshot.GetProperty("current");
             foreach (JsonProperty field in snapshot.GetProperty("desired").EnumerateObject())
             {
