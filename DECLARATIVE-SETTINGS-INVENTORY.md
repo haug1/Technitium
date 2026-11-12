@@ -288,7 +288,7 @@ Use the normalized zone name as the resource key under `zones.<name>`. Zone sett
 
 Creation-time `initializeForwarder` controls whether the API creates an initial FWD record. Its `forwarder`, `protocol`, `dnssecValidation`, and `proxyType`, `proxyAddress`, `proxyPort`, `proxyUsername`, and `proxyPassword` parameters belong to that record. A proxy password must use a secret reference.
 
-Transfer expiry, IXFR history, validation failures, last modification timestamps, and catalog-derived member data belong to runtime state. Use source zone and catalog settings to recreate the intended topology. Preserve the destination's replicated records during reconciliation.
+For catalog-provisioned replicas, migrate local notification and dynamic-update policies after transfer. Secondary zones support both policies. Secondary Forwarder zones support dynamic-update policy. Transfer expiry, IXFR history, validation failures, last modification timestamps, and catalog-derived member data belong to runtime state. Use source zone and catalog settings to recreate the intended topology. Preserve the destination's replicated records during reconciliation.
 
 ## Explicit allow and block entries
 

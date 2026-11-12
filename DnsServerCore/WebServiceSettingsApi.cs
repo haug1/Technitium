@@ -1378,6 +1378,16 @@ namespace DnsServerCore
                         writer.WriteEndObject();
                         continue;
                     }
+                    if (ConfigurationZonePolicies.IsReplicaLocalDeclaration(declaration.Value, zone))
+                    {
+                        ConfigurationZonePrimary.Prepare(declaration.Value, zone.Type, zone, keys, zonePath);
+                        ConfigurationZonePolicies.Prepare(declaration.Value, name, zonePath, zone);
+                        writer.WriteStartObject(name);
+                        writer.WriteString("type", zone.Type.ToString());
+                        ConfigurationZonePolicies.WriteSnapshot(writer, declaration.Value, zone);
+                        writer.WriteEndObject();
+                        continue;
+                    }
                     ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
                     if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type))

@@ -956,7 +956,18 @@ namespace DnsServerCore.Dns.ZoneManagers
                         permissionOnlyZones.Add(name, zone);
                         continue;
                     }
-                    ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
+                    string[] ownedFields = GetOwnedZoneFields(name, path, declaration.Value);
+                    if (ConfigurationZonePolicies.IsReplicaLocalDeclaration(declaration.Value, zone))
+                    {
+                        ConfigurationZonePrimary.Prepare(declaration.Value, zone.Type, zone, tsigKeys, path);
+                        var localPolicies = ConfigurationZonePolicies.Prepare(declaration.Value, name, path, zone);
+                        if (ownedFields.Length != 0)
+                            ownedZones.Add(name, ownedFields);
+                        if (localPolicies != default)
+                            changed.Add((name, zone, false, null, localPolicies, default, zone.Type, default));
+                        continue;
+                    }
+                    ownedZones.Add(name, ownedFields);
                     if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type))
                         throw new InvalidDataException($"{path}: Apply requires a supported zone outside catalogs.");
@@ -1252,6 +1263,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                             {
                                 if (current.ApexZone is CatalogZone primaryCatalog)
                                     primaryCatalog.ApplyManifestPolicies(policies, initialize: false, (_, _, _) => { });
+                                else if (current.ApexZone.SecondaryCatalogZone is not null)
+                                    policies.Apply(current);
                                 else
                                 {
                                     string oldCatalog = current.CatalogZoneName;

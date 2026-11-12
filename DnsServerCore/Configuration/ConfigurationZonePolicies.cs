@@ -12,6 +12,17 @@ namespace DnsServerCore.Configuration
 {
     internal static class ConfigurationZonePolicies
     {
+        internal static bool IsReplicaLocalDeclaration(JsonElement declaration, AuthZoneInfo zone) =>
+            zone?.ApexZone.SecondaryCatalogZone is not null && declaration.ValueKind == JsonValueKind.Object &&
+            (declaration.TryGetProperty("notify", out _) || declaration.TryGetProperty("updates", out _)) &&
+            declaration.EnumerateObject().All(field => field.Name switch
+            {
+                "permissions" => true,
+                "notify" => zone.Type == AuthZoneType.Secondary,
+                "updates" => zone.Type is AuthZoneType.Secondary or AuthZoneType.SecondaryForwarder,
+                _ => false
+            });
+
         internal readonly record struct Changes(
             AuthZoneQueryAccess? QueryAccess, NetworkAccessControl[] QueryAcl,
             AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl, IReadOnlySet<string> TransferKeys,

@@ -193,27 +193,39 @@ namespace DnsServerCore.Tests
 
             LoopbackWebService.AssertOk(await peer.CallAsync(
                 "zones/permissions/set?zone=member.test&groupPermissions=Everyone%7Ctrue%7Cfalse%7Cfalse", peer.AdminToken));
+            LoopbackWebService.AssertOk(await peer.CallAsync(
+                "zones/options/set?zone=member.test&notify=SpecifiedNameServers&notifyNameServers=192.0.2.80" +
+                "&update=UseSpecifiedNetworkACL&updateNetworkACL=192.0.2.0%2F24", peer.AdminToken));
+            LoopbackWebService.AssertOk(await peer.CallAsync(
+                "zones/options/set?zone=route.test&update=UseSpecifiedNetworkACL&updateNetworkACL=192.0.2.0%2F24", peer.AdminToken));
             JsonElement peerExport = await peer.CallAsync("settings/config/export", peer.AdminToken);
             LoopbackWebService.AssertOk(peerExport);
-            JsonElement grants = peerExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
-            Assert.Equal("permissions", Assert.Single(grants.EnumerateObject()).Name);
-            string permissions = $$"""{"schemaVersion":1,"zones":{"member.test":{{grants.GetRawText()}} } }""";
+            JsonElement replicaZones = peerExport.GetProperty("response").GetProperty("manifest").GetProperty("zones");
+            JsonElement replica = replicaZones.GetProperty("member.test");
+            JsonElement forwarder = replicaZones.GetProperty("route.test");
+            Assert.Equal(new[] { "notify", "permissions", "updates" }, replica.EnumerateObject().Select(field => field.Name).Order(StringComparer.Ordinal));
+            Assert.Equal("updates", Assert.Single(forwarder.EnumerateObject()).Name);
+            string replicaManifest = $$"""{"schemaVersion":1,"zones":{"member.test":{{replica.GetRawText()}},"route.test":{{forwarder.GetRawText()}} } }""";
+            string permissionsOnly = $$"""{"schemaVersion":1,"zones":{"member.test":{"permissions":{{replica.GetProperty("permissions").GetRawText()}} } } }""";
 
             await using var replacement = await LoopbackWebService.StartAsync("replacement.cluster.test", enableTls: true,
                 adminPassword: restored.AdminPassword);
-            using (var early = new StringContent(permissions, Encoding.UTF8, "application/json"))
+            using (var early = new StringContent(permissionsOnly, Encoding.UTF8, "application/json"))
             {
                 JsonElement missing = await replacement.CallAsync("settings/config/plan", replacement.AdminToken, early);
                 Assert.Equal("error", missing.GetProperty("status").GetString());
                 Assert.Contains("/zones/member.test/permissions", missing.GetProperty("errorMessage").GetString());
             }
             await JoinPeerAsync(replacement);
-            using var permissionPlan = new StringContent(permissions, Encoding.UTF8, "application/json");
+            using var permissionPlan = new StringContent(replicaManifest, Encoding.UTF8, "application/json");
             JsonElement previewPermissions = await replacement.CallAsync("settings/config/plan", replacement.AdminToken, permissionPlan);
             LoopbackWebService.AssertOk(previewPermissions);
-            Assert.Equal("/zones/member.test/permissions/groups/everyone",
-                Assert.Single(previewPermissions.GetProperty("response").GetProperty("changes").EnumerateArray()).GetProperty("path").GetString());
-            using var permissionApply = new StringContent(permissions, Encoding.UTF8, "application/json");
+            Assert.Equal(new[] { "/zones/member.test/notify/mode", "/zones/member.test/notify/nameServers",
+                "/zones/member.test/permissions/groups/everyone", "/zones/member.test/updates/mode", "/zones/member.test/updates/networkAcl",
+                "/zones/route.test/updates/mode", "/zones/route.test/updates/networkAcl" },
+                previewPermissions.GetProperty("response").GetProperty("changes").EnumerateArray()
+                    .Select(change => change.GetProperty("path").GetString()).Order(StringComparer.Ordinal));
+            using var permissionApply = new StringContent(replicaManifest, Encoding.UTF8, "application/json");
             LoopbackWebService.AssertOk(await replacement.CallAsync("settings/config/apply", replacement.AdminToken, permissionApply,
                 previewPermissions.GetProperty("response").GetProperty("revision").GetString()));
             await replacement.RestartAsync();
@@ -221,8 +233,21 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(restoredGrants);
             Assert.Contains(restoredGrants.GetProperty("response").GetProperty("groupPermissions").EnumerateArray(),
                 grant => grant.GetProperty("name").ValueEquals("Everyone") && grant.GetProperty("canView").GetBoolean());
-            Assert.DoesNotContain("member.test", replacement.Dns.AuthZoneManager.ManifestOwnedZones.Keys);
-            await AssertMigrationReapplyAsync(replacement, permissions);
+            JsonElement options = await replacement.CallAsync("zones/options/get?zone=member.test", replacement.AdminToken);
+            LoopbackWebService.AssertOk(options);
+            JsonElement restoredOptions = options.GetProperty("response");
+            Assert.Equal("cluster-catalog.cluster.test", restoredOptions.GetProperty("catalog").GetString());
+            Assert.Equal("SpecifiedNameServers", restoredOptions.GetProperty("notify").GetString());
+            Assert.Equal("192.0.2.80", Assert.Single(restoredOptions.GetProperty("notifyNameServers").EnumerateArray()).GetString());
+            Assert.Equal("UseSpecifiedNetworkACL", restoredOptions.GetProperty("update").GetString());
+            Assert.Equal("192.0.2.0/24", Assert.Single(restoredOptions.GetProperty("updateNetworkACL").EnumerateArray()).GetString());
+            Assert.Equal(new[] { "notify/mode", "notify/nameServers", "updates/mode", "updates/networkAcl" },
+                replacement.Dns.AuthZoneManager.ManifestOwnedZones["member.test"]);
+            JsonElement route = await replacement.CallAsync("zones/options/get?zone=route.test", replacement.AdminToken);
+            LoopbackWebService.AssertOk(route);
+            Assert.Equal("UseSpecifiedNetworkACL", route.GetProperty("response").GetProperty("update").GetString());
+            Assert.Single((await replacement.QueryAsync("www.member.test", DnsResourceRecordType.A)).Answer);
+            await AssertMigrationReapplyAsync(replacement, replicaManifest);
 
             async Task<JsonElement> ReadCatalogPermissionsAsync()
             {
@@ -254,9 +279,10 @@ namespace DnsServerCore.Tests
                 LoopbackWebService.AssertOk(await peer.CallAsync("zones/options/set", peer.AdminToken, catalog));
                 await peer.RestartAsync();
                 Assert.True(await WaitForAsync(async () =>
+                    (await peer.CallAsync("zones/options/get?zone=route.test", peer.AdminToken)).GetProperty("status").ValueEquals("ok") &&
                     (await peer.QueryAsync("www.member.test", DnsResourceRecordType.A)).Answer
                         .Any(record => record.RDATA is DnsARecordData answer && answer.Address.Equals(IPAddress.Parse("192.0.2.42")))),
-                    "The Secondary did not transfer the restored member zone.");
+                    "The Secondary did not transfer both restored member zones.");
             }
 
             async Task<JsonElement> ReadStateAsync()

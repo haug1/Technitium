@@ -936,7 +936,8 @@ namespace DnsServerCore
                 {
                     string path = AuthZoneManager.GetManifestZonePath(zoneInfo.Name);
                     jsonWriter.WriteStartArray("managedSettings");
-                    jsonWriter.WriteStringValue(path);
+                    if (zoneInfo.ApexZone.SecondaryCatalogZone is null)
+                        jsonWriter.WriteStringValue(path);
                     foreach (string field in ownedFields)
                         jsonWriter.WriteStringValue(path + "/" + field);
                     jsonWriter.WriteEndArray();

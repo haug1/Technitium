@@ -899,10 +899,11 @@ namespace DnsServerCore.Configuration
                 {
                     string path = AppendPath("/zones", zone.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(zone.Name, path, allowRoot: true);
-                    if (ConfigurationPermissions.IsZonePermissionOnly(zone.Value))
+                    AuthZoneInfo current = cluster.DnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(name);
+                    if (ConfigurationPermissions.IsZonePermissionOnly(zone.Value) ||
+                        ConfigurationZonePolicies.IsReplicaLocalDeclaration(zone.Value, current))
                         continue;
                     CheckClusterZoneTarget(cluster, name, path);
-                    AuthZoneInfo current = cluster.DnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(name);
                     AuthZoneType type = current?.Type ?? AuthZoneType.Primary;
                     if (current is null && zone.Value.ValueKind == JsonValueKind.Object &&
                         zone.Value.TryGetProperty("type", out JsonElement declaredType))

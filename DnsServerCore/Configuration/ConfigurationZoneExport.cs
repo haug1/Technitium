@@ -30,17 +30,32 @@ namespace DnsServerCore.Configuration
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
                 Permission permission = getPermission?.Invoke(zone.Name);
-                if (isClusterInfrastructure(zone.Name))
+                bool infrastructure = isClusterInfrastructure(zone.Name);
+                if (infrastructure || catalogType == AuthZoneType.SecondaryCatalog)
                 {
-                    if (OperatorGrants(permission).Any())
-                        result.Add(name, new JsonObject { ["permissions"] = ConfigurationPermissions.ExportGrants(permission, includeBuiltInZoneGroups: false) });
-                    continue;
-                }
-                if (catalogType == AuthZoneType.SecondaryCatalog)
-                {
-                    Permission catalogPermission = canView(catalog) ? getPermission?.Invoke(catalog) : null;
+                    var local = new JsonObject();
+                    if (catalogType == AuthZoneType.SecondaryCatalog)
+                    {
+                        if (zone.Type == AuthZoneType.Secondary && (zone.Notify != AuthZoneNotify.None || zone.NotifyNameServers is { Count: > 0 }))
+                            local["notify"] = JsonSerializer.SerializeToNode(new
+                            {
+                                mode = zone.Notify.ToString(),
+                                nameServers = zone.NotifyNameServers?.Select(address => address.ToString()) ?? []
+                            });
+                        if (zone.Type is AuthZoneType.Secondary or AuthZoneType.SecondaryForwarder &&
+                            (zone.Update != AuthZoneUpdate.Deny || zone.UpdateNetworkACL is { Count: > 0 }))
+                            local["updates"] = JsonSerializer.SerializeToNode(new
+                            {
+                                mode = zone.Update.ToString(),
+                                networkAcl = zone.UpdateNetworkACL?.Select(rule => rule.ToString()) ?? []
+                            });
+                    }
+                    Permission catalogPermission = !infrastructure && catalog is not null && canView(catalog)
+                        ? getPermission?.Invoke(catalog) : null;
                     if (permission is not null && !OperatorGrants(permission).SequenceEqual(OperatorGrants(catalogPermission)))
-                        result.Add(name, new JsonObject { ["permissions"] = ConfigurationPermissions.ExportGrants(permission) });
+                        local["permissions"] = ConfigurationPermissions.ExportGrants(permission, includeBuiltInZoneGroups: !infrastructure);
+                    if (local.Count > 0)
+                        result.Add(name, local);
                     continue;
                 }
                 if ((zone.ApexZone is not (PrimaryZone or ForwarderZone) &&
