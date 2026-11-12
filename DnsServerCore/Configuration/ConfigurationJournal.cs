@@ -10,6 +10,7 @@ namespace DnsServerCore.Configuration
     {
         private const string PendingName = ".manifest-pending";
         private const string StagingName = ".manifest-staging";
+        private const string AppRemovalsName = "app-removals";
         private const string AppActivationPendingName = ".manifest-app-activation-pending";
         private const string AppActivationStagingName = ".manifest-app-activation-staging";
 
@@ -44,6 +45,18 @@ namespace DnsServerCore.Configuration
             {
                 foreach (string directory in Directory.EnumerateDirectories(apps))
                     RestoreResourceFiles(Path.Combine("apps", Path.GetFileName(directory)));
+            }
+
+            string removals = Path.Combine(pending, AppRemovalsName);
+            if (Directory.Exists(removals))
+            {
+                foreach (string directory in Directory.EnumerateDirectories(removals))
+                {
+                    string name = Path.GetFileName(directory);
+                    string previous = Path.Combine(directory, "previous");
+                    if (ConfigurationApplications.IsSafeName(name) && Directory.Exists(previous))
+                        Directory.Move(previous, Path.Combine(configFolder, "apps", name));
+                }
             }
 
             Directory.Move(pending, staging);
@@ -127,6 +140,14 @@ namespace DnsServerCore.Configuration
             Directory.Move(staging, pending);
         }
 
+        internal static string AppRemovalPath(string name) => Path.Combine(AppRemovalsName, name);
+
+        internal static void StageAppRemoval(string configFolder, string name)
+        {
+            string previous = Path.Combine(configFolder, PendingName, AppRemovalPath(name), "previous");
+            Directory.Move(Path.Combine(configFolder, "apps", name), previous);
+        }
+
         private static void Restore(string configFolder, string pending, string fileName)
         {
             string entry = Path.Combine(pending, fileName);
@@ -160,6 +181,7 @@ namespace DnsServerCore.Configuration
 
             return directory switch
             {
+                AppRemovalsName => ConfigurationApplications.IsSafeName(name),
                 "zones" => name.EndsWith(".zone", StringComparison.Ordinal) &&
                     !name.Contains('*') && !name.Contains('\\') && !name.Contains('/'),
                 "scopes" => name == Dhcp.DhcpServer.ManifestOwnershipFile ||

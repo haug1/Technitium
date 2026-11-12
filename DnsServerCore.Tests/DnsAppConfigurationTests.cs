@@ -145,7 +145,28 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(await server.CallAsync("apps/config/set?name=FilterAaaa", server.AdminToken, enabled));
             Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
 
-            async Task<string> PreviewAsync(string input, bool expectChanges = true)
+            string appFolder = Path.GetDirectoryName(appFile)!;
+            string removalJournal = Path.Combine(server.ConfigurationDirectory, ".manifest-pending", "app-removals", "FilterAaaa");
+            Directory.CreateDirectory(removalJournal);
+            Directory.Move(appFolder, Path.Combine(removalJournal, "previous"));
+            await server.RestartAsync();
+            Assert.Empty((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+
+            const string remove = """{"schemaVersion":1,"apps":{"packages":{"FilterAaaa":null}}}""";
+            revision = await PreviewAsync(remove, changePath: "/apps/packages/FilterAaaa");
+            using (var body = new StringContent(remove, Encoding.UTF8, "application/json"))
+                LoopbackWebService.AssertOk(await server.CallAsync("settings/config/apply", server.AdminToken, body, revision));
+            Assert.False(Directory.Exists(appFolder));
+            Assert.Single((await server.QueryAsync("www.example.test", DnsResourceRecordType.AAAA)).Answer);
+            await server.RestartAsync();
+            await PreviewAsync(remove, expectChanges: false);
+            using var reinstall = new MultipartFormDataContent();
+            reinstall.Add(new ByteArrayContent(package.ToArray()), "file", "filter-aaaa.zip");
+            JsonElement blockedInstall = await server.CallAsync("apps/install?name=FilterAaaa", server.AdminToken, reinstall);
+            Assert.Equal("error", blockedInstall.GetProperty("status").GetString());
+            Assert.Contains("/apps/packages/FilterAaaa", blockedInstall.GetProperty("errorMessage").GetString());
+
+            async Task<string> PreviewAsync(string input, bool expectChanges = true, string changePath = "/apps/packages/FilterAaaa/configuration")
             {
                 using var body = new StringContent(input, Encoding.UTF8, "application/json");
                 JsonElement plan = await server.CallAsync("settings/config/plan", server.AdminToken, body);
@@ -153,7 +174,7 @@ namespace DnsServerCore.Tests
                 JsonElement response = plan.GetProperty("response");
                 if (expectChanges)
                     Assert.Contains(response.GetProperty("changes").EnumerateArray(),
-                        change => change.GetProperty("path").ValueEquals("/apps/packages/FilterAaaa/configuration"));
+                        change => change.GetProperty("path").ValueEquals(changePath));
                 else
                     Assert.Empty(response.GetProperty("changes").EnumerateArray());
                 return response.GetProperty("revision").GetString()!;

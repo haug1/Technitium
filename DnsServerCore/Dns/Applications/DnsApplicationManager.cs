@@ -429,6 +429,13 @@ namespace DnsServerCore.Dns.Applications
             return false;
         }
 
+        private bool OwnsAppAbsence(string name)
+        {
+            StringComparer comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            return _manifestOwnedPaths.Contains(ConfigurationApplications.Path) ||
+                (_manifestOwnedPaths.Contains(ConfigurationApplications.AppPath(name), comparer) && !_applications.Keys.Contains(name, comparer));
+        }
+
         internal void CheckManifestRestore(ZipArchive archive, bool deleteExistingFiles, bool isConfigTransfer = false)
         {
             var paths = _manifestOwnedPaths;
@@ -436,6 +443,19 @@ namespace DnsServerCore.Dns.Applications
                 return;
 
             var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            string root = Path.GetFullPath(_appsPath) + Path.DirectorySeparatorChar;
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal) || entry.FullName == "apps/")
+                    continue;
+                string target = Path.GetFullPath(Path.Combine(_dnsServer.ConfigFolder, entry.FullName));
+                if (!target.StartsWith(root, comparison))
+                    throw new InvalidDataException("App backup paths must stay inside the apps directory.");
+                string name = target[root.Length..].Split(Path.DirectorySeparatorChar, 2)[0];
+                if (OwnsAppAbsence(name))
+                    throw new InvalidDataException($"{ConfigurationApplications.AppPath(name)}: Restore would recreate a manifest-managed absent app.");
+            }
+
             foreach (DnsApplication app in _applications.Values.OrderBy(app => app.Name, StringComparer.Ordinal))
             {
                 string path = ConfigurationApplications.AppPath(app.Name);
@@ -492,6 +512,41 @@ namespace DnsServerCore.Dns.Applications
 
         internal void PublishManifestOwnership(string[] paths) => _manifestOwnedPaths = paths;
 
+        internal void DetachManifestApp(DnsApplication app)
+        {
+            if (!_applications.TryRemove(app.Name, out _))
+                throw new InvalidOperationException("The app is no longer installed.");
+            app.ConfigUpdated -= Application_ConfigUpdated;
+            try
+            {
+                RefreshAppObjectLists();
+            }
+            catch
+            {
+                ReattachManifestApp(app);
+                throw;
+            }
+        }
+
+        internal void ReattachManifestApp(DnsApplication app)
+        {
+            _applications[app.Name] = app;
+            app.ConfigUpdated += Application_ConfigUpdated;
+            RefreshAppObjectLists();
+        }
+
+        internal void DisposeManifestApp(DnsApplication app)
+        {
+            try
+            {
+                app.Dispose();
+            }
+            catch (Exception)
+            {
+                _dnsServer.LogManager.Write("Could not dispose the removed DNS application '" + app.Name + "'.");
+            }
+        }
+
         internal string ConfigurationFolder => _dnsServer.ConfigFolder;
 
         internal Task EnterManifestGateAsync() => _opsLock.WaitAsync();
@@ -508,6 +563,9 @@ namespace DnsServerCore.Dns.Applications
                     if (applicationName.Contains(invalidChar))
                         throw new DnsServerException("The application name contains an invalid character: " + invalidChar);
                 }
+
+                if (OwnsAppAbsence(applicationName))
+                    throw new InvalidDataException($"{ConfigurationApplications.AppPath(applicationName)}: App absence is managed by the manifest.");
 
                 if (_applications.ContainsKey(applicationName))
                     throw new DnsServerException("DNS application already exists: " + applicationName);

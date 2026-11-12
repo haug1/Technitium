@@ -1038,6 +1038,9 @@ namespace DnsServerCore
                     return null;
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, user, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
+                if (ConfigurationApplications.DeclaresRemovals(manifest) &&
+                    !_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, user, PermissionFlag.Delete))
+                    throw new DnsWebServiceException("Access was denied.");
                 return ConfigurationApplications.Prepare(manifest, _dnsWebService._dnsServer.DnsApplicationManager);
             }
 

@@ -23,11 +23,15 @@ namespace DnsServerCore.Configuration
             if (!IsDeclared(manifest))
                 return [];
             JsonElement packages = manifest.Settings.GetProperty("apps").GetProperty("packages");
+            if (packages.ValueKind == JsonValueKind.Null)
+                return [Path];
             var paths = new SortedSet<string>(StringComparer.Ordinal);
             foreach (JsonProperty item in packages.EnumerateObject())
             {
                 string path = AppPath(item.Name);
                 paths.Add(path);
+                if (item.Value.ValueKind == JsonValueKind.Null)
+                    continue;
                 if (item.Value.TryGetProperty("configuration", out _))
                     paths.Add(path + "/configuration");
                 if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null)
@@ -36,10 +40,11 @@ namespace DnsServerCore.Configuration
             return paths.ToArray();
         }
 
-        internal sealed record Entry(DnsApplication Application, string Before, string After)
+        internal sealed record Entry(DnsApplication Application, string Before, string After, bool Remove = false)
         {
-            internal string SettingPath => ConfigurationPlan.AppendPath(Path, Application.Name) + "/configuration";
-            internal string FileName => System.IO.Path.Combine("apps", Application.Name, DnsApplication.ConfigurationFileName);
+            internal string SettingPath => AppPath(Application.Name) + (Remove ? "" : "/configuration");
+            internal string FileName => Remove ? ConfigurationJournal.AppRemovalPath(Application.Name) :
+                System.IO.Path.Combine("apps", Application.Name, DnsApplication.ConfigurationFileName);
         }
 
         internal static bool IsDeclared(ConfigurationManifest manifest) => manifest is not null &&
@@ -51,7 +56,7 @@ namespace DnsServerCore.Configuration
                 return null;
             JsonElement packages = manifest.Settings.GetProperty("apps").GetProperty("packages");
             if (packages.ValueKind == JsonValueKind.Null)
-                throw new InvalidDataException($"{Path}: Removing app packages is not implemented.");
+                return manager.Applications.Values.OrderBy(app => app.Name, StringComparer.Ordinal).Select(Removal).ToArray();
 
             var entries = new List<Entry>();
             foreach (JsonProperty item in packages.EnumerateObject().OrderBy(entry => entry.Name, StringComparer.Ordinal))
@@ -59,8 +64,15 @@ namespace DnsServerCore.Configuration
                 string path = ConfigurationPlan.AppendPath(Path, item.Name);
                 if (!IsSafeName(item.Name))
                     throw new InvalidDataException($"{path}: Invalid app name.");
+                if (OperatingSystem.IsWindows() && !manager.Applications.ContainsKey(item.Name) &&
+                    manager.Applications.Keys.Contains(item.Name, StringComparer.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"{path}: Use the installed app name with its original casing.");
                 if (item.Value.ValueKind == JsonValueKind.Null)
-                    throw new InvalidDataException($"{path}: Removing app packages is not implemented.");
+                {
+                    if (manager.Applications.TryGetValue(item.Name, out DnsApplication installed))
+                        entries.Add(Removal(installed));
+                    continue;
+                }
                 if (item.Value.TryGetProperty("source", out JsonElement source) && source.ValueKind != JsonValueKind.Null)
                     throw new InvalidDataException($"{path}/source: Installing packages from a manifest is not implemented.");
                 if (!manager.Applications.TryGetValue(item.Name, out DnsApplication app))
@@ -84,6 +96,14 @@ namespace DnsServerCore.Configuration
                 entries.Add(new Entry(app, before, after));
             }
             return entries.ToArray();
+
+            static Entry Removal(DnsApplication app) => new(app, app.ReadManifestConfig(), null, Remove: true);
+        }
+
+        internal static bool DeclaresRemovals(ConfigurationManifest manifest)
+        {
+            JsonElement packages = manifest.Settings.GetProperty("apps").GetProperty("packages");
+            return packages.ValueKind == JsonValueKind.Null || packages.EnumerateObject().Any(entry => entry.Value.ValueKind == JsonValueKind.Null);
         }
 
         internal static bool IsSafeName(string name) => !string.IsNullOrWhiteSpace(name) && name is not ("." or "..") &&
@@ -96,6 +116,7 @@ namespace DnsServerCore.Configuration
             {
                 writer.WriteStartObject(entry.SettingPath);
                 writer.WriteString("version", entry.Application.Version.ToString());
+                writer.WriteBoolean("remove", entry.Remove);
                 writer.WriteString("before", Fingerprint(entry.Before));
                 writer.WriteString("after", Fingerprint(entry.After));
                 writer.WriteEndObject();
@@ -110,6 +131,11 @@ namespace DnsServerCore.Configuration
         {
             foreach (JsonProperty entry in snapshot.EnumerateObject())
             {
+                if (entry.Value.GetProperty("remove").GetBoolean())
+                {
+                    changes.Add(new ConfigurationChange(entry.Name, ConfigurationChangeKind.Remove, false));
+                    continue;
+                }
                 JsonElement before = entry.Value.GetProperty("before");
                 JsonElement after = entry.Value.GetProperty("after");
                 if (!JsonElement.DeepEquals(before, after))
@@ -142,6 +168,7 @@ namespace DnsServerCore.Configuration
 
             await manager.EnterManifestGateAsync();
             var activated = new List<Entry>();
+            var removed = new List<DnsApplication>();
             try
             {
                 bool ownershipChanged = !manager.ManagedPaths.SequenceEqual(ownership);
@@ -152,7 +179,8 @@ namespace DnsServerCore.Configuration
                         !ReferenceEquals(current, entry.Application) || current.ReadManifestConfig() != entry.Before)
                         throw new InvalidDataException($"{entry.SettingPath}: The app changed during apply. Create a new preview.");
                 }
-                Entry[] changed = entries.Where(entry => entry.Before != entry.After).ToArray();
+                Entry[] changed = entries.Where(entry => !entry.Remove && entry.Before != entry.After).ToArray();
+                Entry[] removals = entries.Where(entry => entry.Remove).ToArray();
                 string[] files = changed.Select(entry => entry.FileName).ToArray();
                 await ConfigurationJournal.ActivateAppsAsync(manager.ConfigurationFolder, files, async () =>
                 {
@@ -171,21 +199,33 @@ namespace DnsServerCore.Configuration
                     }
                 });
 
-                await commit(changed.Length > 0 || ownershipChanged ? Write : null,
-                    ownershipChanged ? [.. files, OwnershipFile] : files);
+                foreach (Entry entry in removals)
+                {
+                    manager.DetachManifestApp(entry.Application);
+                    removed.Add(entry.Application);
+                }
+                string[] resources = [.. files, .. removals.Select(entry => entry.FileName)];
+                await commit(resources.Length > 0 || ownershipChanged ? Write : null,
+                    ownershipChanged ? [.. resources, OwnershipFile] : resources);
                 if (ownershipChanged)
                     manager.PublishManifestOwnership(ownership);
+                foreach (DnsApplication app in removed)
+                    manager.DisposeManifestApp(app);
 
                 void Write()
                 {
                     foreach (Entry entry in changed)
                         entry.Application.WriteManifestConfig(entry.After);
+                    foreach (Entry entry in removals)
+                        ConfigurationJournal.StageAppRemoval(manager.ConfigurationFolder, entry.Application.Name);
                     if (ownershipChanged)
                         manager.WriteManifestOwnership(ownership);
                 }
             }
             catch
             {
+                foreach (DnsApplication app in removed)
+                    manager.ReattachManifestApp(app);
                 string failedRollbackPath = null;
                 await ConfigurationJournal.ActivateAppsAsync(manager.ConfigurationFolder,
                     activated.Select(entry => entry.FileName).ToArray(), async () =>
