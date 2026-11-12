@@ -8,7 +8,7 @@
 
 ## Build and Run
 
-Use the .NET 10 SDK. Clone `TechnitiumLibrary` beside this checkout and build its ByteTree, Net, and Security.OTP projects in Release mode. The DNS server projects reference the sibling repository's compiled assemblies. Follow [build.md](build.md) for the dependency commands and Windows packaging instructions.
+On Linux, run `nix develop` from the repository root for the pinned .NET 10 SDK. Build the sibling `TechnitiumLibrary` checkout in Release mode before building or testing the server. See [build.md](build.md) for dependency commands and Windows packaging instructions.
 
 - `dotnet publish DnsServerApp/DnsServerApp.csproj -c Release` builds and publishes the server and its web assets.
 - `dotnet run --project DnsServerApp/DnsServerApp.csproj -- --portable-app --stop-if-bind-fails /path/to/scratch-config` runs the server with an isolated configuration directory. Check the printed console URL and make sure the configured listener ports are available.
