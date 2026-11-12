@@ -952,6 +952,10 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
+                var appTransfers = isConfigTransfer && apps ? DnsApplicationManager.ReadClusterTransfer(backupZip) : null;
+                if (appTransfers is not null)
+                    _dnsServer.DnsApplicationManager.CheckClusterTransfer(appTransfers);
+
                 if (isConfigTransfer && authConfig && _authManager.HasManagedAuthSettings &&
                     backupZip.GetEntry("auth.config") is ZipArchiveEntry managedAuth)
                 {
@@ -961,8 +965,6 @@ namespace DnsServerCore
 
                 if (isConfigTransfer)
                 {
-                    if (apps)
-                        _dnsServer.DnsApplicationManager.CheckManifestRestore(backupZip, deleteExistingFiles, isConfigTransfer: true);
                     CheckManagedDomainLists(backupZip, allowedZones, blockedZones, isConfigTransfer: true);
                 }
 
@@ -1350,101 +1352,7 @@ namespace DnsServerCore
                     {
                         if (isConfigTransfer)
                         {
-                            //install or update app from zip
-                            foreach (ZipArchiveEntry entry in backupZip.Entries)
-                            {
-                                if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal))
-                                    continue;
-
-                                string[] fullNameParts = entry.FullName.Split('/');
-                                if (fullNameParts.Length < 3)
-                                    continue;
-
-                                string applicationName = fullNameParts[1];
-                                string applicationZipFile = fullNameParts[2];
-
-                                if (!applicationZipFile.Equals(applicationName + ".zip", StringComparison.Ordinal))
-                                    continue;
-
-                                if (_dnsServer.DnsApplicationManager.Applications.TryGetValue(applicationName, out _))
-                                {
-                                    //update existing app
-                                    await using (Stream s = entry.Open())
-                                    {
-                                        await _dnsServer.DnsApplicationManager.UpdateApplicationAsync(applicationName, s);
-                                    }
-                                }
-                                else
-                                {
-                                    //install new app
-                                    await using (Stream s = entry.Open())
-                                    {
-                                        await _dnsServer.DnsApplicationManager.InstallApplicationAsync(applicationName, s);
-                                    }
-                                }
-                            }
-
-                            //update app config
-                            DnsApplicationManager appManager = _dnsServer.DnsApplicationManager;
-                            foreach (ZipArchiveEntry entry in backupZip.Entries)
-                            {
-                                if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal))
-                                    continue;
-
-                                string[] fullNameParts = entry.FullName.Split('/');
-                                if (fullNameParts.Length != 3)
-                                    continue;
-
-                                string applicationName = fullNameParts[1];
-                                string configFile = fullNameParts[2];
-
-                                bool clear = configFile == DnsApplicationManager.ClusterConfigAbsentEntry;
-                                if (!clear && configFile != DnsApplication.ConfigurationFileName)
-                                    continue;
-
-                                if (appManager.Applications.TryGetValue(applicationName, out DnsApplication application))
-                                {
-                                    if (clear)
-                                    {
-                                        await appManager.SetApplicationConfigAsync(application, null, skipUnchanged: true);
-                                        continue;
-                                    }
-
-                                    using var reader = new StreamReader(entry.Open(), true);
-                                    string config = await reader.ReadToEndAsync();
-                                    try
-                                    {
-                                        await appManager.SetApplicationConfigAsync(application, config);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        _log.Write(ex);
-                                    }
-                                }
-                            }
-
-                            //remove apps that are not in the zip file
-                            HashSet<string> existingApplications = new HashSet<string>();
-
-                            foreach (ZipArchiveEntry entry in backupZip.Entries)
-                            {
-                                if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal))
-                                    continue;
-
-                                string[] fullNameParts = entry.FullName.Split('/');
-                                if (fullNameParts.Length < 2)
-                                    continue;
-
-                                string applicationName = fullNameParts[1];
-
-                                existingApplications.Add(applicationName);
-                            }
-
-                            foreach (KeyValuePair<string, DnsApplication> application in _dnsServer.DnsApplicationManager.Applications)
-                            {
-                                if (!existingApplications.Contains(application.Key))
-                                    await _dnsServer.DnsApplicationManager.UninstallApplicationAsync(application.Key);
-                            }
+                            await _dnsServer.DnsApplicationManager.ApplyClusterTransferAsync(appTransfers);
                         }
                         else
                         {

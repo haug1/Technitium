@@ -64,7 +64,8 @@ namespace DnsServerCore.Dns.Applications
         const int APP_UPDATE_TIMER_INITIAL_INTERVAL = 10000;
         const int APP_UPDATE_TIMER_PERIODIC_INTERVAL = 86400000;
 
-        internal const string ClusterConfigAbsentEntry = ".config-absent";
+        private const string ClusterConfigAbsentEntry = ".config-absent";
+        private const string ClusterAppExistsEntry = ".exists";
 
         private string[] _manifestOwnedPaths = [];
         internal IReadOnlyList<string> ManagedPaths => _manifestOwnedPaths;
@@ -484,7 +485,7 @@ namespace DnsServerCore.Dns.Applications
                     }
 
                     if (!fileAdded)
-                        _ = backupZip.CreateEntry("apps/" + applicationName + "/.exists", CompressionLevel.Optimal);
+                        _ = backupZip.CreateEntry("apps/" + applicationName + "/" + ClusterAppExistsEntry, CompressionLevel.Optimal);
                 }
             }
             finally
@@ -493,7 +494,129 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
-        internal void CheckManifestRestore(ZipArchive archive, bool deleteExistingFiles, bool isConfigTransfer = false)
+        internal sealed class ClusterAppTransfer
+        {
+            internal ZipArchiveEntry Package;
+            internal ZipArchiveEntry Configuration;
+            internal bool ClearConfiguration;
+            internal bool ExistsOnly;
+        }
+
+        internal static Dictionary<string, ClusterAppTransfer> ReadClusterTransfer(ZipArchive archive)
+        {
+            var transfers = new Dictionary<string, ClusterAppTransfer>(StringComparer.Ordinal);
+            var comparison = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var spellings = new HashSet<string>(comparison);
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                if (!entry.FullName.StartsWith("apps/", StringComparison.Ordinal))
+                    continue;
+
+                string[] parts = entry.FullName.Split('/');
+                if (parts.Length != 3 || !ConfigurationApplications.IsSafeName(parts[1]))
+                    throw new InvalidDataException("Invalid app entry in the cluster configuration transfer.");
+
+                string name = parts[1];
+                if (!transfers.TryGetValue(name, out ClusterAppTransfer transfer))
+                {
+                    if (!spellings.Add(name))
+                        throw new InvalidDataException("Conflicting app names in the cluster configuration transfer.");
+                    transfer = new ClusterAppTransfer();
+                    transfers.Add(name, transfer);
+                }
+
+                string path = ConfigurationApplications.AppPath(name);
+                string file = parts[2];
+                if (file == name + ".zip" && !transfer.ExistsOnly && transfer.Package is null)
+                    transfer.Package = entry;
+                else if (file == DnsApplication.ConfigurationFileName && !transfer.ExistsOnly && transfer.Configuration is null && !transfer.ClearConfiguration)
+                    transfer.Configuration = entry;
+                else if (file == ClusterConfigAbsentEntry && entry.Length == 0 && !transfer.ExistsOnly && transfer.Configuration is null && !transfer.ClearConfiguration)
+                    transfer.ClearConfiguration = true;
+                else if (file == ClusterAppExistsEntry && entry.Length == 0 && !transfer.ExistsOnly && transfer.Package is null && transfer.Configuration is null && !transfer.ClearConfiguration)
+                    transfer.ExistsOnly = true;
+                else
+                    throw new InvalidDataException($"{path}: Unexpected or duplicate entry in the cluster configuration transfer.");
+            }
+            return transfers;
+        }
+
+        internal async Task ApplyClusterTransferAsync(Dictionary<string, ClusterAppTransfer> transfers)
+        {
+            foreach (var (name, transfer) in transfers)
+            {
+                if (transfer.Package is null)
+                    continue;
+                await using Stream stream = transfer.Package.Open();
+                if (_applications.ContainsKey(name))
+                    await UpdateApplicationAsync(name, stream);
+                else
+                    await InstallApplicationAsync(name, stream);
+            }
+
+            foreach (var (name, transfer) in transfers)
+            {
+                if (!_applications.TryGetValue(name, out DnsApplication app))
+                    continue;
+                if (transfer.ClearConfiguration)
+                {
+                    await SetApplicationConfigAsync(app, null, skipUnchanged: true);
+                    continue;
+                }
+                if (transfer.Configuration is null)
+                    continue;
+
+                using var reader = new StreamReader(transfer.Configuration.Open(), true);
+                string config = await reader.ReadToEndAsync();
+                try
+                {
+                    await SetApplicationConfigAsync(app, config);
+                }
+                catch (Exception ex)
+                {
+                    _dnsServer.LogManager.Write(ex);
+                }
+            }
+
+            foreach (string name in _applications.Keys)
+            {
+                if (!transfers.ContainsKey(name))
+                    await UninstallApplicationAsync(name);
+            }
+        }
+
+        internal void CheckClusterTransfer(IReadOnlyDictionary<string, ClusterAppTransfer> transfers)
+        {
+            var paths = _manifestOwnedPaths;
+            if (paths.Length == 0)
+                return;
+
+            foreach (string name in transfers.Keys)
+            {
+                if (OwnsAppAbsence(name))
+                    throw new InvalidDataException($"{ConfigurationApplications.AppPath(name)}: Cluster transfer would recreate a manifest-managed absent app.");
+            }
+
+            foreach (DnsApplication app in _applications.Values.OrderBy(app => app.Name, StringComparer.Ordinal))
+            {
+                string path = ConfigurationApplications.AppPath(app.Name);
+                if (!paths.Contains(path))
+                    continue;
+                if (!transfers.TryGetValue(app.Name, out ClusterAppTransfer transfer))
+                    throw new InvalidDataException($"{path}: Cluster transfer would replace manifest-managed app membership.");
+                if (transfer.Package is not null && IsPackageUpdateManaged(app.Name))
+                    throw new InvalidDataException($"{path}: Cluster transfer would update a managed package.");
+                if (!paths.Contains(path + "/configuration"))
+                    continue;
+                if (transfer.ClearConfiguration && app.ReadManifestConfig() is not null)
+                    throw new InvalidDataException($"{path}/configuration: Cluster transfer would clear a managed app configuration.");
+                if (transfer.Configuration is not null &&
+                    !MatchesFile(Path.Combine(app.DnsServer.ApplicationFolder, DnsApplication.ConfigurationFileName), transfer.Configuration))
+                    throw new InvalidDataException($"{path}/configuration: Cluster transfer would change a managed app configuration.");
+            }
+        }
+
+        internal void CheckManifestRestore(ZipArchive archive, bool deleteExistingFiles)
         {
             var paths = _manifestOwnedPaths;
             if (paths.Length == 0)
@@ -518,9 +641,7 @@ namespace DnsServerCore.Dns.Applications
                 string path = ConfigurationApplications.AppPath(app.Name);
                 if (!paths.Contains(path))
                     continue;
-                string archiveFolder = "apps/" + app.Name + "/";
-                if (deleteExistingFiles || isConfigTransfer &&
-                    !archive.Entries.Any(entry => entry.FullName.StartsWith(archiveFolder, comparison)))
+                if (deleteExistingFiles)
                     throw new InvalidDataException($"{path}: Restore would replace manifest-managed app membership.");
 
                 if (!IsPackageUpdateManaged(app.Name))
@@ -533,29 +654,23 @@ namespace DnsServerCore.Dns.Applications
                     string target = Path.GetFullPath(Path.Combine(_dnsServer.ConfigFolder, entry.FullName));
                     if (!target.StartsWith(folder, comparison))
                         continue;
-                    if (isConfigTransfer && entry.FullName.Equals(archiveFolder + ".exists", comparison))
-                        continue;
-                    if (isConfigTransfer && entry.FullName.Equals(archiveFolder + ClusterConfigAbsentEntry, comparison))
-                    {
-                        if (paths.Contains(path + "/configuration") && app.ReadManifestConfig() is not null)
-                            throw new InvalidDataException($"{path}/configuration: Cluster transfer would clear a managed app configuration.");
-                        continue;
-                    }
                     bool config = Path.GetFileName(target).Equals(DnsApplication.ConfigurationFileName, comparison);
                     if (config && !paths.Contains(path + "/configuration"))
                         continue;
-                    if (isConfigTransfer && !config)
-                        throw new InvalidDataException($"{path}: Cluster transfer would update a managed package.");
-                    if (File.Exists(target))
-                    {
-                        using Stream current = File.OpenRead(target);
-                        using Stream candidate = entry.Open();
-                        if (SHA256.HashData(current).AsSpan().SequenceEqual(SHA256.HashData(candidate)))
-                            continue;
-                    }
+                    if (MatchesFile(target, entry))
+                        continue;
                     throw new InvalidDataException($"{path}/{(config ? "configuration" : "version")}: Restore would change a managed app.");
                 }
             }
+        }
+
+        private static bool MatchesFile(string file, ZipArchiveEntry entry)
+        {
+            if (!File.Exists(file))
+                return false;
+            using Stream current = File.OpenRead(file);
+            using Stream candidate = entry.Open();
+            return SHA256.HashData(current).AsSpan().SequenceEqual(SHA256.HashData(candidate));
         }
 
         internal void WriteManifestOwnership(string[] paths)

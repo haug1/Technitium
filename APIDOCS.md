@@ -7677,6 +7677,8 @@ The Transfer Config call is used by Secondary nodes to  sync the complete config
 
 The transfer ZIP uses an empty `apps/<name>/.config-absent` entry when an installed app has no configuration file. A Secondary that recognizes this entry clears any stored configuration for the app and keeps the package installed. Older Secondaries ignore this entry.
 
+App entries use the paths `apps/<name>/<name>.zip` for a package and `apps/<name>/dnsApp.config` for its configuration. An empty `apps/<name>/.exists` entry represents an installed app with no file changes in the transfer. The Secondary checks for malformed, duplicate, and contradictory app entries before applying the archive.
+
 URL:\
 `http://localhost:5380/api/admin/cluster/primary/transferConfig?includeZones=`
 
