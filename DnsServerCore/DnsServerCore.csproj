@@ -22,6 +22,7 @@
 
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+		<InternalsVisibleTo Include="DnsServerCore.Tests" />
 	</ItemGroup>
 
 	<ItemGroup>

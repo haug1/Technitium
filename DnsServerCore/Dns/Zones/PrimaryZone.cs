@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore.Dns.Dnssec;
 using DnsServerCore.Dns.ResourceRecords;
+using DnsServerCore.Dns.Trees;
 using DnsServerCore.Dns.ZoneManagers;
 using System;
 using System.Collections.Generic;
@@ -489,6 +490,15 @@ namespace DnsServerCore.Dns.Zones
 
         public void SignZone(IReadOnlyCollection<DnssecPrivateKey> dnssecPrivateKeys, uint dnsKeyTtl, bool useNSec3, ushort iterations = 0, byte[] salt = null)
         {
+            SignZone(dnssecPrivateKeys, dnsKeyTtl, useNSec3, iterations, salt, stagedTree: null);
+        }
+
+        internal void SignZone(IReadOnlyCollection<DnssecPrivateKey> dnssecPrivateKeys, uint dnsKeyTtl, bool useNSec3, ushort iterations, byte[] salt, AuthZoneTree stagedTree)
+        {
+            // A staged signing operation must target the apex held by the detached tree.
+            if (stagedTree is not null && !ReferenceEquals(stagedTree.GetApexZone(_name), this))
+                throw new ArgumentException("The staging tree does not contain this primary zone.", nameof(stagedTree));
+
             //do validations
             if (_dnssecStatus != AuthZoneDnssecStatus.Unsigned)
                 throw new DnsServerException("Cannot sign zone: the zone is already signed.");
@@ -537,7 +547,9 @@ namespace DnsServerCore.Dns.Zones
 
             try
             {
-                IReadOnlyList<AuthZone> zones = _dnsServer.AuthZoneManager.GetApexZoneWithSubDomainZones(_name);
+                IReadOnlyList<AuthZone> zones = stagedTree is null
+                    ? _dnsServer.AuthZoneManager.GetApexZoneWithSubDomainZones(_name)
+                    : stagedTree.GetApexZoneWithSubDomainZones(_name);
 
                 //find max record ttl in zone
                 uint maxRecordTtl = 0;
@@ -610,7 +622,7 @@ namespace DnsServerCore.Dns.Zones
 
                 if (useNSec3)
                 {
-                    EnableNSec3(zones, iterations, salt);
+                    EnableNSec3(zones, iterations, salt, stagedTree);
                     _dnssecStatus = AuthZoneDnssecStatus.SignedWithNSEC3;
                 }
                 else
@@ -633,10 +645,12 @@ namespace DnsServerCore.Dns.Zones
                     }
                 }
 
-                _dnssecTimer = new Timer(DnssecTimerCallback, null, DNSSEC_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
+                if (stagedTree is null)
+                    _dnssecTimer = new Timer(DnssecTimerCallback, null, DNSSEC_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
 
                 CommitAndIncrementSerial(deletedRecords, addedRecords);
-                TriggerNotify();
+                if (stagedTree is null)
+                    TriggerNotify();
             }
             catch
             {
@@ -647,7 +661,9 @@ namespace DnsServerCore.Dns.Zones
 
                 foreach (KeyValuePair<string, Dictionary<DnsResourceRecordType, List<DnsResourceRecord>>> addedRecordGroup in addedRecordGroups)
                 {
-                    AuthZone zone = _dnsServer.AuthZoneManager.GetAuthZone(_name, addedRecordGroup.Key);
+                    AuthZone zone = stagedTree is null
+                        ? _dnsServer.AuthZoneManager.GetAuthZone(_name, addedRecordGroup.Key)
+                        : stagedTree.GetAuthZone(_name, addedRecordGroup.Key);
 
                     foreach (KeyValuePair<DnsResourceRecordType, List<DnsResourceRecord>> addedRecordEntry in addedRecordGroup.Value)
                         zone.TryDeleteRecords(addedRecordEntry.Key, addedRecordEntry.Value, out _);
@@ -657,7 +673,9 @@ namespace DnsServerCore.Dns.Zones
 
                 foreach (KeyValuePair<string, Dictionary<DnsResourceRecordType, List<DnsResourceRecord>>> deletedRecordGroup in deletedRecordGroups)
                 {
-                    AuthZone zone = _dnsServer.AuthZoneManager.GetAuthZone(_name, deletedRecordGroup.Key);
+                    AuthZone zone = stagedTree is null
+                        ? _dnsServer.AuthZoneManager.GetAuthZone(_name, deletedRecordGroup.Key)
+                        : stagedTree.GetAuthZone(_name, deletedRecordGroup.Key);
 
                     foreach (KeyValuePair<DnsResourceRecordType, List<DnsResourceRecord>> deletedRecordEntry in deletedRecordGroup.Value)
                     {
@@ -893,7 +911,7 @@ namespace DnsServerCore.Dns.Zones
             EnableNSec3(zones, iterations, salt);
         }
 
-        private void EnableNSec3(IReadOnlyList<AuthZone> zones, ushort iterations, byte[] salt)
+        private void EnableNSec3(IReadOnlyList<AuthZone> zones, ushort iterations, byte[] salt, AuthZoneTree stagedTree = null)
         {
             List<DnsResourceRecord> addedRecords = new List<DnsResourceRecord>();
             List<DnsResourceRecord> deletedRecords = new List<DnsResourceRecord>();
@@ -991,7 +1009,9 @@ namespace DnsServerCore.Dns.Zones
             //insert and sign NSEC3 records
             foreach (DnsResourceRecord uniqueNSec3Record in uniqueNSec3Records)
             {
-                AuthZone zone = _dnsServer.AuthZoneManager.GetOrAddSubDomainZone(_name, uniqueNSec3Record.Name);
+                AuthZone zone = stagedTree is null
+                    ? _dnsServer.AuthZoneManager.GetOrAddSubDomainZone(_name, uniqueNSec3Record.Name)
+                    : stagedTree.GetOrAddSubDomainZone(_name, uniqueNSec3Record.Name, () => new PrimarySubDomainZone(this, uniqueNSec3Record.Name));
 
                 DnsResourceRecord[] newNSec3Records = new DnsResourceRecord[] { uniqueNSec3Record };
 
