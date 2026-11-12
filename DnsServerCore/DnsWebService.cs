@@ -149,13 +149,24 @@ namespace DnsServerCore
         private const ushort ManagedWebTlsEnabled = 64;
         private const ushort ManagedWebHttp3 = 128;
         private const ushort ManagedWebRedirect = 256;
+        private const ushort ManagedWebHttpSocketEnabled = 512;
+        private const ushort ManagedWebHttpSocketPath = 1024;
+        private const ushort ManagedWebTlsSocketEnabled = 2048;
+        private const ushort ManagedWebTlsSocketPath = 4096;
+        private const ushort ManagedWebHttpSocket = ManagedWebHttpSocketEnabled | ManagedWebHttpSocketPath;
+        private const ushort ManagedWebTlsSocket = ManagedWebTlsSocketEnabled | ManagedWebTlsSocketPath;
         private const ushort ManagedWebListenerMask = ManagedWebAddresses | ManagedWebHttpPort | ManagedWebTlsPort |
-            ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect;
+            ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect | ManagedWebHttpSocket | ManagedWebTlsSocket;
+        internal readonly record struct WebUnixSocket(bool? Enabled, string Path)
+        {
+            internal bool HasValues => Enabled.HasValue || Path is not null;
+        }
+
         internal readonly record struct WebListeners(IReadOnlyList<IPAddress> Addresses, int? HttpPort, int? TlsPort,
-            bool? TlsEnabled = null, bool? Http3Enabled = null, bool? RedirectToTls = null)
+            bool? TlsEnabled = null, bool? Http3Enabled = null, bool? RedirectToTls = null, WebUnixSocket HttpSocket = default, WebUnixSocket TlsSocket = default)
         {
             internal bool HasValues => Addresses is not null || HttpPort.HasValue || TlsPort.HasValue ||
-                TlsEnabled.HasValue || Http3Enabled.HasValue || RedirectToTls.HasValue;
+                TlsEnabled.HasValue || Http3Enabled.HasValue || RedirectToTls.HasValue || HttpSocket.HasValues || TlsSocket.HasValues;
         }
         internal readonly record struct WebLiveSettings(string RealIp, string FrameAncestors, IReadOnlyCollection<NetworkAccessControl> ReverseProxyAcl = null, WebListeners Listeners = default);
         string _webServiceRealIpHeader = "X-Real-IP";
@@ -526,7 +537,8 @@ namespace DnsServerCore
             NetworkAccessControl[] proxyAddresses = version >= 2 ? AuthZoneInfo.ReadNetworkACLFrom(bR) ?? [] : CreateDefaultReverseProxyAcl();
             string certificatePath = s.ReadShortString();
             string certificatePassword = s.ReadShortString();
-            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses, new WebListeners(addresses, httpPort, tlsPort, tlsEnabled, http3Enabled, redirectToTls));
+            var headers = new WebLiveSettings(s.ReadShortString(), version >= 3 ? s.ReadShortString() : "'none'", proxyAddresses, new WebListeners(addresses, httpPort, tlsPort, tlsEnabled, http3Enabled, redirectToTls,
+                new WebUnixSocket(httpSocketEnabled, httpSocket), new WebUnixSocket(tlsSocketEnabled, tlsSocket)));
             if (!apply)
             {
                 CheckManifestWebTlsDependencies(tlsEnabled, selfSignedCertificate || certificatePath.Length > 0);
@@ -539,10 +551,14 @@ namespace DnsServerCore
                 _webServiceTlsPort = tlsPort;
             if (readOwnership || (_managedWebListeners & ManagedWebAddresses) == 0)
                 _webServiceLocalAddresses = addresses;
-            _webServiceEnableHttpUnixSocket = httpSocketEnabled;
-            _webServiceHttpUnixSocket = httpSocket.Length == 0 ? null : httpSocket;
-            _webServiceEnableTlsUnixSocket = tlsSocketEnabled;
-            _webServiceTlsUnixSocket = tlsSocket.Length == 0 ? null : tlsSocket;
+            if (readOwnership || (_managedWebListeners & ManagedWebHttpSocketEnabled) == 0)
+                _webServiceEnableHttpUnixSocket = httpSocketEnabled;
+            if (readOwnership || (_managedWebListeners & ManagedWebHttpSocketPath) == 0)
+                _webServiceHttpUnixSocket = httpSocket.Length == 0 ? null : httpSocket;
+            if (readOwnership || (_managedWebListeners & ManagedWebTlsSocketEnabled) == 0)
+                _webServiceEnableTlsUnixSocket = tlsSocketEnabled;
+            if (readOwnership || (_managedWebListeners & ManagedWebTlsSocketPath) == 0)
+                _webServiceTlsUnixSocket = tlsSocket.Length == 0 ? null : tlsSocket;
             if (readOwnership || (_managedWebListeners & ManagedWebTlsEnabled) == 0)
                 _webServiceEnableTls = tlsEnabled;
             if (readOwnership || (_managedWebListeners & ManagedWebHttp3) == 0)
@@ -1745,7 +1761,7 @@ namespace DnsServerCore
             await StartWebServiceAsync(true);
         }
 
-        private async Task StartWebServiceAsync(bool httpOnlyMode)
+        private async Task StartWebServiceAsync(bool httpOnlyMode, WebListeners manifestListeners = default)
         {
             WebApplicationBuilder builder = WebApplication.CreateBuilder();
 
@@ -1884,7 +1900,8 @@ namespace DnsServerCore
                 {
                     try
                     {
-                        if (File.Exists(_webServiceHttpUnixSocket))
+                        if (!manifestListeners.HttpSocket.HasValues && (_managedWebListeners & ManagedWebHttpSocket) == 0 &&
+                            File.Exists(_webServiceHttpUnixSocket))
                             File.Delete(_webServiceHttpUnixSocket);
                     }
                     catch (Exception ex)
@@ -1900,7 +1917,8 @@ namespace DnsServerCore
                 {
                     try
                     {
-                        if (File.Exists(_webServiceTlsUnixSocket))
+                        if (!manifestListeners.TlsSocket.HasValues && (_managedWebListeners & ManagedWebTlsSocket) == 0 &&
+                            File.Exists(_webServiceTlsUnixSocket))
                             File.Delete(_webServiceTlsUnixSocket);
                     }
                     catch (Exception ex)
@@ -2850,6 +2868,30 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/http3Enabled: Setting is managed by the configuration manifest.");
             if ((_managedWebListeners & ManagedWebRedirect) != 0 && listeners.RedirectToTls.HasValue && listeners.RedirectToTls != _webServiceHttpToTlsRedirect)
                 throw new DnsWebServiceException("/web/redirectHttpToTls: Setting is managed by the configuration manifest.");
+            CheckManifestWebUnixSocket(listeners.HttpSocket, _webServiceEnableHttpUnixSocket, _webServiceHttpUnixSocket,
+                ManagedWebHttpSocketEnabled, ManagedWebHttpSocketPath, "/web/httpUnixSocket");
+            CheckManifestWebUnixSocket(listeners.TlsSocket, _webServiceEnableTlsUnixSocket, _webServiceTlsUnixSocket,
+                ManagedWebTlsSocketEnabled, ManagedWebTlsSocketPath, "/web/tlsUnixSocket");
+        }
+
+        private void CheckManifestWebUnixSocket(WebUnixSocket socket, bool currentEnabled, string currentPath, ushort enabledFlag, ushort pathFlag, string path)
+        {
+            if ((_managedWebListeners & enabledFlag) != 0 && socket.Enabled.HasValue && socket.Enabled != currentEnabled)
+                throw new DnsWebServiceException($"{path}/enabled: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & pathFlag) != 0 && socket.Path is not null && socket.Path != (currentPath ?? ""))
+                throw new DnsWebServiceException($"{path}/path: Setting is managed by the configuration manifest.");
+            if ((_managedWebListeners & enabledFlag) != 0 && currentEnabled && socket.Path == "")
+                throw new DnsWebServiceException($"{path}/path: A path is required by the configuration manifest.");
+        }
+
+        private static void ValidateManifestWebUnixSocket(WebUnixSocket socket, bool currentEnabled, string currentPath, string path)
+        {
+            if (!socket.HasValues || !(socket.Enabled ?? currentEnabled))
+                return;
+            if (!DnsServer.IsUnixDomainSocketSupported())
+                throw new InvalidDataException($"{path}/enabled: Unix domain sockets are unavailable on this host.");
+            if (string.IsNullOrEmpty(socket.Path ?? currentPath))
+                throw new InvalidDataException($"{path}/path: A path is required when the socket is enabled.");
         }
 
         private void CheckManifestWebTlsDependencies(bool tlsEnabled, bool hasCertificate)
@@ -2860,10 +2902,24 @@ namespace DnsServerCore
                 throw new DnsWebServiceException("/web/http3Enabled: Web TLS is required by the configuration manifest.");
             if ((_managedWebListeners & ManagedWebRedirect) != 0 && _webServiceHttpToTlsRedirect && (!tlsEnabled || !hasCertificate))
                 throw new DnsWebServiceException("/web/redirectHttpToTls: Web TLS is required by the configuration manifest.");
+            if ((_managedWebListeners & ManagedWebTlsSocketEnabled) != 0 && _webServiceEnableTlsUnixSocket && !hasCertificate)
+                throw new DnsWebServiceException("/web/tlsUnixSocket/enabled: A certificate is required by the configuration manifest.");
         }
 
         private void ValidateManifestWebListeners(WebListeners listeners)
         {
+            ValidateManifestWebUnixSocket(listeners.HttpSocket, _webServiceEnableHttpUnixSocket, _webServiceHttpUnixSocket, "/web/httpUnixSocket");
+            ValidateManifestWebUnixSocket(listeners.TlsSocket, _webServiceEnableTlsUnixSocket, _webServiceTlsUnixSocket, "/web/tlsUnixSocket");
+            if (listeners.TlsSocket.HasValues && (listeners.TlsSocket.Enabled ?? _webServiceEnableTlsUnixSocket) &&
+                _webServiceSslServerAuthenticationOptions is null)
+                throw new InvalidDataException("/web/tlsUnixSocket/enabled: Configure a web TLS certificate before enabling the socket.");
+            string httpSocketPath = listeners.HttpSocket.Path ?? _webServiceHttpUnixSocket;
+            string tlsSocketPath = listeners.TlsSocket.Path ?? _webServiceTlsUnixSocket;
+            if ((listeners.HttpSocket.HasValues || listeners.TlsSocket.HasValues) &&
+                (listeners.HttpSocket.Enabled ?? _webServiceEnableHttpUnixSocket) && (listeners.TlsSocket.Enabled ?? _webServiceEnableTlsUnixSocket) &&
+                httpSocketPath is not null && httpSocketPath == tlsSocketPath)
+                throw new InvalidDataException("/web/tlsUnixSocket/path: HTTP and HTTPS sockets require distinct paths.");
+
             if (!listeners.TlsEnabled.HasValue && !listeners.Http3Enabled.HasValue && !listeners.RedirectToTls.HasValue)
                 return;
 
@@ -2883,7 +2939,9 @@ namespace DnsServerCore
         private WebListeners CaptureWebListeners()
         {
             return new WebListeners(_webServiceLocalAddresses, _webServiceHttpPort, _webServiceTlsPort,
-                _webServiceEnableTls, _webServiceEnableHttp3, _webServiceHttpToTlsRedirect);
+                _webServiceEnableTls, _webServiceEnableHttp3, _webServiceHttpToTlsRedirect,
+                new WebUnixSocket(_webServiceEnableHttpUnixSocket, _webServiceHttpUnixSocket ?? ""),
+                new WebUnixSocket(_webServiceEnableTlsUnixSocket, _webServiceTlsUnixSocket ?? ""));
         }
 
         private bool WebListenersChange(WebListeners listeners)
@@ -2893,7 +2951,23 @@ namespace DnsServerCore
                 (listeners.TlsPort.HasValue && listeners.TlsPort != _webServiceTlsPort) ||
                 (listeners.TlsEnabled.HasValue && listeners.TlsEnabled != _webServiceEnableTls) ||
                 (listeners.Http3Enabled.HasValue && listeners.Http3Enabled != _webServiceEnableHttp3) ||
-                (listeners.RedirectToTls.HasValue && listeners.RedirectToTls != _webServiceHttpToTlsRedirect);
+                (listeners.RedirectToTls.HasValue && listeners.RedirectToTls != _webServiceHttpToTlsRedirect) ||
+                UnixSocketChanges(listeners.HttpSocket, _webServiceEnableHttpUnixSocket, _webServiceHttpUnixSocket) ||
+                UnixSocketChanges(listeners.TlsSocket, _webServiceEnableTlsUnixSocket, _webServiceTlsUnixSocket);
+        }
+
+        private static bool UnixSocketChanges(WebUnixSocket socket, bool enabled, string path)
+        {
+            return (socket.Enabled.HasValue && socket.Enabled != enabled) || (socket.Path is not null && socket.Path != (path ?? ""));
+        }
+
+        private static bool StageUnixSocket(WebUnixSocket socket, ref bool enabled, ref string path)
+        {
+            bool changed = UnixSocketChanges(socket, enabled, path);
+            enabled = socket.Enabled ?? enabled;
+            if (socket.Path is not null)
+                path = socket.Path.Length == 0 ? null : socket.Path;
+            return changed;
         }
 
         private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners)
@@ -2909,7 +2983,7 @@ namespace DnsServerCore
                 StageWebListeners(listeners);
                 if (previous.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                     ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
-                await StartWebServiceAsync(false);
+                await StartWebServiceAsync(false, listeners);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
                 await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), listeners: listeners,
                     listenersChanged: true, webAddressesChanged: addressesChanged);
@@ -2966,6 +3040,8 @@ namespace DnsServerCore
                 _webServiceHttpToTlsRedirect = listeners.RedirectToTls.Value;
                 changed = true;
             }
+            changed |= StageUnixSocket(listeners.HttpSocket, ref _webServiceEnableHttpUnixSocket, ref _webServiceHttpUnixSocket);
+            changed |= StageUnixSocket(listeners.TlsSocket, ref _webServiceEnableTlsUnixSocket, ref _webServiceTlsUnixSocket);
             return changed;
         }
 
@@ -2996,7 +3072,11 @@ namespace DnsServerCore
                 ushort managedListeners = (ushort)((listeners.Addresses is not null ? ManagedWebAddresses : 0) |
                     (listeners.HttpPort.HasValue ? ManagedWebHttpPort : 0) | (listeners.TlsPort.HasValue ? ManagedWebTlsPort : 0) |
                     (listeners.TlsEnabled.HasValue ? ManagedWebTlsEnabled : 0) | (listeners.Http3Enabled.HasValue ? ManagedWebHttp3 : 0) |
-                    (listeners.RedirectToTls.HasValue ? ManagedWebRedirect : 0));
+                    (listeners.RedirectToTls.HasValue ? ManagedWebRedirect : 0) |
+                    (listeners.HttpSocket.Enabled.HasValue ? ManagedWebHttpSocketEnabled : 0) |
+                    (listeners.HttpSocket.Path is not null ? ManagedWebHttpSocketPath : 0) |
+                    (listeners.TlsSocket.Enabled.HasValue ? ManagedWebTlsSocketEnabled : 0) |
+                    (listeners.TlsSocket.Path is not null ? ManagedWebTlsSocketPath : 0));
                 bool aclChanged = headers.ReverseProxyAcl is not null && !headers.ReverseProxyAcl.SequenceEqual(oldAcl ?? []);
                 string realIp = string.Equals(headers.RealIp, oldRealIp, StringComparison.OrdinalIgnoreCase) ? oldRealIp : headers.RealIp ?? oldRealIp;
                 string ancestors = headers.FrameAncestors ?? oldAncestors;
@@ -3266,7 +3346,7 @@ namespace DnsServerCore
                         if (previousWebListeners.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                             ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
                         if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0)
-                            await StartWebServiceAsync(false);
+                            await StartWebServiceAsync(false, listeners);
                         else
                             await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
 

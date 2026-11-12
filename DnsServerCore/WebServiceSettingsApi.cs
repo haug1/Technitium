@@ -485,6 +485,14 @@ namespace DnsServerCore
                     jsonWriter.WriteStringValue("/web/httpPort");
                 if ((_dnsWebService._managedWebListeners & ManagedWebTlsPort) != 0)
                     jsonWriter.WriteStringValue("/web/tlsPort");
+                if ((_dnsWebService._managedWebListeners & ManagedWebTlsSocketPath) != 0)
+                    jsonWriter.WriteStringValue("/web/tlsUnixSocket/path");
+                if ((_dnsWebService._managedWebListeners & ManagedWebTlsSocketEnabled) != 0)
+                    jsonWriter.WriteStringValue("/web/tlsUnixSocket/enabled");
+                if ((_dnsWebService._managedWebListeners & ManagedWebHttpSocketPath) != 0)
+                    jsonWriter.WriteStringValue("/web/httpUnixSocket/path");
+                if ((_dnsWebService._managedWebListeners & ManagedWebHttpSocketEnabled) != 0)
+                    jsonWriter.WriteStringValue("/web/httpUnixSocket/enabled");
                 if ((_dnsWebService._managedWebListeners & ManagedWebRedirect) != 0)
                     jsonWriter.WriteStringValue("/web/redirectHttpToTls");
                 if ((_dnsWebService._managedWebListeners & ManagedWebHttp3) != 0)
@@ -770,13 +778,22 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("webServiceTlsPort", int.Parse, out int webServiceTlsPort) ? webServiceTlsPort : null,
                     request.TryGetQueryOrForm("webServiceEnableTls", bool.Parse, out bool webServiceEnableTls) ? webServiceEnableTls : null,
                     request.TryGetQueryOrForm("webServiceEnableHttp3", bool.Parse, out bool webServiceEnableHttp3) ? webServiceEnableHttp3 : null,
-                    request.TryGetQueryOrForm("webServiceHttpToTlsRedirect", bool.Parse, out bool webServiceHttpToTlsRedirect) ? webServiceHttpToTlsRedirect : null);
+                    request.TryGetQueryOrForm("webServiceHttpToTlsRedirect", bool.Parse, out bool webServiceHttpToTlsRedirect) ? webServiceHttpToTlsRedirect : null,
+                    ReadWebUnixSocket("webServiceEnableHttpUnixSocket", "webServiceHttpUnixSocket"),
+                    ReadWebUnixSocket("webServiceEnableTlsUnixSocket", "webServiceTlsUnixSocket"));
+
+                WebUnixSocket ReadWebUnixSocket(string enabledName, string pathName)
+                {
+                    return new WebUnixSocket(
+                        request.TryGetQueryOrForm(enabledName, bool.Parse, out bool enabled) ? enabled : null,
+                        request.TryGetQueryOrForm(pathName, out string path) ? string.IsNullOrWhiteSpace(path) ? "" : path : null);
+                }
 
                 var webHeaders = new WebLiveSettings(
                     request.TryGetQueryOrForm("webServiceRealIpHeader", out string realIpHeader) ? NormalizeWebHeader(realIpHeader, realIp: true) : null,
                     request.TryGetQueryOrForm("webServiceCspFrameAncestorsHeader", out string frameAncestors) ? NormalizeWebHeader(frameAncestors, realIp: false) : null, reverseProxyAcl, webListeners);
                 _dnsWebService.CheckManifestWebLiveSettings(webHeaders);
-                if ((_dnsWebService._managedWebListeners & (ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect)) != 0)
+                if ((_dnsWebService._managedWebListeners & (ManagedWebTlsEnabled | ManagedWebHttp3 | ManagedWebRedirect | ManagedWebTlsSocketEnabled)) != 0)
                 {
                     bool selfSigned = request.GetQueryOrForm("webServiceUseSelfSignedTlsCertificate", bool.Parse, _dnsWebService._webServiceUseSelfSignedTlsCertificate);
                     string certificatePath = request.QueryOrForm("webServiceTlsCertificatePath") ?? _dnsWebService._webServiceTlsCertificatePath;
@@ -1170,7 +1187,8 @@ namespace DnsServerCore
                             !_dnsWebService._webServiceLocalAddresses.HasSameItems(editableListeners.Addresses);
                         restartWebService |= _dnsWebService.StageWebListeners(editableListeners);
 
-                        if (request.TryGetQueryOrForm("webServiceEnableHttpUnixSocket", bool.Parse, out bool webServiceEnableHttpUnixSocket))
+                        if (webListeners.HttpSocket.Enabled is bool webServiceEnableHttpUnixSocket &&
+                            (_dnsWebService._managedWebListeners & ManagedWebHttpSocketEnabled) == 0)
                         {
                             if (_dnsWebService._webServiceEnableHttpUnixSocket != webServiceEnableHttpUnixSocket)
                             {
@@ -1197,7 +1215,8 @@ namespace DnsServerCore
                             }
                         }
 
-                        if (request.TryGetQueryOrForm("webServiceEnableTlsUnixSocket", bool.Parse, out bool webServiceEnableTlsUnixSocket))
+                        if (webListeners.TlsSocket.Enabled is bool webServiceEnableTlsUnixSocket &&
+                            (_dnsWebService._managedWebListeners & ManagedWebTlsSocketEnabled) == 0)
                         {
                             if (_dnsWebService._webServiceEnableTlsUnixSocket != webServiceEnableTlsUnixSocket)
                             {

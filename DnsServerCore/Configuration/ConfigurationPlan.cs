@@ -60,6 +60,10 @@ namespace DnsServerCore.Configuration
             ["/web/tlsEnabled"] = Field("webServiceEnableTls", false, restartWebService: true, canApply: true),
             ["/web/http3Enabled"] = Field("webServiceEnableHttp3", false, restartWebService: true, canApply: true),
             ["/web/redirectHttpToTls"] = Field("webServiceHttpToTlsRedirect", false, restartWebService: true, canApply: true),
+            ["/web/httpUnixSocket/enabled"] = Field("webServiceEnableHttpUnixSocket", false, restartWebService: true, canApply: true),
+            ["/web/httpUnixSocket/path"] = Field<string>("webServiceHttpUnixSocket", null, restartWebService: true, canApply: true),
+            ["/web/tlsUnixSocket/enabled"] = Field("webServiceEnableTlsUnixSocket", false, restartWebService: true, canApply: true),
+            ["/web/tlsUnixSocket/path"] = Field<string>("webServiceTlsUnixSocket", null, restartWebService: true, canApply: true),
             ["/web/reverseProxyAcl"] = Field("webServiceReverseProxyAddresses", Array.Empty<string>(), canApply: true),
             ["/web/realIpHeader"] = Field("webServiceRealIpHeader", "X-Real-IP", canApply: true),
             ["/web/frameAncestors"] = Field("webServiceCspFrameAncestorsHeader", "'none'", canApply: true),
@@ -269,7 +273,8 @@ namespace DnsServerCore.Configuration
 
         private static void CheckApplySupport(JsonElement value, string path)
         {
-            if (_settings.TryGetValue(path, out Setting setting) && setting.CanApply)
+            if ((_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+                (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket"))
                 return;
 
             if ((value.ValueKind == JsonValueKind.Object) &&
@@ -291,7 +296,14 @@ namespace DnsServerCore.Configuration
             IReadOnlyList<IPAddress> addresses = web.TryGetProperty("localAddresses", out JsonElement value)
                 ? NormalizeWebAddresses(value) : null;
             return new DnsWebService.WebListeners(addresses, ReadPort("httpPort"), ReadPort("tlsPort"),
-                ReadValue("tlsEnabled")?.GetBoolean(), ReadValue("http3Enabled")?.GetBoolean(), ReadValue("redirectHttpToTls")?.GetBoolean());
+                ReadValue("tlsEnabled")?.GetBoolean(), ReadValue("http3Enabled")?.GetBoolean(), ReadValue("redirectHttpToTls")?.GetBoolean(),
+                ReadSocket("httpUnixSocket"), ReadSocket("tlsUnixSocket"));
+
+            DnsWebService.WebUnixSocket ReadSocket(string name)
+            {
+                return web.TryGetProperty(name, out JsonElement socket)
+                    ? ConfigurationManifest.ReadWebUnixSocket(socket, "/web/" + name) : default;
+            }
 
             int? ReadPort(string name)
             {
@@ -439,6 +451,11 @@ namespace DnsServerCore.Configuration
                             value = current.GetString();
                         candidate = JsonSerializer.SerializeToElement(value);
                     }
+                    else if (path is "/web/httpUnixSocket/path" or "/web/tlsUnixSocket/path")
+                    {
+                        string socket = ConfigurationManifest.ReadWebUnixSocketPath(desired, path);
+                        candidate = JsonSerializer.SerializeToElement(socket.Length == 0 ? null : socket);
+                    }
                     else if (path == BlockListSourcesPath)
                     {
                         candidate = NormalizeBlockListSources(desired);
@@ -467,6 +484,13 @@ namespace DnsServerCore.Configuration
                     changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService, path == DnsEndpointsPath));
                 }
 
+                return;
+            }
+
+            if (desired.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket")
+            {
+                Compare(desired, path + "/enabled", currentSettings, changes, log);
+                Compare(desired, path + "/path", currentSettings, changes, log);
                 return;
             }
 

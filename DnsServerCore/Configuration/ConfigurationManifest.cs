@@ -119,6 +119,10 @@ namespace DnsServerCore.Configuration
                     ReadWebHeader(frameAncestors, realIp: false);
                 if (web.TryGetProperty("reverseProxyAcl", out JsonElement reverseProxyAcl))
                     ReadWebReverseProxyAcl(reverseProxyAcl);
+                if (web.TryGetProperty("httpUnixSocket", out JsonElement httpSocket))
+                    ReadWebUnixSocket(httpSocket, "/web/httpUnixSocket");
+                if (web.TryGetProperty("tlsUnixSocket", out JsonElement tlsSocket))
+                    ReadWebUnixSocket(tlsSocket, "/web/tlsUnixSocket");
             }
 
             if (root.TryGetProperty("blocklists", out JsonElement blocklists) && blocklists.TryGetProperty("sources", out JsonElement sources))
@@ -169,6 +173,35 @@ namespace DnsServerCore.Configuration
             catch (Exception ex) when (ex is ArgumentException or FormatException or DnsServerException or DnsClientException)
             {
                 throw new InvalidDataException("/dns/serverDomain: Invalid DNS server domain name.");
+            }
+        }
+
+        internal static DnsWebService.WebUnixSocket ReadWebUnixSocket(JsonElement value, string path)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return new DnsWebService.WebUnixSocket(false, "");
+
+            bool? enabled = value.TryGetProperty("enabled", out JsonElement enable) ? enable.ValueKind != JsonValueKind.Null && enable.GetBoolean() : null;
+            string socketPath = value.TryGetProperty("path", out JsonElement socket) ? ReadWebUnixSocketPath(socket, path + "/path") : null;
+            return new DnsWebService.WebUnixSocket(enabled, socketPath);
+        }
+
+        internal static string ReadWebUnixSocketPath(JsonElement value, string path)
+        {
+            string socket = value.GetString();
+            if (string.IsNullOrWhiteSpace(socket))
+                return "";
+
+            try
+            {
+                if (!Path.IsPathFullyQualified(socket) || socket.Contains('\0'))
+                    throw new ArgumentException();
+                _ = new UnixDomainSocketEndPoint(socket);
+                return socket;
+            }
+            catch (Exception ex) when (ex is ArgumentException or PlatformNotSupportedException)
+            {
+                throw new InvalidDataException($"{path}: Invalid absolute Unix socket path.");
             }
         }
 

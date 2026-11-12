@@ -826,6 +826,66 @@ namespace DnsServerCore.Tests
             });
         }
 
+        [Fact]
+        public async Task WebUnixSocketManifestBindsAndPreservesExistingFiles()
+        {
+            if (!OperatingSystem.IsLinux())
+                return;
+
+            await using var server = await LoopbackWebService.StartAsync();
+            int port = server.Client.BaseAddress!.Port;
+            string socketPath = Path.Combine(server.ConfigurationDirectory, "web.sock");
+            string occupiedPath = Path.Combine(server.ConfigurationDirectory, "existing");
+            await File.WriteAllTextAsync(occupiedPath, "keep this file");
+
+            string invalid = SocketManifest(occupiedPath);
+            string revision = (await PreviewAsync(server, invalid)).GetProperty("revision").GetString()!;
+            JsonElement queued = await ApplyAsync(server, invalid, revision);
+            LoopbackWebService.AssertOk(queued);
+            string operationId = queued.GetProperty("response").GetProperty("operationId").GetString()!;
+            Assert.Equal("failed", await WaitForWebApplyAsync(port, server.AdminToken, operationId));
+            Assert.Equal("keep this file", await File.ReadAllTextAsync(occupiedPath));
+
+            string manifest = SocketManifest(socketPath);
+            revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            queued = await ApplyAsync(server, manifest, revision);
+            LoopbackWebService.AssertOk(queued);
+            operationId = queued.GetProperty("response").GetProperty("operationId").GetString()!;
+            Assert.Equal("applied", await WaitForWebApplyAsync(port, server.AdminToken, operationId));
+
+            await server.RestartAsync();
+            using var client = new HttpClient(new SocketsHttpHandler
+            {
+                UseProxy = false,
+                ConnectCallback = async (_, cancellationToken) =>
+                {
+                    var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                    try
+                    {
+                        await socket.ConnectAsync(new UnixDomainSocketEndPoint(socketPath), cancellationToken);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                }
+            });
+            using HttpResponseMessage page = await client.GetAsync("http://localhost/index.html");
+            page.EnsureSuccessStatusCode();
+
+            JsonElement edit = await server.CallAsync("settings/set?webServiceEnableHttpUnixSocket=false", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/web/httpUnixSocket/enabled", edit.GetProperty("errorMessage").GetString());
+
+            static string SocketManifest(string path) => JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                web = new { httpUnixSocket = new { enabled = true, path } }
+            });
+        }
+
         private static async Task<string> WaitForWebApplyAsync(int port, string token, string operationId)
         {
             using var client = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false })
