@@ -231,10 +231,13 @@ namespace DnsServerCore.Configuration
             foreach (DnsApplication app in manager.Applications.Values.OrderBy(app => app.Name, StringComparer.Ordinal))
             {
                 string path = ConfigurationPlan.AppendPath(Path, app.Name);
-                result[app.Name] = new JsonObject { ["version"] = app.Version.ToString() };
+                var declaration = new JsonObject { ["version"] = app.Version.ToString() };
+                result[app.Name] = declaration;
                 missingInputs.Add(path + "/source");
                 if (app.ReadManifestConfig() is not null)
                     missingInputs.Add(path + "/configuration");
+                else
+                    declaration["configuration"] = null;
             }
             return result;
         }

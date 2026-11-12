@@ -542,6 +542,36 @@ namespace DnsServerCore.Tests
             Assert.True(await WaitForAsync(async () => (await ReadSecondaryAppAsync()).GetProperty("managedSettings").GetArrayLength() == 0),
                 "The Secondary did not release app ownership.");
 
+            JsonElement primaryExport = await primary.CallAsync("settings/config/export", primary.AdminToken);
+            LoopbackWebService.AssertOk(primaryExport);
+            JsonElement exported = primaryExport.GetProperty("response");
+            JsonElement appExport = exported.GetProperty("manifest").GetProperty("apps").GetProperty("packages").GetProperty("Fixture");
+            Assert.Equal(JsonValueKind.Null, appExport.GetProperty("configuration").ValueKind);
+            Assert.Contains(exported.GetProperty("missingInputs").EnumerateArray(),
+                path => path.ValueEquals("/apps/packages/Fixture/source"));
+            Assert.DoesNotContain(exported.GetProperty("missingInputs").EnumerateArray(),
+                path => path.ValueEquals("/apps/packages/Fixture/configuration"));
+            JsonElement secondaryExport = await secondary.CallAsync("settings/config/export", token);
+            LoopbackWebService.AssertOk(secondaryExport);
+            Assert.False(secondaryExport.GetProperty("response").GetProperty("manifest").GetProperty("apps").TryGetProperty("packages", out _));
+
+            await using var restored = await LoopbackWebService.StartAsync();
+            await restored.RestartAsync(null, () =>
+            {
+                var declaration = JsonNode.Parse(appExport.GetRawText())!.AsObject();
+                declaration["source"] = new JsonObject { ["file"] = "fixture.zip" };
+                var manifest = new JsonObject
+                {
+                    ["schemaVersion"] = 1,
+                    ["apps"] = new JsonObject { ["packages"] = new JsonObject { ["Fixture"] = declaration } }
+                };
+                File.WriteAllBytes(Path.Combine(restored.ConfigurationDirectory, "fixture.zip"), package.ToArray());
+                File.WriteAllText(Path.Combine(restored.ConfigurationDirectory, "technitium.json"), manifest.ToJsonString());
+            });
+            JsonElement restoredApp = await restored.CallAsync("apps/config/get?name=Fixture", restored.AdminToken);
+            LoopbackWebService.AssertOk(restoredApp);
+            Assert.Equal(JsonValueKind.Null, restoredApp.GetProperty("response").GetProperty("config").ValueKind);
+
             async Task ApplyPrimaryAsync(string manifest)
             {
                 using var planBody = new StringContent(manifest, Encoding.UTF8, "application/json");

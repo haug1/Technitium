@@ -575,7 +575,8 @@ namespace DnsServerCore
                         manifest.Add("dhcp", new System.Text.Json.Nodes.JsonObject { ["scopes"] = scopes });
                 }
 
-                if (!_dnsWebService._clusterManager.ClusterInitialized &&
+                if ((!_dnsWebService._clusterManager.ClusterInitialized ||
+                    _dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary) &&
                     _dnsWebService._authManager.IsPermitted(PermissionSection.Apps, sessionUser, PermissionFlag.View))
                 {
                     var apps = ConfigurationApplications.Export(dns.DnsApplicationManager, missingInputs);
