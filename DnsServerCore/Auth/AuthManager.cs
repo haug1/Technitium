@@ -510,15 +510,15 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void SaveConfigFileInternal(IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
+        private void SaveConfigFileInternal(IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null, ConfigurationSso.Settings sso = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "auth.tmp");
             string configFile = Path.Combine(_configFolder, "auth.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, stagedPermissions, ldap, groupChanges, stagedUsers);
-                if (stagedPermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null)
+                WriteConfigTo(fS, stagedPermissions, ldap, groupChanges, stagedUsers, sso);
+                if (stagedPermissions is not null || ldap is not null || groupChanges is not null || stagedUsers is not null || sso is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -527,9 +527,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, ConfigurationStaticSessions.Candidate staticSessions, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, IReadOnlyList<ConfigurationPermissions.Grant> grants, string[] permissionOwnership, ConfigurationStaticSessions.Candidate staticSessions, ConfigurationSso.Settings sso, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null && grants.Count == 0 && permissionOwnership is null && staticSessions is null && sso is null)
             {
                 persist(null);
                 return;
@@ -537,7 +537,7 @@ namespace DnsServerCore.Auth
 
             lock (_saveLock)
             {
-                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants,
+                ConfigurationGroups.ValidateRemovals(this, groupChanges, ldap, userChanges, grants, sso,
                     membership.Where(entry => !entry.Value).Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal));
                 ConfigurationStaticSessions.CheckAccountRemovals(this, userChanges, staticSessions);
                 ConfigurationUsers.CheckSsoIdentities(this, userChanges);
@@ -646,8 +646,8 @@ namespace DnsServerCore.Auth
                 {
                     if (staticSessions is not null)
                         WriteStaticSessions(staticSessions);
-                    if (permissions.Count > 0 || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null)
-                        SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers);
+                    if (permissions.Count > 0 || ldap is not null || groupChanges.Count > 0 || stagedUsers is not null || sso is not null)
+                        SaveConfigFileInternal(permissions.Count > 0 ? permissions : null, ldap, groupChanges.Count > 0 ? groupChanges : null, stagedUsers, sso);
                     if (ldapOwnership is not null)
                         WriteOwnership(LdapOwnershipFile, ldapOwnership);
                     if (groupOwnership is not null)
@@ -701,6 +701,8 @@ namespace DnsServerCore.Auth
                     _permissions[section] = permission;
                 if (ldap is not null)
                     SetLdapSettings(ldap);
+                if (sso is not null)
+                    SetSsoSettings(sso);
             }
         }
 
@@ -1119,6 +1121,23 @@ namespace DnsServerCore.Auth
             }
         }
 
+        internal ConfigurationSso.Settings GetManifestSsoSettings() => new(
+            _ssoEnabled, _ssoAuthority, _ssoClientId, _ssoClientSecret, _ssoMetadataAddress, _ssoScopes,
+            _ssoAllowSignup, _ssoAllowSignupOnlyForMappedUsers, _ssoGroupMap);
+
+        private void SetSsoSettings(ConfigurationSso.Settings sso)
+        {
+            _ssoAuthority = sso.Authority;
+            _ssoClientId = sso.ClientId;
+            _ssoClientSecret = sso.ClientSecret;
+            _ssoMetadataAddress = sso.MetadataAddress;
+            _ssoScopes = sso.Scopes;
+            _ssoAllowSignup = sso.AllowSignup;
+            _ssoAllowSignupOnlyForMappedUsers = sso.AllowSignupOnlyForMappedUsers;
+            _ssoGroupMap = sso.GroupMap?.Count > 0 ? sso.GroupMap : null;
+            _ssoEnabled = sso.Enabled;
+        }
+
         private void SetLdapSettings(ConfigurationLdap.Settings ldap)
         {
             _ldapServer = ldap.Server;
@@ -1136,7 +1155,7 @@ namespace DnsServerCore.Auth
             _ldapEnabled = ldap.Enabled;
         }
 
-        private void WriteConfigTo(Stream s, IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null)
+        private void WriteConfigTo(Stream s, IReadOnlyDictionary<PermissionSection, Permission> stagedPermissions = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, Group> groupChanges = null, IReadOnlyDictionary<string, User> stagedUsers = null, ConfigurationSso.Settings sso = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -1211,36 +1230,37 @@ namespace DnsServerCore.Auth
             foreach (UserSession session in activeSessions)
                 session.WriteTo(bW);
 
-            bW.Write(_ssoEnabled);
-            s.WriteShortString(_ssoAuthority?.OriginalString ?? "");
-            s.WriteShortString(_ssoClientId ?? "");
-            s.WriteShortString(_ssoClientSecret ?? "");
-            s.WriteShortString(_ssoMetadataAddress?.OriginalString ?? "");
+            sso ??= GetManifestSsoSettings();
+            bW.Write(sso.Enabled);
+            s.WriteShortString(sso.Authority?.OriginalString ?? "");
+            s.WriteShortString(sso.ClientId ?? "");
+            s.WriteShortString(sso.ClientSecret ?? "");
+            s.WriteShortString(sso.MetadataAddress?.OriginalString ?? "");
 
-            if (_ssoScopes.Count == 0)
+            if (sso.Scopes.Count == 0)
             {
                 bW.Write((byte)0);
             }
             else
             {
-                bW.Write(Convert.ToByte(_ssoScopes.Count));
+                bW.Write(Convert.ToByte(sso.Scopes.Count));
 
-                foreach (string scope in _ssoScopes)
+                foreach (string scope in sso.Scopes)
                     s.WriteShortString(scope);
             }
 
-            bW.Write(_ssoAllowSignup);
-            bW.Write(_ssoAllowSignupOnlyForMappedUsers);
+            bW.Write(sso.AllowSignup);
+            bW.Write(sso.AllowSignupOnlyForMappedUsers);
 
-            if ((_ssoGroupMap is null) || (_ssoGroupMap.Count == 0))
+            if (sso.GroupMap is null || sso.GroupMap.Count == 0)
             {
                 bW.Write((byte)0);
             }
             else
             {
-                bW.Write(Convert.ToByte(_ssoGroupMap.Count));
+                bW.Write(Convert.ToByte(sso.GroupMap.Count));
 
-                foreach (KeyValuePair<string, string> entry in _ssoGroupMap)
+                foreach (KeyValuePair<string, string> entry in sso.GroupMap)
                 {
                     s.WriteShortString(entry.Key);
                     s.WriteShortString(entry.Value);

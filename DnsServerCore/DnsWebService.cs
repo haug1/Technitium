@@ -1827,11 +1827,12 @@ namespace DnsServerCore
             return null;
         }
 
-        private async Task StartWebServiceAsync(bool httpOnlyMode, WebListeners manifestListeners = default)
+        private async Task StartWebServiceAsync(bool httpOnlyMode, WebListeners manifestListeners = default, ConfigurationSso.Settings sso = null)
         {
             WebApplicationBuilder builder = WebApplication.CreateBuilder();
 
-            bool ssoEnabled = _authManager.SsoEnabled && (_authManager.SsoAuthority is not null) && (_authManager.SsoClientId is not null) && (_authManager.SsoClientSecret is not null);
+            sso ??= _authManager.GetManifestSsoSettings();
+            bool ssoEnabled = sso.Enabled && sso.Authority is not null && sso.ClientId is not null && sso.ClientSecret is not null;
             if (ssoEnabled)
             {
                 builder.Services.AddAuthentication(delegate (AuthenticationOptions options)
@@ -1842,9 +1843,9 @@ namespace DnsServerCore
                 .AddBearerToken()
                 .AddOpenIdConnect(delegate (OpenIdConnectOptions options)
                 {
-                    options.Authority = _authManager.SsoAuthority.AbsoluteUri;
-                    options.ClientId = _authManager.SsoClientId;
-                    options.ClientSecret = _authManager.SsoClientSecret;
+                    options.Authority = sso.Authority.AbsoluteUri;
+                    options.ClientId = sso.ClientId;
+                    options.ClientSecret = sso.ClientSecret;
                     options.RequireHttpsMetadata = false;
                     options.ResponseType = OpenIdConnectResponseType.Code;
                     options.ResponseMode = OpenIdConnectResponseMode.FormPost;
@@ -1866,7 +1867,7 @@ namespace DnsServerCore
 
                     options.Scope.Clear();
 
-                    foreach (string scope in _authManager.SsoScopes)
+                    foreach (string scope in sso.Scopes)
                         options.Scope.Add(scope);
 
                     //setup user info endpoint json key map for supported claim types
@@ -1882,8 +1883,8 @@ namespace DnsServerCore
 
                     options.CallbackPath = new PathString("/sso/callback");
 
-                    if (_authManager.SsoMetadataAddress is not null)
-                        options.ConfigurationManager = new ConfigurationManager<OpenIdConnectConfiguration>(_authManager.SsoMetadataAddress.AbsoluteUri, new OpenIdConnectConfigurationRetriever(), new HttpDocumentRetriever(_ssoHttpClient) { RequireHttps = false });
+                    if (sso.MetadataAddress is not null)
+                        options.ConfigurationManager = new ConfigurationManager<OpenIdConnectConfiguration>(sso.MetadataAddress.AbsoluteUri, new OpenIdConnectConfigurationRetriever(), new HttpDocumentRetriever(_ssoHttpClient) { RequireHttps = false });
 
                     options.Events = new OpenIdConnectEvents
                     {
@@ -3080,7 +3081,7 @@ namespace DnsServerCore
             return candidate;
         }
 
-        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig, User creator, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> users, ConfigurationStaticSessions.Candidate staticSessions)
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig, User creator, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> users, ConfigurationStaticSessions.Candidate staticSessions, ConfigurationSso.Settings sso)
         {
             WebListeners previous = CaptureWebListeners();
             SslServerAuthenticationOptions previousTlsOptions;
@@ -3101,10 +3102,10 @@ namespace DnsServerCore
                 byte[] generated = webCertificate is { Changed: true } candidate ? StageWebCertificate(candidate, manifest.GetServerDomain()) : null;
                 if (webCertificate is not { Changed: true } && previous.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                     ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
-                await StartWebServiceAsync(false, listeners);
+                await StartWebServiceAsync(false, listeners, sso);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
                 await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners,
-                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users, staticSessions: staticSessions);
+                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso);
             }
             catch
             {
@@ -3236,7 +3237,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null, ConfigurationSso.Settings sso = null)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3258,7 +3259,8 @@ namespace DnsServerCore
             try
             {
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
-                    ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users, staticSessions);
+                    ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users, staticSessions,
+                    sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
                 await _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
@@ -3475,6 +3477,7 @@ namespace DnsServerCore
                 _clusterManager = new ClusterManager(this);
                 if (startupManifest is not null)
                     ConfigurationPlan.CheckClusterApplySupport(startupManifest, _clusterManager.ClusterInitialized);
+                ConfigurationSso.Settings sso = ConfigurationSso.Prepare(startupManifest, _authManager);
                 ConfigurationProxy.Candidate proxy = startupManifest is null ? default : ConfigurationPlan.PrepareProxy(startupManifest, _dnsServer);
 
                 //cert may have changed so update cluster certs when loading
@@ -3531,8 +3534,8 @@ namespace DnsServerCore
                         byte[] generated = webCertificate is { Changed: true } candidate ? StageWebCertificate(candidate, startupManifest.GetServerDomain()) : null;
                         if (webCertificate is not { Changed: true } && previousWebListeners.Http3Enabled != _webServiceEnableHttp3 && previousTlsOptions is not null)
                             ConfigureWebTlsOptions(previousTlsOptions.ServerCertificateContext);
-                        if (throwIfBindFails || listeners.HasValues || _managedWebListeners != 0 || webRootChanged || _webRootOverride is not null || webCertificate is { Changed: true })
-                            await StartWebServiceAsync(false, listeners);
+                        if (throwIfBindFails || sso is not null || listeners.HasValues || _managedWebListeners != 0 || webRootChanged || _webRootOverride is not null || webCertificate is { Changed: true })
+                            await StartWebServiceAsync(false, listeners, sso);
                         else
                             await TryStartWebServiceAsync([IPAddress.Any, IPAddress.IPv6Any], 5380, 53443);
 
@@ -3554,7 +3557,7 @@ namespace DnsServerCore
                             await _dhcpServer.EnterManifestGateAsync();
                             try
                             {
-                                await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged);
+                                await ApplyManifestAsync(startupManifest, endpoints, proxy, dnsCertificate, tsig, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged, webCertificate, generated, webRootChanged, sso: sso);
                             }
                             finally
                             {

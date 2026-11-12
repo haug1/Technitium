@@ -181,7 +181,7 @@ namespace DnsServerCore.Configuration
         }
 
         internal static SortedDictionary<string, Change> Prepare(ConfigurationManifest manifest, AuthManager auth,
-            IReadOnlyDictionary<string, Group> groupChanges, bool includeUnchanged = false, User actor = null, ConfigurationLdap.Settings ldap = null)
+            IReadOnlyDictionary<string, Group> groupChanges, bool includeUnchanged = false, User actor = null, ConfigurationLdap.Settings ldap = null, ConfigurationSso.Settings sso = null)
         {
             var changes = new SortedDictionary<string, Change>(StringComparer.Ordinal);
             if (!TryGetDeclaration(manifest, out JsonElement users))
@@ -288,7 +288,7 @@ namespace DnsServerCore.Configuration
                 var groups = new SortedDictionary<string, Group>(StringComparer.Ordinal);
                 if (declaration.TryGetProperty("groups", out JsonElement groupList))
                 {
-                    bool providerManagesGroups = type == UserType.RemoteSSO && auth.SsoManagedGroups ||
+                    bool providerManagesGroups = type == UserType.RemoteSSO && (sso is null ? auth.SsoManagedGroups : sso.GroupMap?.Count > 0) ||
                         type == UserType.RemoteLDAP && (ldap is null ? auth.LdapManagedGroups : ldap.GroupMap?.Count > 0);
                     if (providerManagesGroups)
                         throw new InvalidDataException($"{path}/groups: The identity provider manages this account's groups.");

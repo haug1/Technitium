@@ -133,17 +133,17 @@ namespace DnsServerCore.Configuration
         }
 
         internal static void ValidateRemovals(AuthManager auth, IReadOnlyDictionary<string, Group> groups, ConfigurationLdap.Settings ldap,
-            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants, IReadOnlySet<string> removedZones)
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants, ConfigurationSso.Settings sso, IReadOnlySet<string> removedZones)
         {
             foreach (var (name, candidate) in groups)
             {
                 if (candidate is null && auth.GetGroup(name) is Group group)
-                    ValidateRemoval(auth, group, ldap, users, grants, removedZones);
+                    ValidateRemoval(auth, group, ldap, users, grants, sso, removedZones);
             }
         }
 
         private static void ValidateRemoval(AuthManager auth, Group group, ConfigurationLdap.Settings ldap,
-            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants, IReadOnlySet<string> removedZones)
+            IReadOnlyDictionary<string, ConfigurationUsers.Change> users, IReadOnlyList<ConfigurationPermissions.Grant> grants, ConfigurationSso.Settings sso, IReadOnlySet<string> removedZones)
         {
             string name = group.Name.ToLowerInvariant();
             if (auth.GetGroupMembers(group).Any(user =>
@@ -157,7 +157,7 @@ namespace DnsServerCore.Configuration
                         !grants.Any(grant => grant.Section == permission.Section && grant.Zone == item.SubItemName &&
                             grant.Group && grant.Name == name && grant.After is null))) ||
                 (ldap ?? auth.GetManifestLdapSettings()).GroupMap?.Values.Any(IsMapping) == true ||
-                auth.SsoGroupMap?.Values.Any(IsMapping) == true)
+                (sso ?? auth.GetManifestSsoSettings()).GroupMap?.Values.Any(IsMapping) == true)
                 throw new InvalidDataException($"{GroupPath(name)}: The group is still referenced by authentication settings.");
 
             bool IsMapping(string mapped) => mapped.Equals(group.Name, StringComparison.OrdinalIgnoreCase);

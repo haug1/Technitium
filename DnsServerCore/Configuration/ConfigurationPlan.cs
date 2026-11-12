@@ -208,6 +208,8 @@ namespace DnsServerCore.Configuration
                     {
                         if (authSection.Name == "ldap" && currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
                             ConfigurationLdap.Compare(ldap, changes);
+                        else if (authSection.Name == "sso" && currentSettings.TryGetProperty("manifestSso", out JsonElement sso))
+                            ConfigurationSso.Compare(sso, changes);
                         else if (authSection.Name == "permissions" && currentSettings.TryGetProperty("manifestPermissions", out _))
                             continue;
                         else if (authSection.Name == "staticSessions" && currentSettings.TryGetProperty("manifestStaticSessions", out JsonElement staticSessions))
@@ -306,6 +308,8 @@ namespace DnsServerCore.Configuration
                     dhcpOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestZoneOwnership", out JsonElement zoneOwnership))
                     zoneOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestSso", out JsonElement sso))
+                    sso.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestLdap", out JsonElement ldap))
                     ldap.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestLdapOwnership", out JsonElement ldapOwnership))
@@ -837,6 +841,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/auth/users: Applying user settings to a cluster is not implemented.");
             if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/auth/groups: Applying group settings to a cluster is not implemented.");
+            if (ConfigurationSso.IsDeclared(manifest))
+                throw new InvalidDataException("/auth/sso: Applying SSO settings to a cluster is not implemented.");
             if (ConfigurationLdap.IsDeclared(manifest))
                 throw new InvalidDataException("/auth/ldap: Applying LDAP settings to a cluster is not implemented.");
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones) && zones.EnumerateObject().Any())
@@ -949,7 +955,7 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (path is ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or ConfigurationStaticSessions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationSso.Path or ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or ConfigurationStaticSessions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 

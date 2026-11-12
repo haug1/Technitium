@@ -3824,6 +3824,75 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task SsoManifestRestartsTheWebServiceAndKeepsThePreviousConfigOnBindFailure()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_SSO_CLIENT_SECRET";
+            const string secret = "fixture-provider-secret";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, secret);
+            const string manifest = """
+                {"schemaVersion":1,"auth":{"groups":{"SSO Readers":{}},"sso":{
+                    "enabled":true,"authority":"https://identity.test","clientId":"fixture-client",
+                    "clientSecret":{"environment":"TECHNITIUM_TEST_SSO_CLIENT_SECRET"},
+                    "scopes":["email"],"groupMap":{"remote-readers":"SSO Readers"}
+                }}}
+                """;
+            try
+            {
+                int port = server.Client.BaseAddress!.Port;
+                using var occupied = new TcpListener(IPAddress.Loopback, 0);
+                occupied.Start();
+                JsonNode blocked = JsonNode.Parse(manifest)!;
+                blocked["web"] = new JsonObject { ["httpPort"] = ((IPEndPoint)occupied.LocalEndpoint).Port };
+                string failed = blocked.ToJsonString();
+                string revision = (await PreviewAsync(server, failed)).GetProperty("revision").GetString()!;
+                JsonElement queued = await ApplyAsync(server, failed, revision);
+                LoopbackWebService.AssertOk(queued);
+                Assert.Equal("failed", await WaitForWebApplyAsync(port, server.AdminToken,
+                    queued.GetProperty("response").GetProperty("operationId").GetString()!));
+                JsonElement config = await server.CallAsync("admin/sso/get", server.AdminToken);
+                LoopbackWebService.AssertOk(config);
+                Assert.False(config.GetProperty("response").GetProperty("ssoEnabled").GetBoolean());
+
+                JsonElement preview = await PreviewAsync(server, manifest);
+                Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change =>
+                    change.GetProperty("path").ValueEquals("/auth/sso/enabled") && change.GetProperty("restartWebService").GetBoolean());
+                Assert.DoesNotContain(secret, preview.GetRawText());
+                revision = preview.GetProperty("revision").GetString()!;
+                Environment.SetEnvironmentVariable(variable, "different-fixture-secret");
+                Assert.Equal("error", (await ApplyAsync(server, manifest, revision)).GetProperty("status").GetString());
+                Environment.SetEnvironmentVariable(variable, secret);
+                queued = await ApplyAsync(server, manifest, revision);
+                LoopbackWebService.AssertOk(queued);
+                Assert.Equal("applied", await WaitForWebApplyAsync(port, server.AdminToken,
+                    queued.GetProperty("response").GetProperty("operationId").GetString()!));
+
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+                config = await server.CallAsync("admin/sso/get", server.AdminToken);
+                LoopbackWebService.AssertOk(config);
+                JsonElement settings = config.GetProperty("response");
+                Assert.True(settings.GetProperty("ssoEnabled").GetBoolean());
+                Assert.Contains(settings.GetProperty("ssoScopes").EnumerateArray(), scope => scope.ValueEquals("openid"));
+                Assert.Contains(settings.GetProperty("ssoScopes").EnumerateArray(), scope => scope.ValueEquals("profile"));
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                Assert.DoesNotContain(secret, export.GetRawText());
+                JsonElement response = export.GetProperty("response");
+                JsonElement sso = response.GetProperty("manifest").GetProperty("auth").GetProperty("sso");
+                Assert.Equal("SSO Readers", sso.GetProperty("groupMap").GetProperty("remote-readers").GetString());
+                Assert.False(sso.TryGetProperty("clientSecret", out _));
+                Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(), path => path.ValueEquals("/auth/sso/clientSecret"));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task DirectoryAccountsCanBeProvisionedAndExportedWithoutLocalPasswords()
         {
             await using var server = await LoopbackWebService.StartAsync();
