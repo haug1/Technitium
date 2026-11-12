@@ -27,11 +27,20 @@ namespace DnsServerCore.Configuration
 
                 string catalog = zone.CatalogZoneName;
                 AuthZoneType? catalogType = catalog is null ? null : dns.AuthZoneManager.GetAuthZoneInfo(catalog)?.Type;
-                if (isClusterInfrastructure(zone.Name) || catalogType == AuthZoneType.SecondaryCatalog)
+                if (isClusterInfrastructure(zone.Name))
                     continue;
 
                 string name = zone.Name.Length == 0 ? "." : zone.Name;
                 string path = ConfigurationPlan.AppendPath("/zones", name);
+                Permission permission = getPermission?.Invoke(zone.Name);
+                if (catalogType == AuthZoneType.SecondaryCatalog)
+                {
+                    Permission catalogPermission = !isClusterInfrastructure(catalog) && canView(catalog)
+                        ? getPermission?.Invoke(catalog) : null;
+                    if (permission is not null && !OperatorGrants(permission).SequenceEqual(OperatorGrants(catalogPermission)))
+                        result.Add(name, new JsonObject { ["permissions"] = ConfigurationPermissions.ExportGrants(permission) });
+                    continue;
+                }
                 if ((zone.ApexZone is not (PrimaryZone or ForwarderZone) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type)) ||
                     (catalog is not null && (!AuthZoneManager.SupportsManifestCatalogMembership(zone.Type) ||
@@ -113,7 +122,7 @@ namespace DnsServerCore.Configuration
                 if (zone.ApexZone is PrimaryZone { DnssecStatus: not AuthZoneDnssecStatus.Unsigned })
                     declaration["dnssec"] = ConfigurationZoneDnssec.Export(zone, path, missingInputs);
 
-                if (getPermission?.Invoke(zone.Name) is Permission permission)
+                if (permission is not null)
                     declaration["permissions"] = ConfigurationPermissions.ExportGrants(permission);
 
                 if (!ConfigurationZonePrimary.IsReplicated(zone.Type) && zone.Type != AuthZoneType.Catalog)
@@ -149,6 +158,16 @@ namespace DnsServerCore.Configuration
                 result.Add(name, declaration);
             }
             return result;
+        }
+
+        private static IEnumerable<(bool Group, string Name, PermissionFlag Flags)> OperatorGrants(Permission permission)
+        {
+            if (permission is null)
+                return [];
+            return permission.UserPermissions.Select(grant => (false, grant.Key.Username, grant.Value))
+                .Concat(permission.GroupPermissions.Where(grant => grant.Key.Name is not (Group.ADMINISTRATORS or Group.DNS_ADMINISTRATORS))
+                    .Select(grant => (true, grant.Key.Name.ToLowerInvariant(), grant.Value)))
+                .OrderBy(grant => grant.Item1).ThenBy(grant => grant.Item2, StringComparer.Ordinal);
         }
 
         private static bool HasCustomizedNameServer(string zone, DnsResourceRecord record, uint defaultNsTtl, List<DnsResourceRecord> records)

@@ -900,6 +900,8 @@ namespace DnsServerCore.Configuration
                     string path = AppendPath("/zones", zone.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(zone.Name, path, allowRoot: true);
                     CheckClusterZoneTarget(cluster, name, path);
+                    if (ConfigurationPermissions.IsZonePermissionOnly(zone.Value))
+                        continue;
                     AuthZoneInfo current = cluster.DnsWebService.DnsServer.AuthZoneManager.GetAuthZoneInfo(name);
                     AuthZoneType type = current?.Type ?? AuthZoneType.Primary;
                     if (current is null && zone.Value.ValueKind == JsonValueKind.Object &&

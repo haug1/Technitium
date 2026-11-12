@@ -170,32 +170,72 @@ namespace DnsServerCore.Tests
 
             await using var peer = await LoopbackWebService.StartAsync("peer.cluster.test", enableTls: true,
                 adminPassword: restored.AdminPassword);
-            var restoredNode = Assert.Single((await restored.CallAsync("admin/cluster/state", restored.AdminToken))
-                .GetProperty("response").GetProperty("clusterNodes").EnumerateArray());
-            using var join = new FormUrlEncodedContent([
-                new("secondaryNodeIpAddresses", "127.0.0.1"),
-                new("primaryNodeUrl", restoredNode.GetProperty("url").GetString()!),
-                new("primaryNodeIpAddress", "127.0.0.1"),
-                new("primaryNodeUsername", "admin"),
-                new("primaryNodePassword", restored.AdminPassword),
-                new("ignoreCertificateErrors", "true")
-            ]);
-            LoopbackWebService.AssertOk(await peer.CallAsync("admin/cluster/initJoin", peer.AdminToken, join));
-            using var catalog = new FormUrlEncodedContent([
-                new("zone", "cluster-catalog.cluster.test"),
-                new("primaryZoneTransferProtocol", "Tcp"),
-                new("primaryNameServerAddresses", $"127.0.0.1:{restored.DnsPort}")
-            ]);
-            LoopbackWebService.AssertOk(await peer.CallAsync("zones/options/set", peer.AdminToken, catalog));
-            await peer.RestartAsync();
-            Assert.True(await WaitForAsync(async () =>
-                (await peer.QueryAsync("www.member.test", DnsResourceRecordType.A)).Answer
-                    .Any(record => record.RDATA is DnsARecordData answer && answer.Address.Equals(IPAddress.Parse("192.0.2.42")))),
-                "The Secondary did not transfer the restored member zone.");
+            await JoinPeerAsync(peer);
             var replicatedNameServers = (await peer.QueryAsync("member.test", DnsResourceRecordType.NS)).Answer;
             Assert.Equal(new[] { "peer.cluster.test", "restored.cluster.test" }, replicatedNameServers
                 .Select(record => Assert.IsType<DnsNSRecordData>(record.RDATA).NameServer).Order(StringComparer.Ordinal));
             Assert.All(replicatedNameServers, record => Assert.Equal(733u, record.OriginalTtlValue));
+
+            LoopbackWebService.AssertOk(await peer.CallAsync(
+                "zones/permissions/set?zone=member.test&groupPermissions=Everyone%7Ctrue%7Cfalse%7Cfalse", peer.AdminToken));
+            JsonElement peerExport = await peer.CallAsync("settings/config/export", peer.AdminToken);
+            LoopbackWebService.AssertOk(peerExport);
+            JsonElement grants = peerExport.GetProperty("response").GetProperty("manifest").GetProperty("zones").GetProperty("member.test");
+            Assert.Equal("permissions", Assert.Single(grants.EnumerateObject()).Name);
+            string permissions = $$"""{"schemaVersion":1,"zones":{"member.test":{{grants.GetRawText()}} } }""";
+
+            await using var replacement = await LoopbackWebService.StartAsync("replacement.cluster.test", enableTls: true,
+                adminPassword: restored.AdminPassword);
+            using (var early = new StringContent(permissions, Encoding.UTF8, "application/json"))
+            {
+                JsonElement missing = await replacement.CallAsync("settings/config/plan", replacement.AdminToken, early);
+                Assert.Equal("error", missing.GetProperty("status").GetString());
+                Assert.Contains("/zones/member.test/permissions", missing.GetProperty("errorMessage").GetString());
+            }
+            await JoinPeerAsync(replacement);
+            using var permissionPlan = new StringContent(permissions, Encoding.UTF8, "application/json");
+            JsonElement previewPermissions = await replacement.CallAsync("settings/config/plan", replacement.AdminToken, permissionPlan);
+            LoopbackWebService.AssertOk(previewPermissions);
+            Assert.Equal("/zones/member.test/permissions/groups/everyone",
+                Assert.Single(previewPermissions.GetProperty("response").GetProperty("changes").EnumerateArray()).GetProperty("path").GetString());
+            using var permissionApply = new StringContent(permissions, Encoding.UTF8, "application/json");
+            LoopbackWebService.AssertOk(await replacement.CallAsync("settings/config/apply", replacement.AdminToken, permissionApply,
+                previewPermissions.GetProperty("response").GetProperty("revision").GetString()));
+            await replacement.RestartAsync();
+            JsonElement restoredGrants = await replacement.CallAsync("zones/permissions/get?zone=member.test", replacement.AdminToken);
+            LoopbackWebService.AssertOk(restoredGrants);
+            Assert.Contains(restoredGrants.GetProperty("response").GetProperty("groupPermissions").EnumerateArray(),
+                grant => grant.GetProperty("name").ValueEquals("Everyone") && grant.GetProperty("canView").GetBoolean());
+            Assert.DoesNotContain("member.test", replacement.Dns.AuthZoneManager.ManifestOwnedZones.Keys);
+            await AssertMigrationReapplyAsync(replacement, permissions);
+
+            async Task JoinPeerAsync(LoopbackWebService peer)
+            {
+                JsonElement state = await restored.CallAsync("admin/cluster/state", restored.AdminToken);
+                LoopbackWebService.AssertOk(state);
+                var restoredNode = Assert.Single(state.GetProperty("response").GetProperty("clusterNodes").EnumerateArray(),
+                    node => node.GetProperty("type").ValueEquals("Primary"));
+                using var join = new FormUrlEncodedContent([
+                    new("secondaryNodeIpAddresses", "127.0.0.1"),
+                    new("primaryNodeUrl", restoredNode.GetProperty("url").GetString()!),
+                    new("primaryNodeIpAddress", "127.0.0.1"),
+                    new("primaryNodeUsername", "admin"),
+                    new("primaryNodePassword", restored.AdminPassword),
+                    new("ignoreCertificateErrors", "true")
+                ]);
+                LoopbackWebService.AssertOk(await peer.CallAsync("admin/cluster/initJoin", peer.AdminToken, join));
+                using var catalog = new FormUrlEncodedContent([
+                    new("zone", "cluster-catalog.cluster.test"),
+                    new("primaryZoneTransferProtocol", "Tcp"),
+                    new("primaryNameServerAddresses", $"127.0.0.1:{restored.DnsPort}")
+                ]);
+                LoopbackWebService.AssertOk(await peer.CallAsync("zones/options/set", peer.AdminToken, catalog));
+                await peer.RestartAsync();
+                Assert.True(await WaitForAsync(async () =>
+                    (await peer.QueryAsync("www.member.test", DnsResourceRecordType.A)).Answer
+                        .Any(record => record.RDATA is DnsARecordData answer && answer.Address.Equals(IPAddress.Parse("192.0.2.42")))),
+                    "The Secondary did not transfer the restored member zone.");
+            }
 
             async Task<JsonElement> ReadStateAsync()
             {

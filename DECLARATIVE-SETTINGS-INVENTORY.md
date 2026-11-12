@@ -283,7 +283,7 @@ Use the normalized zone name as the resource key under `zones.<name>`. Zone sett
 | `updates.mode` | `update` | Update policy enum, Deny | Supports deny, unrestricted, zone nameservers, ACL, and combined nameservers plus ACL. Applies to primary, secondary, forwarder, and secondary forwarder zones. |
 | `updates.networkAcl` | `updateNetworkACL` | Ordered ACL, unset | Empty clears the local list. |
 | `updates.securityPolicies` | `updateSecurityPolicies` | Map of TSIG key to DNS name and allowed record types, unset | Applies to primary and forwarder zones. Names and type lists use the dynamic update policy validators. |
-| `permissions` | `zones/permissions/get`, `zones/permissions/set` | User and group permission maps | Stored in `auth.config`. Reuse permission flags and administrative protections. |
+| `permissions` | `zones/permissions/get`, `zones/permissions/set` | User and group permission maps | Stored in `auth.config`. Reuse permission flags and administrative protections. For a Secondary Catalog member, apply a permission-only declaration after the zone transfers. |
 | SOA serial policy | `useSoaSerialDateScheme` | Boolean, inherited from the server when creating a primary zone | Persisted as SOA record metadata. Map to the operator-managed SOA record instead of a duplicate setting. |
 
 Creation-time `initializeForwarder` controls whether the API creates an initial FWD record. Its `forwarder`, `protocol`, `dnssecValidation`, and `proxyType`, `proxyAddress`, `proxyPort`, `proxyUsername`, and `proxyPassword` parameters belong to that record. A proxy password must use a secret reference.

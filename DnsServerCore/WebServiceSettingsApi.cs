@@ -1370,6 +1370,15 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Access was denied.");
 
                     ConfigurationPlan.CheckClusterZoneTarget(_dnsWebService._clusterManager, name, zonePath);
+                    if (ConfigurationPermissions.IsZonePermissionOnly(declaration.Value))
+                    {
+                        if (zone is null)
+                            throw new InvalidDataException($"{zonePath}/permissions: The zone must exist before applying its permissions.");
+                        writer.WriteStartObject(name);
+                        writer.WriteString("type", zone.Type.ToString());
+                        writer.WriteEndObject();
+                        continue;
+                    }
                     if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type))
                         throw new InvalidDataException($"{zonePath}: Apply requires a supported zone outside catalogs.");

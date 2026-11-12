@@ -940,6 +940,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             var signingChanges = new Dictionary<string, ConfigurationZoneDnssec.Signing>(StringComparer.Ordinal);
             var stagedKeyAdditions = new Dictionary<string, List<DnssecPrivateKey>>(StringComparer.Ordinal);
             var ownedZones = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
+            var permissionOnlyZones = new Dictionary<string, AuthZoneInfo>(StringComparer.Ordinal);
             string serverDomain = _dnsServer.ServerDomain;
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
             {
@@ -947,8 +948,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     string path = ConfigurationPlan.AppendPath("/zones", declaration.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
-                    ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
+                    if (ConfigurationPermissions.IsZonePermissionOnly(declaration.Value))
+                    {
+                        if (zone is null)
+                            throw new InvalidDataException($"{path}/permissions: The zone must exist before applying its permissions.");
+                        permissionOnlyZones.Add(name, zone);
+                        continue;
+                    }
+                    ownedZones.Add(name, GetOwnedZoneFields(name, path, declaration.Value));
                     if (zone is not null && zone.Type is not (AuthZoneType.Primary or AuthZoneType.Forwarder or AuthZoneType.Catalog) &&
                         !ConfigurationZonePrimary.IsReplicated(zone.Type))
                         throw new InvalidDataException($"{path}: Apply requires a supported zone outside catalogs.");
@@ -1197,6 +1205,11 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     lock (_saveLock)
                     {
+                        foreach (var (name, zone) in permissionOnlyZones)
+                        {
+                            if (!ReferenceEquals(GetAuthZoneInfo(name)?.ApexZone, zone.ApexZone))
+                                throw new InvalidDataException($"{GetManifestZonePath(name)}/permissions: The zone changed during apply.");
+                        }
                         foreach (var (name, current, remove, _, _, _, _, _) in changed)
                         {
                             AuthZoneInfo live = GetAuthZoneInfo(name);

@@ -128,6 +128,10 @@ namespace DnsServerCore.Configuration
         internal static bool DeclaresZonePermissions(JsonElement zones) => zones.EnumerateObject().Any(entry =>
             entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("permissions", out _));
 
+        internal static bool IsZonePermissionOnly(JsonElement zone) =>
+            zone.ValueKind == JsonValueKind.Object && zone.TryGetProperty("permissions", out _) &&
+            zone.EnumerateObject().All(field => field.NameEquals("permissions"));
+
         internal static bool TryGetDeclaration(ConfigurationManifest manifest, out JsonElement permissions)
         {
             permissions = default;
