@@ -37,7 +37,7 @@ jobs:
             --settings DnsServerCore.Tests/coverage.runsettings \
             --collect "XPlat Code Coverage" --logger trx \
             --results-directory "${{ runner.temp }}/technitium-test-results"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: regression-test-results
