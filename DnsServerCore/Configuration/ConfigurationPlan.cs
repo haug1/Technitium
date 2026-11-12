@@ -900,8 +900,13 @@ namespace DnsServerCore.Configuration
             DnsWebService.WebListeners listeners = GetWebListeners(manifest);
             if (listeners.TlsEnabled == false)
                 throw new InvalidDataException("/web/tlsEnabled: Cluster HTTPS listeners must remain enabled.");
-            if (listeners.TlsPort is int port && port != cluster.DnsWebService.WebServiceTlsPort)
-                throw new InvalidDataException("/web/tlsPort: Changing the cluster HTTPS port through a manifest is not implemented.");
+            if (listeners.TlsPort is int port)
+            {
+                if (port == 0)
+                    throw new InvalidDataException("/web/tlsPort: Cluster HTTPS requires a fixed port.");
+                if (port != cluster.GetSelfNode().Url.Port && cluster.GetSelfNode().Type == ClusterNodeType.Primary)
+                    throw new InvalidDataException("/web/tlsPort: Changing the Primary HTTPS port through a manifest is not implemented.");
+            }
             if (listeners.Addresses is null)
                 return;
 

@@ -188,29 +188,45 @@ def verify_propagation(primary, secondary, graceful):
     })
     assert lost_address["status"] == "error" and "/web/localAddresses" in lost_address["errorMessage"], lost_address
     previous_certificate = ssl.get_server_certificate(("127.0.0.1", secondary.tls_port), timeout=5)
-    new_web_port = allocate_ports()[0]
-    web = {"schemaVersion": 1, "web": {"httpPort": new_web_port,
-           "localAddresses": ["127.0.0.1", "127.0.0.2"], "tlsEnabled": True}}
-    web_plan = ok(secondary.call("settings/config/plan", manifest=web))
-    assert any(change["path"] == "/web/httpPort" and change["restartWebService"] for change in web_plan["changes"]), web_plan
-    operation = ok(secondary.call("settings/config/apply", manifest=web, revision=web_plan["revision"]))["operationId"]
-    secondary.http_port = new_web_port
+    def apply_web(manifest):
+        plan = ok(secondary.call("settings/config/plan", manifest=manifest))
+        assert any(change["path"] == "/web/tlsPort" and change["restartWebService"] for change in plan["changes"]), plan
+        return ok(secondary.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))["operationId"]
 
-    def web_rebound():
+    def web_operation(operation):
         try:
             status = ok(secondary.call(f"settings/config/status?operationId={operation}"))
         except (urllib.error.URLError, TimeoutError):
-            return False
-        if status["state"] == "failed":
-            raise RuntimeError(status)
-        return status["state"] == "applied"
+            return None
+        return None if status["state"] == "pending" else status["state"]
 
-    wait_for(web_rebound, "the Secondary HTTP listener to rebind")
+    def advertised_port(server):
+        state = ok(server.call("admin/cluster/state"))
+        node, = (node for node in state["clusterNodes"] if node["type"] == "Secondary")
+        return urllib.parse.urlsplit(node["url"]).port
+
+    with socket.socket() as blocked:
+        blocked.bind(("127.0.0.1", 0))
+        blocked.listen()
+        occupied = {"schemaVersion": 1, "web": {"tlsPort": blocked.getsockname()[1]}}
+        operation = apply_web(occupied)
+        assert wait_for(lambda: web_operation(operation), "the occupied TLS port to fail") == "failed"
+    assert advertised_port(secondary) == secondary.tls_port
+    assert advertised_port(primary) == secondary.tls_port
+
+    new_web_port, new_tls_port, *_ = allocate_ports()
+    web = {"schemaVersion": 1, "web": {"httpPort": new_web_port, "tlsPort": new_tls_port,
+           "localAddresses": ["127.0.0.1", "127.0.0.2"], "tlsEnabled": True}}
+    operation = apply_web(web)
+    secondary.http_port = new_web_port
+    assert wait_for(lambda: web_operation(operation), "the Secondary web listeners to rebind") == "applied"
     settings = ok(secondary.call("settings/get"))
     assert settings["webServiceHttpPort"] == new_web_port != web_port
     assert set(settings["webServiceLocalAddresses"]) == {"127.0.0.1", "127.0.0.2"}, settings
-    assert ssl.get_server_certificate(("127.0.0.1", secondary.tls_port), timeout=5) == previous_certificate
-    assert ssl.get_server_certificate(("127.0.0.2", secondary.tls_port), timeout=5) == previous_certificate
+    assert ssl.get_server_certificate(("127.0.0.1", new_tls_port), timeout=5) == previous_certificate
+    assert ssl.get_server_certificate(("127.0.0.2", new_tls_port), timeout=5) == previous_certificate
+    assert advertised_port(secondary) == new_tls_port
+    wait_for(lambda: advertised_port(primary) == new_tls_port, "the Primary to receive the Secondary's HTTPS port")
 
     intervals = {"schemaVersion": 1, "cluster": {"configRefreshSeconds": 120, "configRetrySeconds": 30}}
 

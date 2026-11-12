@@ -1115,7 +1115,8 @@ namespace DnsServerCore
                             totp = ProtectBootstrapSecret(secondary?.Totp)
                         });
                     }
-                    else if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0))
+                    else if (manifest is not null && (ConfigurationClusterOptions.IsDeclared(manifest) || _dnsWebService._clusterManager.ManagedOptionNames.Count != 0 ||
+                        ConfigurationClusterOptions.ChangesSecondaryWebEndpoint(manifest, _dnsWebService._clusterManager)))
                     {
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Modify))
                             throw new DnsWebServiceException("Access was denied.");

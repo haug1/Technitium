@@ -285,7 +285,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void SaveConfigFileInternal(ConfigurationClusterOptions.Settings? options = null, IReadOnlyList<IPAddress> selfAddresses = null)
+        private void SaveConfigFileInternal(ConfigurationClusterOptions.Settings? options = null, IReadOnlyList<IPAddress> selfAddresses = null, Uri selfUrl = null)
         {
             if (!ClusterInitialized)
                 throw new InvalidOperationException();
@@ -295,8 +295,8 @@ namespace DnsServerCore.Cluster
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, options, selfAddresses);
-                if (options.HasValue || selfAddresses is not null)
+                WriteConfigTo(fS, options, selfAddresses, selfUrl);
+                if (options.HasValue || selfAddresses is not null || selfUrl is not null)
                     fS.Flush(flushToDisk: true);
             }
 
@@ -407,7 +407,7 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        private void WriteConfigTo(Stream s, ConfigurationClusterOptions.Settings? options = null, IReadOnlyList<IPAddress> selfAddresses = null)
+        private void WriteConfigTo(Stream s, ConfigurationClusterOptions.Settings? options = null, IReadOnlyList<IPAddress> selfAddresses = null, Uri selfUrl = null)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -431,8 +431,11 @@ namespace DnsServerCore.Cluster
             {
                 bW.Write(Convert.ToByte(clusterNodes.Count));
 
-                foreach (KeyValuePair<int, ClusterNode> node in clusterNodes)
-                    node.Value.WriteTo(bW, node.Value.State == ClusterNodeState.Self ? selfAddresses : null);
+                foreach (ClusterNode node in clusterNodes.Values)
+                {
+                    bool self = node.State == ClusterNodeState.Self;
+                    node.WriteTo(bW, self ? selfAddresses : null, self ? selfUrl : null);
+                }
             }
         }
 
@@ -1228,7 +1231,7 @@ namespace DnsServerCore.Cluster
 
         internal void ApplyManifestOptions(ConfigurationClusterOptions.Candidate? candidate, Action<Action> persist)
         {
-            if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.OwnershipChanged))
+            if (candidate is not { } change || (!change.ValuesChanged && !change.AddressesChanged && !change.EndpointChanged && !change.OwnershipChanged))
             {
                 persist(null);
                 return;
@@ -1237,7 +1240,7 @@ namespace DnsServerCore.Cluster
             lock (_saveLock)
             {
                 if (!ClusterInitialized || GetSelfNode().Type != change.NodeType || GetSelfNode().Id != change.NodeId ||
-                    !ConfigurationClusterOptions.SameAddresses(GetSelfNode().IPAddresses, change.CurrentAddresses) || GetManifestOptions() != change.Current || !_managedOptionNames.SequenceEqual(change.CurrentOwnership))
+                    GetSelfNode().Url != change.CurrentUrl || !ConfigurationClusterOptions.SameAddresses(GetSelfNode().IPAddresses, change.CurrentAddresses) || GetManifestOptions() != change.Current || !_managedOptionNames.SequenceEqual(change.CurrentOwnership))
                     throw new InvalidDataException("/cluster: Cluster options changed during apply. Create a new preview.");
 
                 var zones = _dnsWebService.DnsServer.AuthZoneManager;
@@ -1262,8 +1265,9 @@ namespace DnsServerCore.Cluster
                         }
                         if (recordZones.Length != 0)
                             zones.FlushZoneSaves(recordZones);
-                        if (change.ValuesChanged || change.AddressesChanged)
-                            SaveConfigFileInternal(change.ValuesChanged ? change.Desired : null, change.AddressesChanged ? change.DesiredAddresses : null);
+                        if (change.ValuesChanged || change.AddressesChanged || change.EndpointChanged)
+                            SaveConfigFileInternal(change.ValuesChanged ? change.Desired : null,
+                                change.AddressesChanged ? change.DesiredAddresses : null, change.EndpointChanged ? change.DesiredUrl : null);
                         if (change.OwnershipChanged)
                             WriteManifestOwnership(change.DesiredOwnership);
                     });
@@ -1291,6 +1295,8 @@ namespace DnsServerCore.Cluster
                     SetManifestOptions(change.Desired);
                 if (change.AddressesChanged)
                     GetSelfNode().UpdateSelfNodeIPAddresses(change.DesiredAddresses);
+                if (change.EndpointChanged)
+                    GetSelfNode().UpdateSelfNodeUrl(change.DesiredUrl);
                 _managedOptionNames = change.DesiredOwnership;
             }
 
@@ -1298,7 +1304,7 @@ namespace DnsServerCore.Cluster
                 UpdateHeartbeatTimerForAllClusterNodes();
             if (change.NodeType == ClusterNodeType.Primary && (change.ValuesChanged || change.AddressesChanged || change.OwnershipChanged))
                 TriggerNotifyAllSecondaryNodes();
-            else if (change.AddressesChanged)
+            else if (change.AddressesChanged || change.EndpointChanged)
                 TriggerClusterUpdateForSecondaryNodeChanges();
         }
 

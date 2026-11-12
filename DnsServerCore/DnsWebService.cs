@@ -3268,7 +3268,7 @@ namespace DnsServerCore
                 var clusterOptions = ConfigurationClusterOptions.Prepare(manifest, _clusterManager);
                 Action writeCluster = null;
                 var clusterFiles = new List<string>(2);
-                if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true })
+                if (clusterOptions is { ValuesChanged: true } or { AddressesChanged: true } or { EndpointChanged: true })
                     clusterFiles.Add("cluster.config");
                 if (clusterOptions is { OwnershipChanged: true })
                     clusterFiles.Add(ConfigurationClusterOptions.OwnershipFile);

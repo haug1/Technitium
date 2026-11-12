@@ -284,12 +284,16 @@ namespace DnsServerCore.Cluster
             _ipAddresses = ipAddresses;
         }
 
-        public void UpdateSelfNodeUrl()
+        public void UpdateSelfNodeUrl(Uri url = null)
         {
             if (_state != ClusterNodeState.Self)
                 throw new InvalidOperationException();
 
-            Uri url = new Uri($"https://{_clusterManager.DnsWebService.DnsServer.ServerDomain}:{_clusterManager.DnsWebService.WebServiceTlsPort}/");
+            _url = ValidateSelfNodeUrl(url ?? new Uri($"https://{_clusterManager.DnsWebService.DnsServer.ServerDomain}:{_clusterManager.DnsWebService.WebServiceTlsPort}/"));
+        }
+
+        internal static Uri ValidateSelfNodeUrl(Uri url)
+        {
 
             if (url.OriginalString.Length > 255)
                 throw new ArgumentException("Cluster node URL length must be less than 255 bytes.", nameof(url));
@@ -297,7 +301,7 @@ namespace DnsServerCore.Cluster
             if (!url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Cluster node URL must use HTTPS scheme.", nameof(url));
 
-            _url = url;
+            return url;
         }
 
         public void UpdateNode(Uri url, IReadOnlyList<IPAddress> ipAddresses)
@@ -696,11 +700,11 @@ namespace DnsServerCore.Cluster
             }
         }
 
-        public void WriteTo(BinaryWriter bW, IReadOnlyList<IPAddress> advertisedAddresses = null)
+        public void WriteTo(BinaryWriter bW, IReadOnlyList<IPAddress> advertisedAddresses = null, Uri advertisedUrl = null)
         {
             bW.Write((byte)2); //version
             bW.Write(_id);
-            bW.BaseStream.WriteShortString(_url.OriginalString);
+            bW.BaseStream.WriteShortString((advertisedUrl ?? _url).OriginalString);
 
             IReadOnlyList<IPAddress> addresses = advertisedAddresses ?? _ipAddresses;
             bW.Write(Convert.ToByte(addresses.Count));

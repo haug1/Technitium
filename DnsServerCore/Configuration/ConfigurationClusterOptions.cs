@@ -16,9 +16,10 @@ namespace DnsServerCore.Configuration
         internal const string OwnershipFile = "cluster-ownership.config";
 
         internal readonly record struct Settings(ushort HeartbeatRefresh, ushort HeartbeatRetry, ushort ConfigRefresh, ushort ConfigRetry);
-        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.AddressRecordChange[] AddressRecords, int[] IntervalPeers)
+        internal readonly record struct Candidate(Settings Current, Settings Desired, int NodeId, ClusterNodeType NodeType, IReadOnlyList<string> CurrentOwnership, string[] DesiredOwnership, IReadOnlyList<IPAddress> CurrentAddresses, IReadOnlyList<IPAddress> DesiredAddresses, ClusterManager.AddressRecordChange[] AddressRecords, int[] IntervalPeers, Uri CurrentUrl, Uri DesiredUrl)
         {
             internal bool ValuesChanged => Current != Desired;
+            internal bool EndpointChanged => CurrentUrl != DesiredUrl;
             internal bool AddressesChanged => !SameAddresses(CurrentAddresses, DesiredAddresses);
             internal bool OwnershipChanged => !CurrentOwnership.SequenceEqual(DesiredOwnership);
         }
@@ -139,9 +140,13 @@ namespace DnsServerCore.Configuration
         private static string[] GetDeclaredIntervals(JsonElement section) => section.ValueKind == JsonValueKind.Object
             ? section.EnumerateObject().Select(field => field.Name).Where(IsInterval).Order(StringComparer.Ordinal).ToArray() : [];
 
+        internal static bool ChangesSecondaryWebEndpoint(ConfigurationManifest manifest, ClusterManager cluster) =>
+            cluster.ClusterInitialized && ConfigurationPlan.GetWebListeners(manifest).TlsPort is int port &&
+            cluster.GetSelfNode() is { Type: ClusterNodeType.Secondary } node && node.Url.Port != port;
+
         internal static Candidate? Prepare(ConfigurationManifest manifest, ClusterManager cluster)
         {
-            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0))
+            if (manifest is null || (!IsDeclared(manifest) && cluster.ManagedOptionNames.Count == 0 && !ChangesSecondaryWebEndpoint(manifest, cluster)))
                 return null;
 
             bool declared = manifest.Settings.TryGetProperty("cluster", out JsonElement section);
@@ -187,8 +192,11 @@ namespace DnsServerCore.Configuration
                 ? cluster.PreparePrimaryAddressRecords(self, addresses) : [];
             Settings desired = ReadOptions(section, current);
             int[] peers = current != desired ? cluster.CheckDeclarativeIntervalPeers() : [];
+            Uri endpoint = self.Url;
+            if (ChangesSecondaryWebEndpoint(manifest, cluster))
+                endpoint = ClusterNode.ValidateSelfNodeUrl(new UriBuilder(self.Url) { Port = ConfigurationPlan.GetWebListeners(manifest).TlsPort.Value }.Uri);
             return new Candidate(current, desired, self.Id, self.Type, currentOwnership, ownership,
-                currentAddresses, addresses ?? currentAddresses, records, peers);
+                currentAddresses, addresses ?? currentAddresses, records, peers, self.Url, endpoint);
         }
 
         internal static bool SameAddresses(IReadOnlyList<IPAddress> current, IReadOnlyList<IPAddress> desired) =>
@@ -260,6 +268,8 @@ namespace DnsServerCore.Configuration
             writer.WriteStartObject("manifestClusterOptions");
             writer.WriteNumber("node", candidate.NodeId);
             writer.WriteString("role", candidate.NodeType.ToString());
+            writer.WriteString("currentUrl", candidate.CurrentUrl.AbsoluteUri);
+            writer.WriteString("desiredUrl", candidate.DesiredUrl.AbsoluteUri);
             writer.WritePropertyName("current");
             Export(candidate.Current).WriteTo(writer);
             writer.WritePropertyName("desired");
