@@ -546,7 +546,7 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
 
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
-                    await ConfigurationPlan.ApplyAsync(manifest, _dnsWebService._log, _dnsWebService._dnsServer, manifest.GetDnsLocalEndPoints());
+                    await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints());
                 }
                 catch (InvalidDataException ex)
                 {
@@ -637,6 +637,12 @@ namespace DnsServerCore
                 (LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime) = ReadLoggingFields(request);
                 request.TryGetQueryOrForm("logFolder", out string logFolder);
                 _dnsWebService._log.CheckManifestOwnership(destination, noStackTrace, retentionDays, useLocalTime, logFolder);
+                string requestedDomain = null;
+                if (request.TryGetQueryOrForm("dnsServerDomain", out string dnsServerDomain))
+                {
+                    requestedDomain = DnsServer.NormalizeServerDomain(dnsServerDomain);
+                    _dnsWebService._dnsServer.CheckManifestServerDomain(requestedDomain);
+                }
                 IReadOnlyList<IPEndPoint> requestedDnsEndpoints = null;
                 if (request.TryQueryOrFormArray("dnsServerLocalEndPoints", InterfaceEndPoint.Parse, out IPEndPoint[] dnsServerLocalEndPoints))
                 {
@@ -678,18 +684,14 @@ namespace DnsServerCore
                     {
                         #region general
 
-                        if (request.TryGetQueryOrForm("dnsServerDomain", out string dnsServerDomain))
+                        if (requestedDomain is not null && !_dnsWebService._dnsServer.ManifestOwnsServerDomain &&
+                            !_dnsWebService._dnsServer.ServerDomain.Equals(requestedDomain, StringComparison.OrdinalIgnoreCase))
                         {
-                            dnsServerDomain = dnsServerDomain.TrimEnd('.');
+                            if (_dnsWebService._clusterManager.ClusterInitialized)
+                                DnsServer.CheckClusterServerDomain(requestedDomain, _dnsWebService._clusterManager.ClusterDomain);
 
-                            if (!_dnsWebService._dnsServer.ServerDomain.Equals(dnsServerDomain, StringComparison.OrdinalIgnoreCase))
-                            {
-                                if (_dnsWebService._clusterManager.ClusterInitialized)
-                                    DnsServer.CheckClusterServerDomain(DnsServer.NormalizeServerDomain(dnsServerDomain), _dnsWebService._clusterManager.ClusterDomain);
-
-                                _dnsWebService._dnsServer.ServerDomain = dnsServerDomain;
-                                serverDomainChanged = true;
-                            }
+                            _dnsWebService._dnsServer.ServerDomain = requestedDomain;
+                            serverDomainChanged = true;
                         }
 
                         if ((requestedDnsEndpoints is not null) && !_dnsWebService._dnsServer.ManifestOwnsLocalEndPoints)

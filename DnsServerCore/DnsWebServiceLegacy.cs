@@ -220,7 +220,9 @@ namespace DnsServerCore
                 if (version is >= 28 and <= 42)
                 {
                     ReadLegacyWebConfiguration(reader, version);
-                    stream.ReadShortString(); // server domain
+                    string domain = stream.ReadShortString();
+                    if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
+                        _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
                     if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks || _dnsServer.HasManagedResolverProtocol)
                     {
@@ -262,6 +264,9 @@ namespace DnsServerCore
 
                 if (version is >= 2 and <= 27)
                 {
+                    if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
+                        _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(stream.ReadShortString()));
+
                     if (version < 6)
                         _dnsServer.CheckManifestLocalEndPoints(DnsServer.NormalizeLocalEndPoints(null));
                     else if (_dnsServer.ManifestOwnsLocalEndPoints)
@@ -327,7 +332,9 @@ namespace DnsServerCore
             //dns
             {
                 //general
-                _dnsServer.ServerDomain = bR.BaseStream.ReadShortString();
+                string domain = bR.BaseStream.ReadShortString();
+                if (!_dnsServer.ManifestOwnsServerDomain)
+                    _dnsServer.ServerDomain = domain;
                 IReadOnlyList<IPEndPoint> endpoints = ReadLegacyLocalEndPoints(bR);
                 if (!_dnsServer.ManifestOwnsLocalEndPoints)
                     _dnsServer.LocalEndPoints = endpoints;
@@ -842,7 +849,9 @@ namespace DnsServerCore
 
         private void ReadConfigFromV27(BinaryReader bR, int version)
         {
-            _dnsServer.ServerDomain = bR.BaseStream.ReadShortString();
+            string serverDomain = bR.BaseStream.ReadShortString();
+            if (!_dnsServer.ManifestOwnsServerDomain)
+                _dnsServer.ServerDomain = serverDomain;
             _webServiceHttpPort = bR.ReadInt32();
 
             if (version >= 13)

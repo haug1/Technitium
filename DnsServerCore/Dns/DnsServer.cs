@@ -142,7 +142,8 @@ namespace DnsServerCore.Dns
             Ipv6SourceNetworks = 2048,
             CheckForUpdates = 4096,
             UdpPayloadSize = 8192,
-            DnssecValidation = 16384
+            DnssecValidation = 16384,
+            ServerDomain = 32768
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -651,14 +652,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal()
+        private void SaveConfigFileInternal(string serverDomain = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS);
+                WriteConfigTo(fS, serverDomain);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -706,6 +707,7 @@ namespace DnsServerCore.Dns
             return endpoints;
         }
 
+        internal bool ManifestOwnsServerDomain => _managedDnsSettings.HasFlag(ManagedDnsSettings.ServerDomain);
         internal bool ManifestOwnsLocalEndPoints => _managedDnsSettings.HasFlag(ManagedDnsSettings.LocalEndPoints);
         internal bool HasManagedDnsSettings => _managedDnsSettings != 0;
         internal bool ManifestOwnsDefaultRecordTtl => _managedDnsSettings.HasFlag(ManagedDnsSettings.RecordTtl);
@@ -723,11 +725,13 @@ namespace DnsServerCore.Dns
         internal bool HasManagedResolverProtocol => ManifestOwnsUdpPayloadSize || ManifestOwnsDnssecValidation;
         internal bool ManifestOwnsUpdateChecks => _managedDnsSettings.HasFlag(ManagedDnsSettings.CheckForUpdates);
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | SourceOwnership | ResolverOwnership)) != 0;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership)) != 0;
         internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
+            if (ManifestOwnsServerDomain)
+                yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
                 yield return "/dns/localEndpoints";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv4SourceNetworks))
@@ -845,6 +849,12 @@ namespace DnsServerCore.Dns
                 NotifyAllowedNetworks = defaults.NotifyNetworks;
         }
 
+        internal void CheckManifestServerDomain(string domain)
+        {
+            if (ManifestOwnsServerDomain && !string.Equals(domain, _serverDomain, StringComparison.OrdinalIgnoreCase))
+                throw new DnsWebServiceException("/dns/serverDomain: Setting is managed by the configuration manifest.");
+        }
+
         internal void CheckManifestLocalEndPoints(IReadOnlyList<IPEndPoint> endpoints)
         {
             if (ManifestOwnsLocalEndPoints && !HaveSameLocalEndPoints(_localEndPoints, endpoints))
@@ -930,10 +940,14 @@ namespace DnsServerCore.Dns
         internal void CheckRestoreManifestDnsSettings(BinaryReader reader, bool isConfigTransfer)
         {
             int version = ReadConfigVersion(reader);
-            reader.BaseStream.ReadShortString(); // server domain
+            string serverDomain = reader.BaseStream.ReadShortString();
             IReadOnlyList<IPEndPoint> endpoints = ReadLocalEndPoints(reader);
             if (!isConfigTransfer)
+            {
+                if (ManifestOwnsServerDomain)
+                    CheckManifestServerDomain(NormalizeServerDomain(serverDomain));
                 CheckManifestLocalEndPoints(endpoints);
+            }
             if (HasManagedClusterDnsSettings || (!isConfigTransfer && HasManagedSourceNetworks))
             {
                 SourceNetworks source = ReadSourceNetworks(reader);
@@ -983,7 +997,7 @@ namespace DnsServerCore.Dns
 
             //general
             string serverDomain = s.ReadShortString();
-            if (!isConfigTransfer)
+            if (!isConfigTransfer && (readOwnership || !ManifestOwnsServerDomain))
             {
                 try
                 {
@@ -1514,7 +1528,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s)
+        private void WriteConfigTo(Stream s, string serverDomain)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -1522,7 +1536,7 @@ namespace DnsServerCore.Dns
             bW.Write((byte)7); //version
 
             //general
-            s.WriteShortString(_serverDomain);
+            s.WriteShortString(serverDomain ?? _serverDomain);
 
             {
                 bW.Write(Convert.ToByte(_localEndPoints.Count));
@@ -7264,6 +7278,7 @@ namespace DnsServerCore.Dns
             if (IPAddress.TryParse(value, out _))
                 throw new DnsServerException("Invalid domain name [" + value + "]: IP address cannot be used for DNS server domain name.");
 
+            _ = new MailAddress("hostadmin@" + value);
             return value.ToLowerInvariant();
         }
 
@@ -7303,11 +7318,12 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
             bool changed = owned && !HaveSameLocalEndPoints(previous, endpoints);
+            bool domainChanged = serverDomain is not null && !string.Equals(serverDomain, _serverDomain, StringComparison.OrdinalIgnoreCase);
             bool restarted = changed && !alreadyActive;
             try
             {
@@ -7321,6 +7337,8 @@ namespace DnsServerCore.Dns
                 {
                     ManagedDnsSettings previousOwnership = _managedDnsSettings;
                     ManagedDnsSettings ownership = owned ? ManagedDnsSettings.LocalEndPoints : 0;
+                    if (serverDomain is not null)
+                        ownership |= ManagedDnsSettings.ServerDomain;
                     if (defaults.Record.HasValue)
                         ownership |= ManagedDnsSettings.RecordTtl;
                     if (defaults.Ns.HasValue)
@@ -7369,7 +7387,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7383,7 +7401,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(SaveConfigFileInternal);
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null));
                         _pendingSave = false;
                     }
                     catch
@@ -7395,6 +7413,10 @@ namespace DnsServerCore.Dns
                         SetSourceNetworks(previousSourceNetworks);
                         throw;
                     }
+
+                    // Schedule updates to derived records only after the persisted settings commit.
+                    if (domainChanged)
+                        ServerDomain = serverDomain;
                 }
             }
             catch

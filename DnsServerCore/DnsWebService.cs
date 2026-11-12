@@ -2796,7 +2796,32 @@ namespace DnsServerCore
             StartTlsCertificateUpdateTimer();
         }
 
-        private void CheckAndLoadSelfSignedCertificate(bool forceGenerateNew, bool throwException)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false)
+        {
+            string domain = manifest.GetServerDomain();
+            bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate && domain is not null &&
+                !string.Equals(domain, _dnsServer.ServerDomain, StringComparison.OrdinalIgnoreCase);
+            Action writeCertificate = regenerateCertificate ? () => CheckAndLoadSelfSignedCertificate(true, true, domain) : null;
+
+            SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
+            DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
+            try
+            {
+                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate, alreadyActive);
+            }
+            catch
+            {
+                if (regenerateCertificate)
+                {
+                    _webServiceSslServerAuthenticationOptions = previousTlsOptions;
+                    _webServiceCertificateLastModifiedOn = previousCertificateLastModified;
+                }
+
+                throw;
+            }
+        }
+
+        private void CheckAndLoadSelfSignedCertificate(bool forceGenerateNew, bool throwException, string serverDomain = null)
         {
             string selfSignedCertificateFilePath = Path.Combine(_configFolder, "self-signed-cert.pfx");
 
@@ -2804,13 +2829,13 @@ namespace DnsServerCore
             {
                 string oldSelfSignedCertificateFilePath = Path.Combine(_configFolder, "cert.pfx");
 
-                if (!oldSelfSignedCertificateFilePath.Equals(_log.ConvertToAbsolutePath(_webServiceTlsCertificatePath), Environment.OSVersion.Platform == PlatformID.Win32NT ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) && File.Exists(oldSelfSignedCertificateFilePath) && !File.Exists(selfSignedCertificateFilePath))
+                if (serverDomain is null && !oldSelfSignedCertificateFilePath.Equals(_log.ConvertToAbsolutePath(_webServiceTlsCertificatePath), Environment.OSVersion.Platform == PlatformID.Win32NT ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) && File.Exists(oldSelfSignedCertificateFilePath) && !File.Exists(selfSignedCertificateFilePath))
                     File.Move(oldSelfSignedCertificateFilePath, selfSignedCertificateFilePath);
 
                 if (forceGenerateNew || !File.Exists(selfSignedCertificateFilePath))
                 {
                     RSA rsa = RSA.Create(2048);
-                    CertificateRequest req = new CertificateRequest("cn=" + _dnsServer.ServerDomain, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    CertificateRequest req = new CertificateRequest("cn=" + (serverDomain ?? _dnsServer.ServerDomain), rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
                     SubjectAlternativeNameBuilder san = new SubjectAlternativeNameBuilder();
                     bool sanAdded = false;
@@ -2829,7 +2854,9 @@ namespace DnsServerCore
 
                     X509Certificate2 cert = req.CreateSelfSigned(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddYears(5));
 
-                    File.WriteAllBytes(selfSignedCertificateFilePath, cert.Export(X509ContentType.Pkcs12, null as string));
+                    using var certificateFile = new FileStream(selfSignedCertificateFilePath, FileMode.Create, FileAccess.Write);
+                    certificateFile.Write(cert.Export(X509ContentType.Pkcs12, null as string));
+                    certificateFile.Flush(flushToDisk: true);
                 }
 
                 if ((_webServiceSslServerAuthenticationOptions is null) || string.IsNullOrEmpty(_webServiceTlsCertificatePath))
@@ -2997,7 +3024,7 @@ namespace DnsServerCore
                         await _dnsServer.StartAsync(throwIfBindFails || (endpoints is not null), endpoints ?? _dnsServer.LocalEndPoints);
                         _dhcpServer.Start();
                         if (startupManifest is not null)
-                            await ConfigurationPlan.ApplyAsync(startupManifest, _log, _dnsServer, endpoints, alreadyActive: true);
+                            await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true);
                     });
                 }
                 catch

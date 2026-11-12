@@ -106,7 +106,7 @@ namespace DnsServerCore
         {
             _isPortableApp = isPortableApp;
             _configFolder = configFolder;
-            ConfigurationJournal.Recover(_configFolder, "dns.config", "log.config");
+            ConfigurationJournal.Recover(_configFolder, "dns.config", "log.config", "self-signed-cert.pfx");
 
             AppDomain.CurrentDomain.UnhandledException += delegate (object sender, UnhandledExceptionEventArgs e)
             {
@@ -324,7 +324,7 @@ namespace DnsServerCore
             return ConvertToRelativePath(ConvertToAbsolutePath(path));
         }
 
-        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig)
+        internal void ApplyManifestSettings(LoggingType? destination, bool? noStackTrace, int? retentionDays, bool? useLocalTime, string folder, Action writeDnsConfig, Action writeCertificate)
         {
             lock (_saveLock)
             {
@@ -354,7 +354,8 @@ namespace DnsServerCore
                     string.Equals(folder ?? previousFolder, previousFolder, StringComparison.Ordinal))
                 {
                     if (writeDnsConfig is not null)
-                        ConfigurationJournal.Persist(_configFolder, writeDnsConfig, "dns.config");
+                        ConfigurationJournal.Persist(_configFolder, writeDnsConfig + writeCertificate, writeCertificate is null
+                            ? ["dns.config"] : ["dns.config", "self-signed-cert.pfx"]);
                     return;
                 }
 
@@ -378,7 +379,8 @@ namespace DnsServerCore
                     if (writeDnsConfig is null)
                         ConfigurationJournal.Persist(_configFolder, SaveConfigFileInternal, "log.config");
                     else
-                        ConfigurationJournal.Persist(_configFolder, writeDnsConfig + SaveConfigFileInternal, "dns.config", "log.config");
+                        ConfigurationJournal.Persist(_configFolder, writeDnsConfig + SaveConfigFileInternal + writeCertificate, writeCertificate is null
+                            ? ["dns.config", "log.config"] : ["dns.config", "log.config", "self-signed-cert.pfx"]);
                     _pendingSave = false;
                 }
                 catch

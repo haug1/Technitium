@@ -37,7 +37,7 @@ namespace DnsServerCore.Configuration
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
-            [ServerDomainPath] = Field("dnsServerDomain", DnsServer.DefaultServerDomain),
+            [ServerDomainPath] = Field("dnsServerDomain", DnsServer.DefaultServerDomain, canApply: true),
             [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }, canApply: true),
             [Ipv4SourcePath] = Field("dnsServerIPv4SourceAddresses", new[] { "0.0.0.0" }, canApply: true),
             [Ipv6SourcePath] = Field("dnsServerIPv6SourceAddresses", new[] { "::" }, canApply: true),
@@ -119,7 +119,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, bool alreadyActive)
         {
             CheckApplySupport(manifest);
 
@@ -131,13 +131,13 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
-                writeDnsConfig));
+                writeDnsConfig, writeCertificate));
         }
 
         private static DnsServer.SourceNetworks GetSourceNetworks(ConfigurationManifest manifest)
@@ -209,6 +209,8 @@ namespace DnsServerCore.Configuration
         {
             if (!clusterInitialized)
                 return;
+            if (manifest.GetServerDomain() is not null)
+                throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             if (GetAuthoritativeDefaults(manifest).HasValues)
                 throw new InvalidDataException("/dns/authoritative: Applying authoritative defaults to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)

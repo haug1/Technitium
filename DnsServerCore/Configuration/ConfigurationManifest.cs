@@ -113,6 +113,12 @@ namespace DnsServerCore.Configuration
             return new ConfigurationManifest(filePath, root.Clone());
         }
 
+        internal string GetServerDomain()
+        {
+            return Settings.TryGetProperty("dns", out JsonElement dns) && dns.TryGetProperty("serverDomain", out JsonElement domain)
+                ? ReadServerDomain(domain) : null;
+        }
+
         internal static string ReadServerDomain(JsonElement value)
         {
             if (value.ValueKind == JsonValueKind.Null)

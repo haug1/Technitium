@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Net.Http.Headers;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -492,6 +493,38 @@ namespace DnsServerCore.Tests
             string manifest = JsonSerializer.Serialize(new { schemaVersion = 1, dns = new { serverDomain = domain } });
             InvalidDataException error = Assert.Throws<InvalidDataException>(() => Load(manifest));
             Assert.StartsWith("/dns/serverDomain:", error.Message);
+        }
+
+        [Fact]
+        public async Task ServerDomainApplyUpdatesSelfSignedCertificateAndPersistsOwnership()
+        {
+            await using var server = await LoopbackWebService.StartAsync(enableTls: true);
+            const string manifest = """{"schemaVersion":1,"dns":{"serverDomain":"RENAMED.TEST."}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+
+            string blockedPath = Path.Combine(server.ConfigurationDirectory, "dns.tmp");
+            Directory.CreateDirectory(blockedPath);
+            JsonElement failed = await ApplyAsync(server, manifest, revision);
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Assert.Equal("server.test", (await server.GetSettingsAsync()).GetProperty("dnsServerDomain").GetString());
+            Directory.Delete(blockedPath);
+
+            revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            using var certificate = X509CertificateLoader.LoadPkcs12FromFile(
+                Path.Combine(server.ConfigurationDirectory, "self-signed-cert.pfx"), null);
+            Assert.Equal("renamed.test", certificate.GetNameInfo(X509NameType.SimpleName, false));
+
+            await server.RestartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            Assert.Equal("renamed.test", current.GetProperty("dnsServerDomain").GetString());
+            Assert.Equal("/dns/serverDomain", Assert.Single(current.GetProperty("managedSettings").EnumerateArray()).GetString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement rejected = await server.CallAsync("settings/set?dnsServerDomain=other.test&maxLogFileDays=180", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/serverDomain", rejected.GetProperty("errorMessage").GetString());
+            Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
         }
 
         [Fact]
