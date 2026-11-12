@@ -31,6 +31,7 @@ namespace DnsServerCore.HttpApi.Models
         public bool SupportsDeclarativeDnsPolicy { get; set; }
         public bool SupportsDeclarativeResolverPolicy { get; set; }
         public bool SupportsDeclarativeRateLimits { get; set; }
+        public bool SupportsDeclarativeProxy { get; set; }
         public bool SupportsDeclarativeClusterHandoff { get; set; }
         public string[]? ManagedOptionPaths { get; set; }
         public string? ClusterDomain { get; set; }

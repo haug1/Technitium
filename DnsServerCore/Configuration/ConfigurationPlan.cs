@@ -900,11 +900,10 @@ namespace DnsServerCore.Configuration
             CheckClusterBlockListSupport(manifest, cluster);
             if (GetDnsTuning(manifest) != default)
                 throw new InvalidDataException("/dns/tuning: Applying DNS tuning to a cluster is not implemented.");
-            if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy) && proxy.EnumerateObject().Any())
-                throw new InvalidDataException("/dns/proxy: Applying outbound proxy settings to a cluster is not implemented.");
         }
 
-        internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits)? CheckClusterDnsPolicySupport(ConfigurationManifest manifest, ClusterManager cluster)
+        internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits, bool RequiresProxy)? CheckClusterDnsPolicySupport(
+            ConfigurationManifest manifest, ClusterManager cluster, ConfigurationProxy.Candidate? proxy = null)
         {
             if (!cluster.ClusterInitialized)
                 return null;
@@ -919,6 +918,8 @@ namespace DnsServerCore.Configuration
             var rateLimits = GetRateLimitPolicy(manifest);
             if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
             {
+                if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxyDeclaration) && proxyDeclaration.EnumerateObject().Any())
+                    throw new InvalidDataException("/dns/proxy: Only the Primary can apply cluster proxy settings.");
                 if (defaults.HasValues || resolver.HasValues || subnet != default || autoUpdate.HasValue ||
                     recursion != default || blocking != default || forwarding != default || rateLimits != default)
                     throw new InvalidDataException("/dns: Only the Primary can apply cluster DNS policy.");
@@ -928,10 +929,12 @@ namespace DnsServerCore.Configuration
             var dns = cluster.DnsWebService.DnsServer;
             bool resolverPolicyChanges = dns.ClusterResolverPolicyChanges(recursion, blocking, forwarding);
             bool rateLimitChanges = dns.ClusterRateLimitPolicyChanges(rateLimits);
-            if (!resolverPolicyChanges && !rateLimitChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
+            bool proxyChanges = proxy.HasValue && dns.ClusterProxyChanges(proxy.Value);
+            if (!resolverPolicyChanges && !rateLimitChanges && !proxyChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
                 return null;
 
-            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges, rateLimitChanges), resolverPolicyChanges, rateLimitChanges);
+            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges, rateLimitChanges, proxyChanges),
+                resolverPolicyChanges, rateLimitChanges, proxyChanges);
         }
 
         internal static (string Path, int[] Peers)? CheckClusterDomainListSupport(ConfigurationManifest manifest, ClusterManager cluster)

@@ -1104,10 +1104,21 @@ namespace DnsServerCore
                     WriteDnsSettings(writer, includeSecrets: false);
                     if (manifest is not null)
                     {
-                        if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager) is { } dnsPolicy)
+                        if (_dnsWebService._clusterManager.ClusterInitialized)
                         {
-                            writer.WritePropertyName("dnsPolicyPeers");
-                            JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits });
+                            if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement declaration) &&
+                                declaration.TryGetProperty("password", out JsonElement reference) && reference.ValueKind != JsonValueKind.Null &&
+                                !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                                throw new DnsWebServiceException("Access was denied.");
+
+                            if (_dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary)
+                                preparedProxy ??= ConfigurationPlan.PrepareProxy(manifest, _dnsWebService._dnsServer);
+
+                            if (ConfigurationPlan.CheckClusterDnsPolicySupport(manifest, _dnsWebService._clusterManager, preparedProxy) is { } dnsPolicy)
+                            {
+                                writer.WritePropertyName("dnsPolicyPeers");
+                                JsonSerializer.Serialize(writer, new { dnsPolicy.Peers, dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy });
+                            }
                         }
                         if (ConfigurationPlan.CheckClusterDomainListSupport(manifest, _dnsWebService._clusterManager) is { } domainLists)
                         {

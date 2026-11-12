@@ -1200,9 +1200,14 @@ namespace DnsServerCore.Dns
         private ConfigurationProxy.Fields ManagedProxyFields => (ConfigurationProxy.Fields)_managedDnsSettingsExtension & ConfigurationProxy.Fields.All;
         internal bool HasManagedProxy => ManagedProxyFields != 0;
 
-        internal void CheckManifestProxy(NetProxy candidate)
+        internal bool ClusterProxyChanges(ConfigurationProxy.Candidate proxy) =>
+            proxy.Managed != ManagedProxyFields ||
+            ((ConfigurationProxy.Fields)_inheritedExtendedDnsPolicy & ConfigurationProxy.Fields.All) != 0 ||
+            proxy.Managed != 0 && ConfigurationProxy.Differences(_proxy, proxy.Proxy) != 0;
+
+        internal void CheckManifestProxy(NetProxy candidate, bool isConfigTransfer = false)
         {
-            var managed = ManagedProxyFields;
+            var managed = isConfigTransfer ? ManagedProxyFields & ~(ConfigurationProxy.Fields)_inheritedExtendedDnsPolicy : ManagedProxyFields;
             if (managed == 0)
                 return;
             string conflict = ConfigurationProxy.Paths(managed & ConfigurationProxy.Differences(_proxy, candidate)).FirstOrDefault();
@@ -1289,6 +1294,9 @@ namespace DnsServerCore.Dns
             ManagedDnsSettingsExtension.RateLimitUdpTruncation | ManagedDnsSettingsExtension.RateLimitBypass;
         private bool OwnsRateLimit(ManagedDnsSettingsExtension setting, bool isConfigTransfer) =>
             ((_managedDnsSettingsExtension & ~(isConfigTransfer ? _inheritedExtendedDnsPolicy : 0)) & setting) != 0;
+
+        private const ManagedDnsSettingsExtension TransferableExtendedDnsPolicyOwnership =
+            RateLimitOwnership | (ManagedDnsSettingsExtension)ConfigurationProxy.Fields.All;
 
         internal bool HasManagedRateLimits => (_managedDnsSettingsExtension & RateLimitOwnership) != 0;
 
@@ -1507,7 +1515,7 @@ namespace DnsServerCore.Dns
             (subnet.HasIpv4Override && !Equals(subnet.Ipv4Override, _eDnsClientSubnetIpv4Override)) ||
             (subnet.HasIpv6Override && !Equals(subnet.Ipv6Override, _eDnsClientSubnetIpv6Override));
 
-        internal bool HasManagedClusterDnsSettings => HasManagedClusterDnsPolicy || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits || HasManagedDnsTuning;
+        internal bool HasManagedClusterDnsSettings => HasManagedClusterDnsPolicy || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits || HasManagedDnsTuning || HasManagedProxy;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -2976,7 +2984,7 @@ namespace DnsServerCore.Dns
                 restoredProxy.BypassList = bypassList;
             }
             if (!readOwnership)
-                CheckManifestProxy(restoredProxy);
+                CheckManifestProxy(restoredProxy, isConfigTransfer);
             if (apply && (readOwnership || ConfigurationProxy.Differences(_proxy, restoredProxy) != 0))
                 _proxy = restoredProxy;
 
@@ -3059,7 +3067,7 @@ namespace DnsServerCore.Dns
                 _managedDnsSettings = local | _inheritedDnsPolicy;
                 var transferredExtension = version >= 7 ? (ManagedDnsSettingsExtension)ReadOwnershipWord(s) : 0;
                 var localExtension = _managedDnsSettingsExtension & ~_inheritedExtendedDnsPolicy;
-                _inheritedExtendedDnsPolicy = transferredExtension & RateLimitOwnership & ~localExtension;
+                _inheritedExtendedDnsPolicy = transferredExtension & TransferableExtendedDnsPolicyOwnership & ~localExtension;
                 _managedDnsSettingsExtension = localExtension | _inheritedExtendedDnsPolicy;
             }
             else if (readOwnership)
@@ -3080,7 +3088,7 @@ namespace DnsServerCore.Dns
                     }
                 }
                 _inheritedDnsPolicy = (ManagedDnsSettings)ReadOwnershipWord(s) & _managedDnsSettings & TransferableDnsPolicyOwnership;
-                _inheritedExtendedDnsPolicy = (ManagedDnsSettingsExtension)ReadOwnershipWord(s) & _managedDnsSettingsExtension & RateLimitOwnership;
+                _inheritedExtendedDnsPolicy = (ManagedDnsSettingsExtension)ReadOwnershipWord(s) & _managedDnsSettingsExtension & TransferableExtendedDnsPolicyOwnership;
             }
         }
 

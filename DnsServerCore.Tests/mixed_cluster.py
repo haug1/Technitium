@@ -123,6 +123,8 @@ def wait_for(check, description, timeout=45):
 def verify(current, previous, folder, propagation, graceful):
     ports = allocate_ports()
     password = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_PROXY_PASSWORD"] = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_PROXY_ROTATED_PASSWORD"] = secrets.token_hex(16)
     primary = Node(current, folder / "primary", "primary.cluster.test", ports[:3], password)
     secondary = Node(previous, folder / "secondary", "secondary.cluster.test", ports[3:], password)
     try:
@@ -143,6 +145,8 @@ def verify(current, previous, folder, propagation, graceful):
         resolver_revision = ok(primary.call("settings/config/plan", manifest=resolver_policy))["revision"]
         rate_policy = {"schemaVersion": 1, "dns": {"rateLimits": {"sampleMinutes": 2}}}
         rate_revision = ok(primary.call("settings/config/plan", manifest=rate_policy))["revision"]
+        proxy_policy = {"schemaVersion": 1, "dns": {"proxy": {"type": "None"}}}
+        proxy_revision = ok(primary.call("settings/config/plan", manifest=proxy_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -153,12 +157,26 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeDnsPolicy"] is True
             assert joined["supportsDeclarativeResolverPolicy"] is True
             assert joined["supportsDeclarativeRateLimits"] is True
+            assert joined["supportsDeclarativeProxy"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeRateLimits"), joined
+        assert not joined.get("supportsDeclarativeProxy"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=proxy_policy),
+            primary.call("settings/config/apply", manifest=proxy_policy, revision=proxy_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative proxy settings" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            assert "/dns/proxy/type" not in ok(node.call("settings/get"))["managedSettings"]
+        if joined.get("supportsDeclarativeRateLimits"):
+            plan = ok(primary.call("settings/config/plan", manifest=rate_policy))
+            ok(primary.call("settings/config/apply", manifest=rate_policy, revision=plan["revision"]))
+            assert ok(primary.call("settings/get"))["qpmLimitSampleMinutes"] == 2
+            print("Mixed-build check passed. Existing rate-limit support allowed the update and rejected proxy ownership.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=rate_policy),
             primary.call("settings/config/apply", manifest=rate_policy, revision=rate_revision),
@@ -452,6 +470,7 @@ def verify_propagation(primary, secondary, graceful):
 
     verify_domain_lists(primary, secondary, release, local_web, new_primary_tls_port)
     verify_dns_policy(primary, secondary, release, local_web)
+    verify_proxy_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -635,6 +654,63 @@ def verify_dns_policy(primary, secondary, cluster_manifest, local_web):
     assert not apply(primary, desired)["changes"]
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(secondary, 460, 22, 4300, 48, 6, set()), "the Secondary to release DNS policy ownership")
+
+
+def verify_proxy_policy(primary, secondary, cluster_manifest, local_web):
+    first_reference = "TECHNITIUM_TEST_CLUSTER_PROXY_PASSWORD"
+    next_reference = "TECHNITIUM_TEST_CLUSTER_PROXY_ROTATED_PASSWORD"
+    proxy = {"type": "Http", "address": "127.0.0.1", "port": 9, "username": "cluster-fixture",
+             "password": {"environment": first_reference}, "bypass": ["cluster.test", "127.0.0.0/8"]}
+    manifest = {**cluster_manifest, "dns": {"proxy": proxy}}
+    paths = {f"/dns/proxy/{field}" for field in proxy}
+
+    denied = secondary.call("settings/config/plan", manifest=manifest)
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+    missing = {**cluster_manifest, "dns": {"proxy": {**proxy, "password": {
+        "environment": "TECHNITIUM_TEST_CLUSTER_PROXY_MISSING_PASSWORD"}}}}
+    rejected = primary.call("settings/config/plan", manifest=missing)
+    assert rejected["status"] == "error" and "/dns/proxy/password" in rejected["errorMessage"], rejected
+
+    def apply(node, desired):
+        def preview():
+            response = node.call("settings/config/plan", manifest=desired)
+            if response["status"] == "error" and "has not advertised support for declarative proxy settings" in response["errorMessage"]:
+                return None
+            return ok(response)
+
+        plan = wait_for(preview, "the cluster to confirm proxy support")
+        assert all(os.environ[name] not in json.dumps(plan) for name in (first_reference, next_reference))
+        ok(node.call("settings/config/apply", manifest=desired, revision=plan["revision"]))
+        return plan
+
+    def matches(node, reference, managed):
+        state = ok(node.call("settings/get"))
+        actual = state.get("proxy")
+        return (actual is not None and actual.get("type") == "Http" and actual.get("bypass") == proxy["bypass"]
+                and actual.get("password") == os.environ[reference]
+                and paths.intersection(state["managedSettings"]) == managed)
+
+    apply(primary, manifest)
+    wait_for(lambda: matches(secondary, first_reference, paths), "the Secondary to inherit the proxy and ownership")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(secondary, first_reference, paths)
+    apply(secondary, local_web)
+    assert matches(secondary, first_reference, paths)
+
+    exported = ok(secondary.call("settings/config/export"))
+    assert "/dns/proxy/password" in exported["missingInputs"]
+    assert os.environ[first_reference] not in json.dumps(exported)
+    rejected = secondary.call("settings/set?proxyType=None")
+    assert rejected["status"] == "error" and "/dns/proxy/" in rejected["errorMessage"], rejected
+
+    proxy["password"] = {"environment": next_reference}
+    rotation = apply(primary, manifest)
+    assert [change["path"] for change in rotation["changes"]] == ["/dns/proxy/password"], rotation
+    wait_for(lambda: matches(secondary, next_reference, paths), "the Secondary to receive the rotated proxy credential")
+    assert not apply(primary, manifest)["changes"]
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(secondary, next_reference, set()), "the Secondary to release proxy ownership")
 
 
 def assert_promoted_policy(state):
