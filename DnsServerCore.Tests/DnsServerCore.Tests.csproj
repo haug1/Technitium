@@ -11,6 +11,7 @@
     <ProjectReference Include="../DnsServerCore/DnsServerCore.csproj" />
     <None Include="../Apps/FilterAaaaApp/bin/$(Configuration)/FilterAaaaApp.deps.json"
           Link="FilterAaaaApp.deps.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures/dns-v6.config" CopyToOutputDirectory="PreserveNewest" />
     <Reference Include="TechnitiumLibrary.Net">
       <HintPath>../../TechnitiumLibrary/bin/TechnitiumLibrary.Net.dll</HintPath>
     </Reference>
