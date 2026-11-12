@@ -1,6 +1,8 @@
 using DnsServerCore.Configuration;
 using System;
 using System.IO;
+using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -36,6 +38,34 @@ namespace DnsServerCore.Tests
             JsonElement after = await server.GetSettingsAsync();
             Assert.Equal(port, after.GetProperty("webServiceHttpPort").GetInt32());
             Assert.Equal(JsonValueKind.Null, after.GetProperty("defaultResponsiblePerson").ValueKind);
+        }
+
+        [Fact]
+        public async Task ServerRevisionBindsTheManifestAndCurrentSettings()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """{"schemaVersion":1,"logging":{"retentionDays":180}}""";
+
+            JsonElement first = await PreviewAsync(server, manifest);
+            string revision = first.GetProperty("revision").GetString()!;
+            Assert.Equal(64, revision.Length);
+            Assert.Equal(revision, (await PreviewAsync(server, manifest)).GetProperty("revision").GetString());
+            Assert.NotEqual(revision, (await PreviewAsync(server, manifest.Replace("180", "181", StringComparison.Ordinal))).GetProperty("revision").GetString());
+            JsonElement change = Assert.Single(first.GetProperty("changes").EnumerateArray());
+            Assert.Equal("/logging/retentionDays", change.GetProperty("path").GetString());
+
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?maxLogFileDays=180", server.AdminToken));
+            JsonElement updated = await PreviewAsync(server, manifest);
+            Assert.NotEqual(revision, updated.GetProperty("revision").GetString());
+            Assert.Equal(0, updated.GetProperty("changes").GetArrayLength());
+        }
+
+        private static async Task<JsonElement> PreviewAsync(LoopbackWebService server, string json)
+        {
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            JsonElement result = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+            LoopbackWebService.AssertOk(result);
+            return result.GetProperty("response");
         }
 
         [Fact]

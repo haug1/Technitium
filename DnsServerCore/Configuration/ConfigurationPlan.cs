@@ -1,8 +1,10 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Mail;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DnsServerCore.Dns.ZoneManagers;
@@ -66,6 +68,28 @@ namespace DnsServerCore.Configuration
             }
 
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
+        }
+
+        internal static string GetRevision(ConfigurationManifest manifest, JsonElement currentSettings, byte[] key)
+        {
+            var data = new ArrayBufferWriter<byte>();
+            using (var writer = new Utf8JsonWriter(data))
+            {
+                writer.WriteStartArray();
+                manifest.Settings.WriteTo(writer);
+                writer.WriteStartObject();
+                foreach (var (path, setting) in _settings.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+                {
+                    writer.WritePropertyName(path);
+                    GetCurrentSetting(currentSettings, path, setting).WriteTo(writer);
+                }
+                writer.WriteEndObject();
+                writer.WriteEndArray();
+            }
+
+            // The snapshot can include sensitive URLs. Use a server-local key so the
+            // revision cannot be used to guess values from the preview response.
+            return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
         public static JsonObject Export(JsonElement currentSettings)

@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using TechnitiumLibrary.Net.Dns;
 
 namespace DnsServerCore.Configuration
@@ -31,6 +33,24 @@ namespace DnsServerCore.Configuration
             string fullPath = Path.GetFullPath(filePath);
             using FileStream stream = File.OpenRead(fullPath);
             using JsonDocument document = ParseDocument(stream);
+            return FromDocument(document, fullPath);
+        }
+
+        internal static async Task<ConfigurationManifest> ReadAsync(Stream stream, CancellationToken cancellationToken)
+        {
+            try
+            {
+                using JsonDocument document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+                return FromDocument(document, null);
+            }
+            catch (JsonException ex)
+            {
+                throw InvalidJson(ex);
+            }
+        }
+
+        private static ConfigurationManifest FromDocument(JsonDocument document, string filePath)
+        {
             JsonElement root = document.RootElement;
 
             if (root.ValueKind != JsonValueKind.Object)
@@ -48,7 +68,7 @@ namespace DnsServerCore.Configuration
             if (root.TryGetProperty("dns", out JsonElement dns))
                 CheckDnsNameKeys(dns, "tsigKeys", "/dns", allowRoot: false);
 
-            return new ConfigurationManifest(fullPath, root.Clone());
+            return new ConfigurationManifest(filePath, root.Clone());
         }
 
         public void ValidateReferences()
@@ -164,9 +184,14 @@ namespace DnsServerCore.Configuration
             }
             catch (JsonException ex)
             {
-                // Parser messages can contain fragments of the supplied manifest.
-                throw new InvalidDataException($"Invalid JSON at line {ex.LineNumber.GetValueOrDefault() + 1}, byte {ex.BytePositionInLine.GetValueOrDefault() + 1}.");
+                throw InvalidJson(ex);
             }
+        }
+
+        private static InvalidDataException InvalidJson(JsonException ex)
+        {
+            // Parser messages can contain fragments of the supplied manifest.
+            return new InvalidDataException($"Invalid JSON at line {ex.LineNumber.GetValueOrDefault() + 1}, byte {ex.BytePositionInLine.GetValueOrDefault() + 1}.");
         }
 
         private static JsonSchema LoadSchema()

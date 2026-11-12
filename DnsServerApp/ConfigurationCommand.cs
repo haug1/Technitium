@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -28,7 +29,7 @@ namespace DnsServerApp
                         return 0;
 
                     case "export" when args.Length == 3:
-                        JsonElement snapshot = await ReadCurrentSettingsAsync(ParseServerUrl(args[2]));
+                        JsonElement snapshot = await ReadServerResponseAsync(ParseServerUrl(args[2]), "/api/settings/get");
                         Console.WriteLine(ConfigurationPlan.Export(snapshot).ToJsonString(_exportOptions));
                         Console.Error.WriteLine("Partial export of supported settings. Supply blocklist sources separately if needed.");
                         return 0;
@@ -76,19 +77,22 @@ namespace DnsServerApp
 
         private static async Task WritePlanAsync(ConfigurationManifest manifest, Uri serverUrl)
         {
-            JsonElement current = await ReadCurrentSettingsAsync(serverUrl);
-            var changes = ConfigurationPlan.Create(manifest, current);
-            if (changes.Count == 0)
+            using var content = new StringContent(manifest.Settings.GetRawText(), Encoding.UTF8, "application/json");
+            JsonElement preview = await ReadServerResponseAsync(serverUrl, "/api/settings/config/plan", content);
+            JsonElement changes = preview.GetProperty("changes");
+            if (changes.GetArrayLength() == 0)
                 Console.WriteLine("No setting changes.");
 
-            foreach (ConfigurationChange change in changes)
+            foreach (JsonElement change in changes.EnumerateArray())
             {
-                string restart = change.RestartWebService ? " (web service restart)" : "";
-                Console.WriteLine($"{change.Kind} {change.Path}{restart}");
+                string restart = change.GetProperty("restartWebService").GetBoolean() ? " (web service restart)" : "";
+                Console.WriteLine($"{change.GetProperty("kind").GetString()} {change.GetProperty("path").GetString()}{restart}");
             }
+
+            Console.WriteLine($"Revision {preview.GetProperty("revision").GetString()}");
         }
 
-        private static async Task<JsonElement> ReadCurrentSettingsAsync(Uri serverUrl)
+        private static async Task<JsonElement> ReadServerResponseAsync(Uri serverUrl, string apiPath, HttpContent? content = null)
         {
             string? token = Environment.GetEnvironmentVariable("TECHNITIUM_CONFIG_API_TOKEN");
             if (string.IsNullOrWhiteSpace(token))
@@ -102,7 +106,9 @@ namespace DnsServerApp
                 Timeout = TimeSpan.FromSeconds(15)
             };
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            using HttpResponseMessage response = await client.GetAsync("/api/settings/get");
+            using HttpResponseMessage response = content is null
+                ? await client.GetAsync(apiPath)
+                : await client.PostAsync(apiPath, content);
             response.EnsureSuccessStatusCode();
 
             using Stream responseStream = await response.Content.ReadAsStreamAsync();

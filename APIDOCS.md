@@ -5291,6 +5291,12 @@ RESPONSE:
 }
 ```
 
+### Preview Declarative Configuration
+
+Send a versioned manifest as the JSON body of `POST /api/settings/config/plan`. Authenticate with a bearer token that has Settings view permission.
+
+The response contains a `revision` and a `changes` array. Each change contains a manifest `path` as a JSON Pointer, a `kind` of `Add`, `Update`, or `Remove`, and a `restartWebService` boolean. The revision identifies the manifest and settings snapshot on the current server process. The operation reads the snapshot and leaves settings untouched.
+
 ### Set DNS Settings
 
 This call allows to change the DNS server settings. 

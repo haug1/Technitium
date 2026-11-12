@@ -54,7 +54,7 @@ Secret references select one environment variable or one file. Resolve relative 
 
 Run `dotnet run --project DnsServerApp/DnsServerApp.csproj -- config plan path/to/technitium.json https://dns.example.test` against a running instance. Set `TECHNITIUM_CONFIG_API_TOKEN` to a token with Settings view permission. The command accepts HTTP for loopback development instances.
 
-The current preview covers authoritative DNS defaults, selected DNS options, web ports, logging settings other than the log folder, statistics, blocklist sources and scheduling, and the app auto-update flag. It reports changed field paths and web restarts without printing values. A declaration outside this set returns an error before producing a preview.
+The current preview covers authoritative DNS defaults, selected DNS options, web ports, logging settings other than the log folder, statistics, blocklist sources and scheduling, and the app auto-update flag. It reports changed field paths, web restarts, and a revision for the manifest and server snapshot. Values stay out of the response. A service restart invalidates earlier revisions. A declaration outside this set returns an error before producing a preview.
 
 ## Exporting supported settings
 

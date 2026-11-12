@@ -2188,6 +2188,7 @@ namespace DnsServerCore
 
             //settings
             _webService.MapGetAndPost("/api/settings/get", _settingsApi.GetDnsSettings);
+            _webService.MapPost("/api/settings/config/plan", _settingsApi.PreviewConfigurationAsync);
             _webService.MapGetAndPost("/api/settings/set", _settingsApi.SetDnsSettingsAsync);
             _webService.MapGetAndPost("/api/settings/getTsigKeyNames", _settingsApi.GetTsigKeyNames);
             _webService.MapGetAndPost("/api/settings/forceUpdateBlockLists", _settingsApi.ForceUpdateBlockLists);

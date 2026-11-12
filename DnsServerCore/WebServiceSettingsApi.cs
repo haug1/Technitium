@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore.Auth;
 using DnsServerCore.Cluster;
+using DnsServerCore.Configuration;
 using DnsServerCore.Dns;
 using Microsoft.AspNetCore.Http;
 using System;
@@ -29,6 +30,7 @@ using System.IO;
 using System.Net;
 using System.Net.Mail;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,6 +51,7 @@ namespace DnsServerCore
             #region variables
 
             readonly DnsWebService _dnsWebService;
+            readonly byte[] _configurationRevisionKey = RandomNumberGenerator.GetBytes(32);
 
             #endregion
 
@@ -475,6 +478,50 @@ namespace DnsServerCore
 
                 Utf8JsonWriter jsonWriter = context.GetCurrentJsonWriter();
                 WriteDnsSettings(jsonWriter);
+            }
+
+            public async Task PreviewConfigurationAsync(HttpContext context)
+            {
+                User sessionUser = _dnsWebService.GetSessionUser(context);
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.View))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                if (!context.Request.HasJsonContentType())
+                    throw new DnsWebServiceException("Send the configuration manifest as JSON.");
+
+                try
+                {
+                    ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
+                    using var snapshot = new MemoryStream();
+                    using (var writer = new Utf8JsonWriter(snapshot))
+                    {
+                        writer.WriteStartObject();
+                        WriteDnsSettings(writer);
+                        writer.WriteEndObject();
+                    }
+
+                    snapshot.Position = 0;
+                    using JsonDocument current = JsonDocument.Parse(snapshot);
+                    var changes = ConfigurationPlan.Create(manifest, current.RootElement);
+                    string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
+
+                    Utf8JsonWriter response = context.GetCurrentJsonWriter();
+                    response.WriteString("revision", revision);
+                    response.WriteStartArray("changes");
+                    foreach (ConfigurationChange change in changes)
+                    {
+                        response.WriteStartObject();
+                        response.WriteString("path", change.Path);
+                        response.WriteString("kind", change.Kind.ToString());
+                        response.WriteBoolean("restartWebService", change.RestartWebService);
+                        response.WriteEndObject();
+                    }
+                    response.WriteEndArray();
+                }
+                catch (InvalidDataException ex)
+                {
+                    throw new DnsWebServiceException(ex.Message);
+                }
             }
 
             public async Task SetDnsSettingsAsync(HttpContext context)
