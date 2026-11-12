@@ -68,6 +68,7 @@ namespace DnsServerCore
                 jsonWriter.WriteBoolean("supportsDeclarativeResolverPolicy", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeRateLimits", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeProxy", true);
+                jsonWriter.WriteBoolean("supportsDeclarativeDnsTuning", true);
                 jsonWriter.WriteBoolean("supportsDeclarativeClusterHandoff", true);
 
                 if (_dnsWebService._clusterManager.ClusterInitialized)
@@ -339,9 +340,10 @@ namespace DnsServerCore
                 bool supportsDeclarativeResolverPolicy = request.GetQueryOrForm("supportsDeclarativeResolverPolicy", bool.Parse, false);
                 bool supportsDeclarativeRateLimits = request.GetQueryOrForm("supportsDeclarativeRateLimits", bool.Parse, false);
                 bool supportsDeclarativeProxy = request.GetQueryOrForm("supportsDeclarativeProxy", bool.Parse, false);
+                bool supportsDeclarativeDnsTuning = request.GetQueryOrForm("supportsDeclarativeDnsTuning", bool.Parse, false);
                 ClusterNode secondaryNode = _dnsWebService._clusterManager.JoinCluster(secondaryNodeId, secondaryNodeUrl,
                     secondaryNodeIpAddresses, secondaryNodeCertificate, supportsDeclarativeOptions, supportsDeclarativeBlockLists,
-                    supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits, supportsDeclarativeProxy);
+                    supportsDeclarativeDomainLists, supportsDeclarativeDnsPolicy, supportsDeclarativeResolverPolicy, supportsDeclarativeRateLimits, supportsDeclarativeProxy, supportsDeclarativeDnsTuning);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Secondary node '" + secondaryNode.ToString() + "' joined the Cluster (" + _dnsWebService._clusterManager.ClusterDomain + ") successfully.");
 

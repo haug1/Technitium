@@ -5315,6 +5315,8 @@ The Primary can also apply `dns.recursion`, `dns.blocking`, and `dns.forwarding`
 
 The Primary can apply `dns.rateLimits` when every peer advertises `supportsDeclarativeRateLimits`. Secondaries receive the settings and ownership through cluster sync and preserve them when applying node-local manifests.
 
+The Primary can apply `dns.tuning` when every peer advertises `supportsDeclarativeDnsTuning`. A Secondary rebinds its local DNS endpoints when required by the new tuning before saving the settings.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7451,6 +7453,7 @@ WHERE:
 - `supportsDeclarativeResolverPolicy` (optional): Set to true when the Secondary can inherit manifest ownership of recursion, blocking, and forwarding policy. Required when the Primary manages any of those fields.
 - `supportsDeclarativeRateLimits` (optional): Set to true when the Secondary can inherit manifest ownership of query-rate limits. Required when the Primary manages any query-rate limit field.
 - `supportsDeclarativeProxy` (optional): Set to true when the Secondary can inherit manifest ownership of outbound proxy settings. Required when the Primary manages any outbound proxy field.
+- `supportsDeclarativeDnsTuning` (optional): Set to true when the Secondary can inherit manifest ownership of DNS tuning and rebind local DNS listeners. Required when the Primary manages any DNS tuning field.
 
 RESPONSE:
 ```

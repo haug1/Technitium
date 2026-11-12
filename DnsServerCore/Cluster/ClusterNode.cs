@@ -69,6 +69,7 @@ namespace DnsServerCore.Cluster
         internal volatile bool SupportsDeclarativeResolverPolicy;
         internal volatile bool SupportsDeclarativeRateLimits;
         internal volatile bool SupportsDeclarativeProxy;
+        internal volatile bool SupportsDeclarativeDnsTuning;
         string _version;
         DateTime _upSince;
         DateTime _lastSeen;
@@ -240,6 +241,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeResolverPolicy = clusterInfo.SupportsDeclarativeResolverPolicy;
                 SupportsDeclarativeRateLimits = clusterInfo.SupportsDeclarativeRateLimits;
                 SupportsDeclarativeProxy = clusterInfo.SupportsDeclarativeProxy;
+                SupportsDeclarativeDnsTuning = clusterInfo.SupportsDeclarativeDnsTuning;
 
                 if (_type == ClusterNodeType.Primary)
                     _clusterManager.UpdateClusterFromPrimaryNode(clusterInfo); //update cluster nodes from primary node response
@@ -266,6 +268,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeResolverPolicy = false;
                 SupportsDeclarativeRateLimits = false;
                 SupportsDeclarativeProxy = false;
+                SupportsDeclarativeDnsTuning = false;
             }
             catch (Exception ex)
             {
@@ -276,6 +279,7 @@ namespace DnsServerCore.Cluster
                 SupportsDeclarativeResolverPolicy = false;
                 SupportsDeclarativeRateLimits = false;
                 SupportsDeclarativeProxy = false;
+                SupportsDeclarativeDnsTuning = false;
                 success = false;
                 _clusterManager.DnsWebService.LogManager.Write("Heartbeat failed for " + _type.ToString() + " node '" + ToString() + "'.", ex);
             }

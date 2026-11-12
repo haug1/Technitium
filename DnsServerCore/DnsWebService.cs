@@ -1148,9 +1148,14 @@ namespace DnsServerCore
                             try
                             {
                                 //dynamically load and apply DNS settings config
-                                await using (Stream stream = entry.Open())
+                                if (isConfigTransfer)
                                 {
-                                    _dnsServer.LoadConfig(stream, isConfigTransfer);
+                                    await _dnsServer.LoadClusterConfigAsync(entry.Open);
+                                }
+                                else
+                                {
+                                    await using Stream stream = entry.Open();
+                                    _dnsServer.LoadConfig(stream, isConfigTransfer: false);
                                 }
                             }
                             catch (InvalidDataException)
@@ -3290,7 +3295,7 @@ namespace DnsServerCore
                 } : null;
                 Action checkDnsPolicyPeers = dnsPolicyChange is { } dnsPolicy ? () =>
                 {
-                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy).SequenceEqual(dnsPolicy.Peers))
+                    if (!_clusterManager.CheckDeclarativeDnsPolicyPeers(dnsPolicy.RequiresResolverPolicy, dnsPolicy.RequiresRateLimits, dnsPolicy.RequiresProxy, dnsPolicy.RequiresDnsTuning).SequenceEqual(dnsPolicy.Peers))
                         throw new InvalidDataException("/dns: Cluster membership changed during apply. Create a new preview.");
                 } : null;
                 var clusterFiles = new List<string>(2);

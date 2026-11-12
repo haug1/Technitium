@@ -1140,6 +1140,45 @@ namespace DnsServerCore.Dns
             }
         }
 
+        internal async Task LoadClusterConfigAsync(Func<Stream> openConfig)
+        {
+            DnsTuning tuning = default;
+            using (Stream stream = openConfig())
+                ReadConfigFrom(stream, isConfigTransfer: true, apply: false, readTuning: candidate => tuning = candidate);
+
+            bool rebind = _state == ServiceState.Running && DnsTuningRequiresRestart(tuning);
+            DnsTuning previous = CaptureListenerTuning() with
+            {
+                ClientTimeout = _clientTimeout,
+                MaxConcurrentResolutionsPerCore = MaxConcurrentResolutionsPerCore
+            };
+            var previousOwnedTuning = _managedDnsSettingsExtension & TuningOwnership;
+            var previousInheritedTuning = _inheritedExtendedDnsPolicy & TuningOwnership;
+            try
+            {
+                if (rebind)
+                {
+                    await StopAsync();
+                    SetListenerTuning(tuning);
+                    await StartAsync(true, _localEndPoints);
+                }
+                using Stream stream = openConfig();
+                LoadConfig(stream, isConfigTransfer: true);
+            }
+            catch
+            {
+                if (rebind)
+                    await StopAsync();
+
+                SetDnsTuning(previous);
+                _managedDnsSettingsExtension = (_managedDnsSettingsExtension & ~TuningOwnership) | previousOwnedTuning;
+                _inheritedExtendedDnsPolicy = (_inheritedExtendedDnsPolicy & ~TuningOwnership) | previousInheritedTuning;
+                if (rebind)
+                    await StartAsync(true, _localEndPoints);
+                throw;
+            }
+        }
+
         private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default, DnsBindings? persistedBindings = null, DnsCertificate persistedCertificate = null, ConfigurationTsig.Candidate? tsig = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
@@ -1292,11 +1331,11 @@ namespace DnsServerCore.Dns
         private const ManagedDnsSettingsExtension RateLimitOwnership = ManagedDnsSettingsExtension.RateLimitIpv4 |
             ManagedDnsSettingsExtension.RateLimitIpv6 | ManagedDnsSettingsExtension.RateLimitSampleMinutes |
             ManagedDnsSettingsExtension.RateLimitUdpTruncation | ManagedDnsSettingsExtension.RateLimitBypass;
-        private bool OwnsRateLimit(ManagedDnsSettingsExtension setting, bool isConfigTransfer) =>
+        private bool OwnsExtendedDnsSetting(ManagedDnsSettingsExtension setting, bool isConfigTransfer) =>
             ((_managedDnsSettingsExtension & ~(isConfigTransfer ? _inheritedExtendedDnsPolicy : 0)) & setting) != 0;
 
         private const ManagedDnsSettingsExtension TransferableExtendedDnsPolicyOwnership =
-            RateLimitOwnership | (ManagedDnsSettingsExtension)ConfigurationProxy.Fields.All;
+            RateLimitOwnership | TuningOwnership | (ManagedDnsSettingsExtension)ConfigurationProxy.Fields.All;
 
         internal bool HasManagedRateLimits => (_managedDnsSettingsExtension & RateLimitOwnership) != 0;
 
@@ -1334,6 +1373,37 @@ namespace DnsServerCore.Dns
             ManagedDnsSettingsExtension.TuningListenBacklog | ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB |
             ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB | ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore;
         internal bool HasManagedDnsTuning => (_managedDnsSettingsExtension & TuningOwnership) != 0;
+
+        private static ManagedDnsSettingsExtension GetTuningOwnership(DnsTuning tuning)
+        {
+            ManagedDnsSettingsExtension ownership = 0;
+            if (tuning.ClientTimeout.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningClientTimeout;
+            if (tuning.TcpSendTimeout.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningTcpSendTimeout;
+            if (tuning.TcpReceiveTimeout.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningTcpReceiveTimeout;
+            if (tuning.QuicIdleTimeout.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningQuicIdleTimeout;
+            if (tuning.QuicMaxInboundStreams.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams;
+            if (tuning.ListenBacklog.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningListenBacklog;
+            if (tuning.UdpSendBufferSizeKB.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB;
+            if (tuning.UdpReceiveBufferSizeKB.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB;
+            if (tuning.MaxConcurrentResolutionsPerCore.HasValue)
+                ownership |= ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore;
+            return ownership;
+        }
+
+        internal bool ClusterDnsTuningChanges(DnsTuning tuning) =>
+            GetTuningOwnership(tuning) != (_managedDnsSettingsExtension & TuningOwnership) ||
+            (_inheritedExtendedDnsPolicy & TuningOwnership) != 0 ||
+            DnsTuningRequiresRestart(tuning) ||
+            tuning.ClientTimeout.HasValue && tuning.ClientTimeout != _clientTimeout ||
+            tuning.MaxConcurrentResolutionsPerCore.HasValue && tuning.MaxConcurrentResolutionsPerCore != MaxConcurrentResolutionsPerCore;
 
         private const ManagedDnsSettings AuthoritativeOwnership = ManagedDnsSettings.RecordTtl | ManagedDnsSettings.NsTtl |
             ManagedDnsSettings.SoaTtl | ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh |
@@ -2240,7 +2310,7 @@ namespace DnsServerCore.Dns
 
             bool Check(ManagedDnsSettingsExtension flag, bool different, string path)
             {
-                if (!OwnsRateLimit(flag, isConfigTransfer))
+                if (!OwnsExtendedDnsSetting(flag, isConfigTransfer))
                     return true;
                 if (different)
                     throw new DnsWebServiceException($"/dns/rateLimits/{path}: Setting is managed by the configuration manifest.");
@@ -2291,7 +2361,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        internal DnsTuning CheckManifestDnsTuning(DnsTuning tuning, bool validateRanges = true)
+        internal DnsTuning CheckManifestDnsTuning(DnsTuning tuning, bool validateRanges = true, bool isConfigTransfer = false)
         {
             if (validateRanges)
             {
@@ -2317,7 +2387,7 @@ namespace DnsServerCore.Dns
 
             T? Check<T>(ManagedDnsSettingsExtension flag, T? candidate, T current, string path) where T : struct
             {
-                if (!_managedDnsSettingsExtension.HasFlag(flag))
+                if (!OwnsExtendedDnsSetting(flag, isConfigTransfer))
                     return candidate;
                 if (candidate.HasValue && !candidate.Value.Equals(current))
                     throw new DnsWebServiceException($"/dns/tuning/{path}: Setting is managed by the configuration manifest.");
@@ -2544,7 +2614,7 @@ namespace DnsServerCore.Dns
             ReadConfigFrom(stream, isConfigTransfer, apply: false);
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false, bool apply = true)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false, bool apply = true, Action<DnsTuning> readTuning = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "DC")
                 throw new InvalidDataException("DNS Server config file format is invalid.");
@@ -2648,15 +2718,15 @@ namespace DnsServerCore.Dns
             {
                 bool tablesChanged = !HaveSameRateLimits(qpmPrefixLimitsIPv4, _qpmPrefixLimitsIPv4) ||
                     !HaveSameRateLimits(qpmPrefixLimitsIPv6, _qpmPrefixLimitsIPv6);
-                if (readOwnership || !OwnsRateLimit(ManagedDnsSettingsExtension.RateLimitIpv4, isConfigTransfer))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.RateLimitIpv4, isConfigTransfer))
                     _qpmPrefixLimitsIPv4 = qpmPrefixLimitsIPv4;
-                if (readOwnership || !OwnsRateLimit(ManagedDnsSettingsExtension.RateLimitIpv6, isConfigTransfer))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.RateLimitIpv6, isConfigTransfer))
                     _qpmPrefixLimitsIPv6 = qpmPrefixLimitsIPv6;
-                if (readOwnership || !OwnsRateLimit(ManagedDnsSettingsExtension.RateLimitSampleMinutes, isConfigTransfer))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.RateLimitSampleMinutes, isConfigTransfer))
                     _qpmLimitSampleMinutes = qpmSampleMinutes;
-                if (readOwnership || !OwnsRateLimit(ManagedDnsSettingsExtension.RateLimitUdpTruncation, isConfigTransfer))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.RateLimitUdpTruncation, isConfigTransfer))
                     _qpmLimitUdpTruncationPercentage = qpmTruncationPercentage;
-                if (readOwnership || !OwnsRateLimit(ManagedDnsSettingsExtension.RateLimitBypass, isConfigTransfer))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.RateLimitBypass, isConfigTransfer))
                     _qpmLimitBypassList = qpmBypassList;
                 if (isConfigTransfer && tablesChanged)
                     ResetQpsLimitTimer();
@@ -2677,30 +2747,35 @@ namespace DnsServerCore.Dns
                 version >= 3 ? bR.ReadInt32() : 2048,
                 version >= 3 ? bR.ReadInt32() : 2048,
                 bR.ReadUInt16());
+            if (readTuning is not null)
+            {
+                readTuning(CheckManifestDnsTuning(dnsTuning, validateRanges: false, isConfigTransfer: true));
+                return;
+            }
             if (apply)
             {
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningClientTimeout))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningClientTimeout, isConfigTransfer))
                     _clientTimeout = dnsTuning.ClientTimeout.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningTcpSendTimeout))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningTcpSendTimeout, isConfigTransfer))
                     _tcpSendTimeout = dnsTuning.TcpSendTimeout.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningTcpReceiveTimeout))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningTcpReceiveTimeout, isConfigTransfer))
                     _tcpReceiveTimeout = dnsTuning.TcpReceiveTimeout.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningQuicIdleTimeout))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningQuicIdleTimeout, isConfigTransfer))
                     _quicIdleTimeout = dnsTuning.QuicIdleTimeout.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams, isConfigTransfer))
                     _quicMaxInboundStreams = dnsTuning.QuicMaxInboundStreams.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningListenBacklog))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningListenBacklog, isConfigTransfer))
                     _listenBacklog = dnsTuning.ListenBacklog.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB, isConfigTransfer))
                     _udpSendBufferSizeKB = dnsTuning.UdpSendBufferSizeKB.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB, isConfigTransfer))
                     _udpReceiveBufferSizeKB = dnsTuning.UdpReceiveBufferSizeKB.Value;
-                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore))
+                if (readOwnership || !OwnsExtendedDnsSetting(ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore, isConfigTransfer))
                     MaxConcurrentResolutionsPerCore = dnsTuning.MaxConcurrentResolutionsPerCore.Value;
             }
             else if (HasManagedDnsTuning)
             {
-                CheckManifestDnsTuning(dnsTuning, validateRanges: false);
+                CheckManifestDnsTuning(dnsTuning, validateRanges: false, isConfigTransfer);
             }
 
             //optional protocols
@@ -8947,24 +9022,7 @@ namespace DnsServerCore.Dns
                     var inheritedExtension = isClusterSecondary ? previousInheritedExtension : 0;
                     extendedOwnership |= GetRateLimitOwnership(rateLimits) | inheritedExtension;
 
-                    if (tuning.ClientTimeout.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningClientTimeout;
-                    if (tuning.TcpSendTimeout.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningTcpSendTimeout;
-                    if (tuning.TcpReceiveTimeout.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningTcpReceiveTimeout;
-                    if (tuning.QuicIdleTimeout.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningQuicIdleTimeout;
-                    if (tuning.QuicMaxInboundStreams.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams;
-                    if (tuning.ListenBacklog.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningListenBacklog;
-                    if (tuning.UdpSendBufferSizeKB.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB;
-                    if (tuning.UdpReceiveBufferSizeKB.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB;
-                    if (tuning.MaxConcurrentResolutionsPerCore.HasValue)
-                        extendedOwnership |= ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore;
+                    extendedOwnership |= GetTuningOwnership(tuning);
 
                     bool tuningChanged = listenerTuningStaged || tuningRestart || (tuning.ClientTimeout.HasValue && tuning.ClientTimeout != _clientTimeout) ||
                         (tuning.MaxConcurrentResolutionsPerCore.HasValue && tuning.MaxConcurrentResolutionsPerCore != MaxConcurrentResolutionsPerCore);

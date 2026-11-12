@@ -147,6 +147,8 @@ def verify(current, previous, folder, propagation, graceful):
         rate_revision = ok(primary.call("settings/config/plan", manifest=rate_policy))["revision"]
         proxy_policy = {"schemaVersion": 1, "dns": {"proxy": {"type": "None"}}}
         proxy_revision = ok(primary.call("settings/config/plan", manifest=proxy_policy))["revision"]
+        tuning_policy = {"schemaVersion": 1, "dns": {"tuning": {"tcpSendTimeoutMs": 12000}}}
+        tuning_revision = ok(primary.call("settings/config/plan", manifest=tuning_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -158,12 +160,27 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeResolverPolicy"] is True
             assert joined["supportsDeclarativeRateLimits"] is True
             assert joined["supportsDeclarativeProxy"] is True
+            assert joined["supportsDeclarativeDnsTuning"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeProxy"), joined
+        assert not joined.get("supportsDeclarativeDnsTuning"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=tuning_policy),
+            primary.call("settings/config/apply", manifest=tuning_policy, revision=tuning_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative DNS tuning" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            settings = ok(node.call("settings/get"))
+            assert settings["tcpSendTimeout"] == 10000 and "/dns/tuning/tcpSendTimeoutMs" not in settings["managedSettings"]
+        if joined.get("supportsDeclarativeProxy"):
+            plan = ok(primary.call("settings/config/plan", manifest=proxy_policy))
+            ok(primary.call("settings/config/apply", manifest=proxy_policy, revision=plan["revision"]))
+            assert "/dns/proxy/type" in ok(primary.call("settings/get"))["managedSettings"]
+            print("Mixed-build check passed. Existing proxy support allowed proxy ownership and rejected DNS tuning.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=proxy_policy),
             primary.call("settings/config/apply", manifest=proxy_policy, revision=proxy_revision),
@@ -471,6 +488,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_domain_lists(primary, secondary, release, local_web, new_primary_tls_port)
     verify_dns_policy(primary, secondary, release, local_web)
     verify_proxy_policy(primary, secondary, release, local_web)
+    verify_dns_tuning(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -711,6 +729,66 @@ def verify_proxy_policy(primary, secondary, cluster_manifest, local_web):
     assert not apply(primary, manifest)["changes"]
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(secondary, next_reference, set()), "the Secondary to release proxy ownership")
+
+
+def verify_dns_tuning(primary, secondary, cluster_manifest, local_web):
+    tuning = {"tcpSendTimeoutMs": 12000, "clientTimeoutMs": 3100}
+    desired = {**cluster_manifest, "dns": {"tuning": tuning}}
+    paths = {f"/dns/tuning/{field}" for field in tuning}
+    denied = secondary.call("settings/config/plan", manifest=desired)
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, manifest):
+        def preview():
+            result = node.call("settings/config/plan", manifest=manifest)
+            if result["status"] == "error" and "has not advertised support for declarative DNS tuning" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm DNS tuning support")
+        ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
+        return plan
+
+    def matches(tcp, client, ownership):
+        state = ok(secondary.call("settings/get"))
+        return (state["tcpSendTimeout"] == tcp and state["clientTimeout"] == client
+                and paths.intersection(state["managedSettings"]) == ownership
+                and state["dnsServerLocalEndPoints"] == [f"127.0.0.1:{secondary.dns_port}"])
+
+    bound = f"[127.0.0.1:{secondary.dns_port}] [TCP] DNS Server was bound successfully."
+    before = log_message_count(secondary, bound)
+    plan = apply(primary, desired)
+    assert any(change["path"] == "/dns/tuning/tcpSendTimeoutMs" and change["restartDnsService"]
+               for change in plan["changes"]), plan
+    wait_for(lambda: matches(12000, 3100, paths), "the Secondary to apply DNS tuning")
+    assert log_message_count(secondary, bound) > before
+    with socket.create_connection(("127.0.0.1", secondary.dns_port), timeout=5):
+        pass
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(12000, 3100, paths)
+    apply(secondary, local_web)
+    assert matches(12000, 3100, paths)
+    denied = secondary.call("settings/set?tcpSendTimeout=13000")
+    assert denied["status"] == "error" and "/dns/tuning/tcpSendTimeoutMs" in denied["errorMessage"], denied
+
+    tuning.update(tcpSendTimeoutMs=13000, clientTimeoutMs=3200)
+    blocked_file = secondary.folder / "dns.tmp"
+    blocked_file.mkdir()
+    before = log_message_count(secondary, bound)
+    try:
+        apply(primary, desired)
+        wait_for(lambda: log_message_count(secondary, bound) >= before + 2,
+                 "the Secondary to rebind and restore its listeners after a failed save")
+        assert matches(12000, 3100, paths)
+        with socket.create_connection(("127.0.0.1", secondary.dns_port), timeout=5):
+            pass
+    finally:
+        blocked_file.rmdir()
+
+    wait_for(lambda: matches(13000, 3200, paths), "the Secondary to retry and apply DNS tuning", timeout=60)
+    assert not apply(primary, desired)["changes"]
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(13000, 3200, set()), "the Secondary to release DNS tuning ownership")
 
 
 def assert_promoted_policy(state):

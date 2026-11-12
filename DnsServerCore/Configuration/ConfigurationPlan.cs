@@ -898,11 +898,9 @@ namespace DnsServerCore.Configuration
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
-            if (GetDnsTuning(manifest) != default)
-                throw new InvalidDataException("/dns/tuning: Applying DNS tuning to a cluster is not implemented.");
         }
 
-        internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits, bool RequiresProxy)? CheckClusterDnsPolicySupport(
+        internal static (int[] Peers, bool RequiresResolverPolicy, bool RequiresRateLimits, bool RequiresProxy, bool RequiresDnsTuning)? CheckClusterDnsPolicySupport(
             ConfigurationManifest manifest, ClusterManager cluster, ConfigurationProxy.Candidate? proxy = null)
         {
             if (!cluster.ClusterInitialized)
@@ -916,12 +914,13 @@ namespace DnsServerCore.Configuration
             var blocking = GetBlockingPolicy(manifest);
             var forwarding = GetForwardingPolicy(manifest);
             var rateLimits = GetRateLimitPolicy(manifest);
+            var tuning = GetDnsTuning(manifest);
             if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
             {
                 if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxyDeclaration) && proxyDeclaration.EnumerateObject().Any())
                     throw new InvalidDataException("/dns/proxy: Only the Primary can apply cluster proxy settings.");
                 if (defaults.HasValues || resolver.HasValues || subnet != default || autoUpdate.HasValue ||
-                    recursion != default || blocking != default || forwarding != default || rateLimits != default)
+                    recursion != default || blocking != default || forwarding != default || rateLimits != default || tuning != default)
                     throw new InvalidDataException("/dns: Only the Primary can apply cluster DNS policy.");
                 return null;
             }
@@ -930,11 +929,12 @@ namespace DnsServerCore.Configuration
             bool resolverPolicyChanges = dns.ClusterResolverPolicyChanges(recursion, blocking, forwarding);
             bool rateLimitChanges = dns.ClusterRateLimitPolicyChanges(rateLimits);
             bool proxyChanges = proxy.HasValue && dns.ClusterProxyChanges(proxy.Value);
-            if (!resolverPolicyChanges && !rateLimitChanges && !proxyChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
+            bool tuningChanges = dns.ClusterDnsTuningChanges(tuning);
+            if (!resolverPolicyChanges && !rateLimitChanges && !proxyChanges && !tuningChanges && !dns.ClusterDnsPolicyChanges(defaults, resolver, autoUpdate, subnet))
                 return null;
 
-            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges, rateLimitChanges, proxyChanges),
-                resolverPolicyChanges, rateLimitChanges, proxyChanges);
+            return (cluster.CheckDeclarativeDnsPolicyPeers(resolverPolicyChanges, rateLimitChanges, proxyChanges, tuningChanges),
+                resolverPolicyChanges, rateLimitChanges, proxyChanges, tuningChanges);
         }
 
         internal static (string Path, int[] Peers)? CheckClusterDomainListSupport(ConfigurationManifest manifest, ClusterManager cluster)
