@@ -1316,7 +1316,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                                         primaryZone.RemoveGeneratedPrivateKey(removal.Tag);
                                     foreach (var rollover in signing.Rollovers ?? [])
                                         primaryZone.UpdatePrivateKey(rollover.Tag, rollover.After);
-                                    if (stagedKeyAdditions.TryGetValue(name, out var additions))
+                                    if (signing.Keys.Length == 0 && stagedKeyAdditions.TryGetValue(name, out var additions))
                                     {
                                         foreach (DnssecPrivateKey key in additions)
                                             primaryZone.AddPrivateKey(key);

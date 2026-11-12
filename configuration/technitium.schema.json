@@ -752,6 +752,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "publishOnSign": {"type": "boolean"},
         "role": {"anyOf": [{"enum": ["KeySigningKey", "ZoneSigningKey"]}, {"type": "null"}]},
         "algorithm": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
         "hashAlgorithm": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},

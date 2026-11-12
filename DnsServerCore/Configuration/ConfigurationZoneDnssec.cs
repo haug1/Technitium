@@ -16,7 +16,7 @@ namespace DnsServerCore.Configuration
 {
     internal static class ConfigurationZoneDnssec
     {
-        internal sealed record Key(DnssecPrivateKeyType Role, DnssecAlgorithm Algorithm, int Size, ushort RolloverDays, DnssecPrivateKey Imported, string Path, bool HasRolloverDays)
+        internal sealed record Key(DnssecPrivateKeyType Role, DnssecAlgorithm Algorithm, int Size, ushort RolloverDays, DnssecPrivateKey Imported, string Path, bool HasRolloverDays, bool PublishOnSign)
         {
             internal DnssecPrivateKey Create()
             {
@@ -208,10 +208,12 @@ namespace DnsServerCore.Configuration
                 return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, [], ChangeProof: changeProof, ChangeTtl: changeTtl, Rollovers: rollovers.ToArray(), Additions: additions.ToArray(), Removals: removals.ToArray());
             }
 
-            if (!parsed.Any(key => key.Role == DnssecPrivateKeyType.KeySigningKey) ||
-                !parsed.Any(key => key.Role == DnssecPrivateKeyType.ZoneSigningKey))
-                throw new InvalidDataException($"{path}/keys: Specify both a key signing key and a zone signing key.");
-            return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, parsed);
+            Key[] initialKeys = parsed.Where(key => key.PublishOnSign).ToArray();
+            if (!initialKeys.Any(key => key.Role == DnssecPrivateKeyType.KeySigningKey) ||
+                !initialKeys.Any(key => key.Role == DnssecPrivateKeyType.ZoneSigningKey))
+                throw new InvalidDataException($"{path}/keys: Specify both a key signing key and a zone signing key for initial publication.");
+            return new Signing(ttl, useNsec3, (ushort)iterations, saltLength, initialKeys,
+                Additions: parsed.Where(key => !key.PublishOnSign).ToArray());
         }
 
         internal static JsonObject Export(AuthZoneInfo zone, string path, ISet<string> missingInputs)
@@ -230,7 +232,7 @@ namespace DnsServerCore.Configuration
             var keys = new JsonObject();
             string zoneHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(zone.Name)));
             foreach (var key in (zone.DnssecPrivateKeys ?? []).Where(key => !key.IsRetiring &&
-                key.State is DnssecPrivateKeyState.Published or DnssecPrivateKeyState.Ready or DnssecPrivateKeyState.Active).OrderBy(key => key.KeyTag))
+                key.State is DnssecPrivateKeyState.Generated or DnssecPrivateKeyState.Published or DnssecPrivateKeyState.Ready or DnssecPrivateKeyState.Active).OrderBy(key => key.KeyTag))
             {
                 (string Family, string Hash, string Curve) algorithm = key.Algorithm switch
                 {
@@ -252,6 +254,8 @@ namespace DnsServerCore.Configuration
                     ["algorithm"] = algorithm.Family,
                     ["privateKey"] = new JsonObject { ["environment"] = $"TECHNITIUM_DNSSEC_{zoneHash}_{name}" }
                 };
+                if (key.State == DnssecPrivateKeyState.Generated)
+                    entry["publishOnSign"] = false;
                 if (algorithm.Hash is not null)
                     entry["hashAlgorithm"] = algorithm.Hash;
                 if (algorithm.Curve is not null)
@@ -345,7 +349,7 @@ namespace DnsServerCore.Configuration
                     throw new InvalidDataException($"{path}/keySize: The referenced RSA key has a different size.");
             }
 
-            return new Key(role, algorithm, size, rollover, imported, path, value.TryGetProperty("rolloverDays", out _));
+            return new Key(role, algorithm, size, rollover, imported, path, value.TryGetProperty("rolloverDays", out _), Read(value, "publishOnSign")?.GetBoolean() ?? true);
         }
 
         private static JsonElement? Read(JsonElement value, string property) =>

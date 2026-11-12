@@ -3642,20 +3642,26 @@ namespace DnsServerCore.Tests
             await using var destination = await LoopbackWebService.StartAsync();
             using var ksk = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
             using var zsk = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+            using var pending = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP384);
+            string pendingPem = pending.ExportPkcs8PrivateKeyPem();
             string kskPem = ksk.ExportPkcs8PrivateKeyPem();
             string zskPem = zsk.ExportPkcs8PrivateKeyPem();
             string kskInput = $"TEST_DNSSEC_KSK_{Guid.NewGuid():N}";
             string zskInput = $"TEST_DNSSEC_ZSK_{Guid.NewGuid():N}";
-            var environment = new List<string> { kskInput, zskInput };
+            string pendingInput = $"TEST_DNSSEC_PENDING_{Guid.NewGuid():N}";
+            var environment = new List<string> { kskInput, zskInput, pendingInput };
             try
             {
                 Environment.SetEnvironmentVariable(kskInput, kskPem);
                 Environment.SetEnvironmentVariable(zskInput, zskPem);
+                Environment.SetEnvironmentVariable(pendingInput, pendingPem);
                 string manifest = $$"""
                     {"schemaVersion":1,"zones":{"portable.test":{"type":"Primary",
                       "dnssec":{"enabled":true,"keys":{
                         "ksk":{"role":"KeySigningKey","algorithm":"ECDSA","curve":"P256","privateKey":{"environment":"{{kskInput}}"} },
-                        "zsk":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P256","privateKey":{"environment":"{{zskInput}}"} }
+                        "zsk":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P256","privateKey":{"environment":"{{zskInput}}"} },
+                        "pending":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P384","publishOnSign":false,
+                          "privateKey":{"environment":"{{pendingInput}}"} }
                       } }
                     } } }
                     """;
@@ -3673,19 +3679,27 @@ namespace DnsServerCore.Tests
                 Assert.DoesNotContain("PRIVATE KEY", export.GetRawText());
                 JsonElement response = export.GetProperty("response");
                 JsonElement zone = response.GetProperty("manifest").GetProperty("zones").GetProperty("portable.test");
-                foreach (JsonProperty key in zone.GetProperty("dnssec").GetProperty("keys").EnumerateObject())
+                JsonElement keyDeclarations = zone.GetProperty("dnssec").GetProperty("keys");
+                JsonProperty pendingDeclaration = Assert.Single(keyDeclarations.EnumerateObject(), key =>
+                    key.Value.TryGetProperty("publishOnSign", out JsonElement publish) && !publish.GetBoolean());
+                foreach (JsonProperty key in keyDeclarations.EnumerateObject())
                 {
                     Assert.Contains(response.GetProperty("missingInputs").EnumerateArray(),
                         path => path.ValueEquals($"/zones/portable.test/dnssec/keys/{key.Name}/privateKey"));
                     string name = key.Value.GetProperty("privateKey").GetProperty("environment").GetString()!;
                     environment.Add(name);
-                    Environment.SetEnvironmentVariable(name, key.Value.GetProperty("role").ValueEquals("KeySigningKey") ? kskPem : zskPem);
+                    Environment.SetEnvironmentVariable(name, key.Name == pendingDeclaration.Name ? pendingPem :
+                        key.Value.GetProperty("role").ValueEquals("KeySigningKey") ? kskPem : zskPem);
                 }
 
                 string exported = $$"""{"schemaVersion":1,"zones":{"portable.test":{{zone.GetRawText()}} } }""";
                 revision = (await PreviewAsync(destination, exported)).GetProperty("revision").GetString()!;
                 LoopbackWebService.AssertOk(await ApplyAsync(destination, exported, revision));
+                await destination.RestartAsync();
                 Assert.Empty((await PreviewAsync(destination, exported)).GetProperty("changes").EnumerateArray());
+                var destinationKey = Assert.Single(destination.Dns.AuthZoneManager.GetAuthZoneInfo("portable.test").DnssecPrivateKeys!,
+                    key => key.State == DnssecPrivateKeyState.Generated);
+                Assert.Equal(pendingDeclaration.Name, destinationKey.KeyTag.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
                 var expected = (await source.QueryAsync("portable.test", DnsResourceRecordType.DNSKEY)).Answer
                     .Select(record => record.RDATA.ToString()).Order().ToArray();

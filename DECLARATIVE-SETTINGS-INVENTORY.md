@@ -342,6 +342,7 @@ Record data is required unless the existing type permits empty fields. Use the e
 | `proof.type` | `nxProof`, NSEC/NSEC3 conversions | Enum, NSEC by default. |
 | `proof.iterations`, `proof.saltLength` | `iterations`, `saltLength` | Unsigned 16-bit and 8-bit values, both default 0. Apply only to NSEC3 and validate with the signing manager. Salt contents are generated state. |
 | `keys` | signing and add-key inputs | Named keys with role, algorithm, hash or curve, applicable key size, and optional private-key reference. Maps `keyType`, `algorithm`, `hashAlgorithm`, `curve`, `keySize`, `kskKeySize`, `zskKeySize`, `pemKskPrivateKey`, `pemZskPrivateKey`, and `pemPrivateKey`. Use the existing supported algorithm combinations. |
+| `keys.<id>.publishOnSign` | Initial signing or staging | Boolean, true. Set false to preserve a Generated key during migration. |
 | `keys.<id>.rolloverDays` | `zskRolloverDays`, `rolloverDays` | 0–365 days for ZSKs, with 0 disabling automatic rollover. Initial signing defaults to 30 for a generated ZSK and 0 for an imported ZSK. |
 
 Publish, rollover, retire, and delete are lifecycle operations. Current key state, state-change timestamps, computed key tags, signatures, and denial records are derived or operational state. Private key material stays in referenced inputs.
