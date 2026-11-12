@@ -37,8 +37,8 @@ namespace DnsServerCore.Configuration
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
             [DnsEndpointsPath] = Field("dnsServerLocalEndPoints", new[] { "0.0.0.0:53", "[::]:53" }, canApply: true),
-            [Ipv4SourcePath] = Field("dnsServerIPv4SourceAddresses", new[] { "0.0.0.0" }),
-            [Ipv6SourcePath] = Field("dnsServerIPv6SourceAddresses", new[] { "::" }),
+            [Ipv4SourcePath] = Field("dnsServerIPv4SourceAddresses", new[] { "0.0.0.0" }, canApply: true),
+            [Ipv6SourcePath] = Field("dnsServerIPv6SourceAddresses", new[] { "::" }, canApply: true),
             ["/dns/authoritative/defaultRecordTtl"] = Field("defaultRecordTtl", 3600, canApply: true),
             ["/dns/authoritative/defaultNsRecordTtl"] = Field("defaultNsRecordTtl", 14400, canApply: true),
             ["/dns/authoritative/defaultSoaRecordTtl"] = Field("defaultSoaRecordTtl", 900, canApply: true),
@@ -127,13 +127,26 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetAuthoritativeDefaults(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
+            return dns.ApplyManifestDnsSettingsAsync(endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), alreadyActive, writeDnsConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
                 noStackTrace?.GetBoolean(),
                 retention.HasValue ? decimal.ToInt32(retention.Value.GetDecimal()) : null,
                 localTime?.GetBoolean(),
                 folder,
                 writeDnsConfig));
+        }
+
+        private static DnsServer.SourceNetworks GetSourceNetworks(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) ||
+                !dns.TryGetProperty("sourceNetworks", out JsonElement source))
+                return default;
+
+            return new DnsServer.SourceNetworks(
+                source.TryGetProperty("ipv4", out JsonElement ipv4)
+                    ? ConfigurationManifest.ReadNetworks(ipv4, Ipv4SourcePath, AddressFamily.InterNetwork) : null,
+                source.TryGetProperty("ipv6", out JsonElement ipv6)
+                    ? ConfigurationManifest.ReadNetworks(ipv6, Ipv6SourcePath, AddressFamily.InterNetworkV6) : null);
         }
 
         private static DnsServer.AuthoritativeDefaults GetAuthoritativeDefaults(ConfigurationManifest manifest)

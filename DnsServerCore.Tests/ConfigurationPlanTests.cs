@@ -348,6 +348,48 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task SourceNetworksApplyPersistAndRejectConflictingRestores()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"dns":{"sourceNetworks":{"ipv4":["127.0.0.1"],"ipv6":null}}}""";
+            const string reset = """{"schemaVersion":1,"dns":{"sourceNetworks":{"ipv4":null,"ipv6":[]}}}""";
+            try
+            {
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                JsonElement current = await server.GetSettingsAsync();
+                Assert.Equal("127.0.0.1", Assert.Single(current.GetProperty("dnsServerIPv4SourceAddresses").EnumerateArray()).GetString());
+                Assert.Equal(2, current.GetProperty("managedSettings").GetArrayLength());
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement edit = await server.CallAsync("settings/set?dnsServerIPv4SourceAddresses=0.0.0.0&maxLogFileDays=180", server.AdminToken);
+                Assert.Equal("error", edit.GetProperty("status").GetString());
+                Assert.Contains("/dns/sourceNetworks/ipv4", edit.GetProperty("errorMessage").GetString());
+
+                using var form = new MultipartFormDataContent();
+                form.Add(new ByteArrayContent(original), "file", "backup.zip");
+                JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+                Assert.Equal("error", restored.GetProperty("status").GetString());
+                Assert.Contains("/dns/sourceNetworks/ipv4", restored.GetProperty("errorMessage").GetString());
+                Assert.Equal(365, (await server.GetSettingsAsync()).GetProperty("maxLogFileDays").GetInt32());
+            }
+            finally
+            {
+                string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            }
+
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

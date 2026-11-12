@@ -137,8 +137,15 @@ namespace DnsServerCore.Dns
             MinRetry = 64,
             ResponsiblePerson = 128,
             ZoneTransferNetworks = 256,
-            NotifyNetworks = 512
+            NotifyNetworks = 512,
+            Ipv4SourceNetworks = 1024,
+            Ipv6SourceNetworks = 2048
         }
+
+        internal readonly record struct SourceNetworks(IReadOnlyList<NetworkAddress> Ipv4, IReadOnlyList<NetworkAddress> Ipv6);
+
+        private static readonly NetworkAddress[] _defaultIpv4SourceNetworks = [new NetworkAddress(IPAddress.Any, 32)];
+        private static readonly NetworkAddress[] _defaultIpv6SourceNetworks = [new NetworkAddress(IPAddress.IPv6Any, 128)];
 
         internal readonly record struct AuthoritativeDefaults(uint? Record, uint? Ns, uint? Soa,
             bool? SerialDateScheme = null, uint? MinRefresh = null, uint? MinRetry = null, string ResponsiblePerson = null,
@@ -704,12 +711,18 @@ namespace DnsServerCore.Dns
             (ManagedDnsSettings.ZoneTransferNetworks | ManagedDnsSettings.NotifyNetworks)) != 0;
         internal bool HasManagedSoaTiming => (_managedDnsSettings &
             (ManagedDnsSettings.SerialDateScheme | ManagedDnsSettings.MinRefresh | ManagedDnsSettings.MinRetry)) != 0;
-        internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & ~ManagedDnsSettings.LocalEndPoints) != 0;
+        private const ManagedDnsSettings SourceOwnership = ManagedDnsSettings.Ipv4SourceNetworks | ManagedDnsSettings.Ipv6SourceNetworks;
+        internal bool HasManagedSourceNetworks => (_managedDnsSettings & SourceOwnership) != 0;
+        internal bool HasManagedAuthoritativeDefaults => (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | SourceOwnership)) != 0;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
             if (ManifestOwnsLocalEndPoints)
                 yield return "/dns/localEndpoints";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv4SourceNetworks))
+                yield return "/dns/sourceNetworks/ipv4";
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv6SourceNetworks))
+                yield return "/dns/sourceNetworks/ipv6";
             if (ManifestOwnsDefaultRecordTtl)
                 yield return "/dns/authoritative/defaultRecordTtl";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.NsTtl))
@@ -821,6 +834,49 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/dns/localEndpoints: Setting is managed by the configuration manifest.");
         }
 
+        private static SourceNetworks ReadSourceNetworks(BinaryReader reader)
+        {
+            return new SourceNetworks(AuthZoneInfo.ReadNetworkAddressesFrom(reader) ?? [],
+                AuthZoneInfo.ReadNetworkAddressesFrom(reader) ?? []);
+        }
+
+        private static SourceNetworks GetSourceNetworks()
+        {
+            return new SourceNetworks(DnsClientConnection.IPv4SourceAddresses, DnsClientConnection.IPv6SourceAddresses);
+        }
+
+        private static IReadOnlyList<NetworkAddress> EffectiveSourceNetworks(IReadOnlyList<NetworkAddress> candidate,
+            IReadOnlyList<NetworkAddress> current, IReadOnlyList<NetworkAddress> defaults)
+        {
+            if (candidate is null)
+                return current;
+            if (candidate.Count == 0)
+                candidate = defaults;
+            return HaveSameNetworks(candidate, current) ? current : candidate;
+        }
+
+        internal void CheckManifestSourceNetworks(SourceNetworks candidate)
+        {
+            SourceNetworks current = GetSourceNetworks();
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv4SourceNetworks) &&
+                !ReferenceEquals(EffectiveSourceNetworks(candidate.Ipv4, current.Ipv4, _defaultIpv4SourceNetworks), current.Ipv4))
+                throw new DnsWebServiceException("/dns/sourceNetworks/ipv4: Setting is managed by the configuration manifest.");
+            if (_managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv6SourceNetworks) &&
+                !ReferenceEquals(EffectiveSourceNetworks(candidate.Ipv6, current.Ipv6, _defaultIpv6SourceNetworks), current.Ipv6))
+                throw new DnsWebServiceException("/dns/sourceNetworks/ipv6: Setting is managed by the configuration manifest.");
+        }
+
+        internal static void SetSourceNetworks(SourceNetworks candidate)
+        {
+            SourceNetworks current = GetSourceNetworks();
+            IReadOnlyList<NetworkAddress> ipv4 = EffectiveSourceNetworks(candidate.Ipv4, current.Ipv4, _defaultIpv4SourceNetworks);
+            IReadOnlyList<NetworkAddress> ipv6 = EffectiveSourceNetworks(candidate.Ipv6, current.Ipv6, _defaultIpv6SourceNetworks);
+            if (!ReferenceEquals(ipv4, current.Ipv4))
+                DnsClientConnection.IPv4SourceAddresses = ipv4;
+            if (!ReferenceEquals(ipv6, current.Ipv6))
+                DnsClientConnection.IPv6SourceAddresses = ipv6;
+        }
+
         internal void CheckRestoreManifestDnsSettings(BinaryReader reader, bool isConfigTransfer)
         {
             int version = ReadConfigVersion(reader);
@@ -828,10 +884,14 @@ namespace DnsServerCore.Dns
             IReadOnlyList<IPEndPoint> endpoints = ReadLocalEndPoints(reader);
             if (!isConfigTransfer)
                 CheckManifestLocalEndPoints(endpoints);
-            if (HasManagedAuthoritativeDefaults)
+            if (HasManagedAuthoritativeDefaults || (!isConfigTransfer && HasManagedSourceNetworks))
             {
-                AuthZoneInfo.ReadNetworkAddressesFrom(reader);
-                AuthZoneInfo.ReadNetworkAddressesFrom(reader);
+                SourceNetworks source = ReadSourceNetworks(reader);
+                if (!isConfigTransfer && HasManagedSourceNetworks)
+                    CheckManifestSourceNetworks(source);
+                if (!HasManagedAuthoritativeDefaults)
+                    return;
+
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
                 if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || HasManagedAuthoritativeNetworks)
                 {
@@ -874,13 +934,9 @@ namespace DnsServerCore.Dns
             if (!isConfigTransfer && (readOwnership || !ManifestOwnsLocalEndPoints))
                 _localEndPoints = localEndPoints;
 
-            NetworkAddress[] ipv4SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
+            SourceNetworks sourceNetworks = ReadSourceNetworks(bR);
             if (!isConfigTransfer)
-                DnsClientConnection.IPv4SourceAddresses = ipv4SourceAddresses;
-
-            NetworkAddress[] ipv6SourceAddresses = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
-            if (!isConfigTransfer)
-                DnsClientConnection.IPv6SourceAddresses = ipv6SourceAddresses;
+                SetSourceNetworks(sourceNetworks);
 
             AuthoritativeDefaults defaults = ReadAuthoritativeTtls(bR, version);
 
@@ -7160,7 +7216,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, AuthoritativeDefaults defaults, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7197,6 +7253,15 @@ namespace DnsServerCore.Dns
                     if (defaults.NotifyNetworks is not null)
                         ownership |= ManagedDnsSettings.NotifyNetworks;
 
+                    if (sourceNetworks.Ipv4 is not null)
+                        ownership |= ManagedDnsSettings.Ipv4SourceNetworks;
+                    if (sourceNetworks.Ipv6 is not null)
+                        ownership |= ManagedDnsSettings.Ipv6SourceNetworks;
+
+                    SourceNetworks previousSourceNetworks = GetSourceNetworks();
+                    var effectiveSourceNetworks = new SourceNetworks(
+                        EffectiveSourceNetworks(sourceNetworks.Ipv4, previousSourceNetworks.Ipv4, _defaultIpv4SourceNetworks),
+                        EffectiveSourceNetworks(sourceNetworks.Ipv6, previousSourceNetworks.Ipv6, _defaultIpv6SourceNetworks));
                     AuthoritativeDefaults previousDefaults = GetAuthoritativeDefaults();
                     var effectiveDefaults = new AuthoritativeDefaults(defaults.Record ?? previousDefaults.Record,
                         defaults.Ns ?? previousDefaults.Ns, defaults.Soa ?? previousDefaults.Soa,
@@ -7206,7 +7271,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults))
+                    if (!changed && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) && (effectiveSourceNetworks == previousSourceNetworks))
                     {
                         persist(null);
                         return;
@@ -7214,9 +7279,10 @@ namespace DnsServerCore.Dns
 
                     _localEndPoints = changed ? endpoints : previous;
                     _managedDnsSettings = ownership;
-                    SetAuthoritativeDefaults(effectiveDefaults);
                     try
                     {
+                        SetSourceNetworks(effectiveSourceNetworks);
+                        SetAuthoritativeDefaults(effectiveDefaults);
                         persist(SaveConfigFileInternal);
                         _pendingSave = false;
                     }
@@ -7225,6 +7291,7 @@ namespace DnsServerCore.Dns
                         _localEndPoints = previous;
                         _managedDnsSettings = previousOwnership;
                         SetAuthoritativeDefaults(previousDefaults);
+                        SetSourceNetworks(previousSourceNetworks);
                         throw;
                     }
                 }

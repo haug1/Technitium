@@ -644,6 +644,11 @@ namespace DnsServerCore
                     _dnsWebService._dnsServer.CheckManifestLocalEndPoints(requestedDnsEndpoints);
                 }
 
+                request.TryQueryOrFormArray("dnsServerIPv4SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] ipv4SourceAddresses);
+                request.TryQueryOrFormArray("dnsServerIPv6SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] ipv6SourceAddresses);
+                var sourceNetworks = new DnsServer.SourceNetworks(ipv4SourceAddresses, ipv6SourceAddresses);
+                _dnsWebService._dnsServer.CheckManifestSourceNetworks(sourceNetworks);
+
                 string defaultResponsiblePerson = request.QueryOrForm("defaultResponsiblePerson");
                 request.TryQueryOrFormArray("zoneTransferAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] zoneTransferAllowedNetworks);
                 request.TryQueryOrFormArray("notifyAllowedNetworks", NetworkAddress.Parse, out NetworkAddress[] notifyAllowedNetworks);
@@ -692,11 +697,7 @@ namespace DnsServerCore
                             _dnsWebService._dnsServer.LocalEndPoints = requestedDnsEndpoints;
                         }
 
-                        if (request.TryQueryOrFormArray("dnsServerIPv4SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] dnsServerIPv4SourceAddresses))
-                            DnsClientConnection.IPv4SourceAddresses = dnsServerIPv4SourceAddresses;
-
-                        if (request.TryQueryOrFormArray("dnsServerIPv6SourceAddresses", NetworkAddress.Parse, out NetworkAddress[] dnsServerIPv6SourceAddresses))
-                            DnsClientConnection.IPv6SourceAddresses = dnsServerIPv6SourceAddresses;
+                        DnsServer.SetSourceNetworks(sourceNetworks);
 
                         _dnsWebService._dnsServer.SetAuthoritativeDefaults(authoritativeDefaults);
                         if (authoritativeDefaults.Record.HasValue)

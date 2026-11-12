@@ -222,9 +222,11 @@ namespace DnsServerCore
                     ReadLegacyWebConfiguration(reader, version);
                     stream.ReadShortString(); // server domain
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks)
+                    if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks)
                     {
-                        var (_, _, recordTtl) = ReadLegacyDnsDefaults(reader, version);
+                        var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(reader, version);
+                        if (_dnsServer.HasManagedSourceNetworks && !isConfigTransfer)
+                            _dnsServer.CheckManifestSourceNetworks(new DnsServer.SourceNetworks(ipv4 ?? [], ipv6 ?? []));
                         var defaults = new DnsServer.AuthoritativeDefaults(recordTtl, null, null);
                         if (_dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks)
                         {
@@ -257,6 +259,8 @@ namespace DnsServerCore
                     if (version >= 23 && _dnsServer.ManifestOwnsDefaultRecordTtl)
                         throw new InvalidDataException("/dns/authoritative/defaultRecordTtl: Cannot verify the default record TTL in this backup format.");
 
+                    if (_dnsServer.HasManagedSourceNetworks && !isConfigTransfer)
+                        _dnsServer.CheckManifestSourceNetworks(new DnsServer.SourceNetworks([], []));
                     _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(
                         version < 23 ? 3600u : null, null, null, false, 300, 300, "", [], []));
                     return;
@@ -311,8 +315,7 @@ namespace DnsServerCore
                     _dnsServer.LocalEndPoints = endpoints;
 
                 var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(bR, version);
-                DnsClientConnection.IPv4SourceAddresses = ipv4;
-                DnsClientConnection.IPv6SourceAddresses = ipv6;
+                DnsServer.SetSourceNetworks(new DnsServer.SourceNetworks(ipv4 ?? [], ipv6 ?? []));
                 _dnsServer.SetAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(recordTtl, null, null));
 
                 if (version >= 36)
