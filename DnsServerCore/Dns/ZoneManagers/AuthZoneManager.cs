@@ -72,8 +72,8 @@ namespace DnsServerCore.Dns.ZoneManagers
         readonly ReaderWriterLockSlim _zoneIndexLock = new ReaderWriterLockSlim();
 
         internal const string ManifestOwnershipFile = "zone-ownership.config";
-        private SortedDictionary<string, bool> _manifestOwnedZones = new(StringComparer.Ordinal);
-        internal IReadOnlyDictionary<string, bool> ManifestOwnedZones => _manifestOwnedZones;
+        private SortedDictionary<string, string[]> _manifestOwnedZones = new(StringComparer.Ordinal);
+        internal IReadOnlyDictionary<string, string[]> ManifestOwnedZones => _manifestOwnedZones;
 
         readonly Lock _saveLock = new Lock();
         readonly Dictionary<string, object> _pendingSaveZones = new Dictionary<string, object>();
@@ -97,9 +97,16 @@ namespace DnsServerCore.Dns.ZoneManagers
             string ownershipFile = Path.Combine(_dnsServer.ConfigFolder, ManifestOwnershipFile);
             if (loadManifestOwnership && File.Exists(ownershipFile))
             {
-                var ownership = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllBytes(ownershipFile))
-                    ?? throw new InvalidDataException("Invalid zone manifest ownership file.");
-                _manifestOwnedZones = new SortedDictionary<string, bool>(ownership, StringComparer.Ordinal);
+                using JsonDocument ownership = JsonDocument.Parse(File.ReadAllBytes(ownershipFile));
+                foreach (JsonProperty zone in ownership.RootElement.EnumerateObject())
+                {
+                    _manifestOwnedZones.Add(zone.Name, zone.Value.ValueKind switch
+                    {
+                        JsonValueKind.True => ["enabled"],
+                        JsonValueKind.False => [],
+                        _ => zone.Value.Deserialize<string[]>() ?? throw new InvalidDataException("Invalid zone manifest ownership file.")
+                    });
+                }
             }
 
             _serverDomain = _dnsServer.ServerDomain;
@@ -647,16 +654,19 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         internal void CheckManifestZoneEnabled(AuthZoneInfo zone, bool disabled)
         {
-            if (zone.Disabled != disabled && _manifestOwnedZones.TryGetValue(zone.Name, out bool ownsEnabled) && ownsEnabled)
+            if (zone.Disabled != disabled && OwnsManifestZoneField(zone.Name, "enabled"))
                 throw new DnsWebServiceException($"{GetManifestZonePath(zone.Name)}/enabled: Zone enabled state is managed by the configuration manifest.");
         }
+
+        internal bool OwnsManifestZoneField(string name, string field) =>
+            _manifestOwnedZones.TryGetValue(name, out string[] fields) && fields.Contains(field, StringComparer.Ordinal);
 
         internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZones(ConfigurationManifest manifest, AuthManager auth, User creator)
         {
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
             var recordRevisions = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-            var ownedZones = new SortedDictionary<string, bool>(StringComparer.Ordinal);
+            var ownedZones = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
             string serverDomain = _dnsServer.ServerDomain;
             if (manifest.Settings.TryGetProperty("zones", out JsonElement zones))
             {
@@ -664,8 +674,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     string path = ConfigurationPlan.AppendPath("/zones", declaration.Name);
                     string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
-                    ownedZones.Add(name, declaration.Value.ValueKind == JsonValueKind.Object &&
-                        declaration.Value.TryGetProperty("enabled", out _));
+                    ownedZones.Add(name, GetOwnedZoneFields(declaration.Value));
                     AuthZoneInfo zone = GetAuthZoneInfo(name);
                     if (zone is not null && (zone.Type != AuthZoneType.Primary || zone.CatalogZoneName is not null))
                         throw new InvalidDataException($"{path}: Apply requires a primary zone outside catalogs.");
@@ -711,7 +720,8 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
             }
 
-            bool ownershipChanged = !_manifestOwnedZones.SequenceEqual(ownedZones);
+            bool ownershipChanged = _manifestOwnedZones.Count != ownedZones.Count || ownedZones.Any(entry =>
+                !_manifestOwnedZones.TryGetValue(entry.Key, out string[] previous) || !previous.SequenceEqual(entry.Value));
             if (changed.Count == 0 && !ownershipChanged)
                 return (persist => persist(), null, []);
 
@@ -871,7 +881,27 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
-        private void WriteManifestZoneOwnership(SortedDictionary<string, bool> ownership)
+        private static string[] GetOwnedZoneFields(JsonElement declaration)
+        {
+            if (declaration.ValueKind != JsonValueKind.Object)
+                return [];
+
+            var fields = new List<string>();
+            foreach (JsonProperty field in declaration.EnumerateObject())
+            {
+                if (field.Name == "enabled")
+                    fields.Add(field.Name);
+                else if (ConfigurationZonePolicies.IsPolicy(field.Name))
+                {
+                    foreach (JsonProperty option in field.Value.EnumerateObject())
+                        fields.Add(field.Name + "/" + option.Name);
+                }
+            }
+            fields.Sort(StringComparer.Ordinal);
+            return fields.ToArray();
+        }
+
+        private void WriteManifestZoneOwnership(SortedDictionary<string, string[]> ownership)
         {
             string path = Path.Combine(_dnsServer.ConfigFolder, ManifestOwnershipFile);
             if (ownership.Count == 0)

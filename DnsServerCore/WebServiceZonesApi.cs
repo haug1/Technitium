@@ -28,6 +28,7 @@ using Microsoft.AspNetCore.Http;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -930,13 +931,13 @@ namespace DnsServerCore
             {
                 jsonWriter.WriteStartObject();
 
-                if (_dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.TryGetValue(zoneInfo.Name, out bool ownsEnabled))
+                if (_dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.TryGetValue(zoneInfo.Name, out string[] ownedFields))
                 {
                     string path = AuthZoneManager.GetManifestZonePath(zoneInfo.Name);
                     jsonWriter.WriteStartArray("managedSettings");
                     jsonWriter.WriteStringValue(path);
-                    if (ownsEnabled)
-                        jsonWriter.WriteStringValue(path + "/enabled");
+                    foreach (string field in ownedFields)
+                        jsonWriter.WriteStringValue(path + "/" + field);
                     jsonWriter.WriteEndArray();
                 }
 
@@ -3415,6 +3416,42 @@ namespace DnsServerCore
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zoneInfo.Name, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
 
+                AuthZoneManager manager = _dnsWebService._dnsServer.AuthZoneManager;
+                if (zoneInfo.Type == AuthZoneType.Primary)
+                {
+                    CheckMode("queryAccess", "query/mode", zoneInfo.QueryAccess);
+                    CheckList("queryAccessNetworkACL", "query/networkAcl", zoneInfo.QueryAccessNetworkACL, NetworkAccessControl.Parse);
+                    CheckMode("zoneTransfer", "transfer/mode", zoneInfo.ZoneTransfer);
+                    CheckList("zoneTransferNetworkACL", "transfer/networkAcl", zoneInfo.ZoneTransferNetworkACL, NetworkAccessControl.Parse);
+                    CheckMode("notify", "notify/mode", zoneInfo.Notify);
+                    CheckList("notifyNameServers", "notify/nameServers", zoneInfo.NotifyNameServers, IPAddress.Parse);
+                    CheckMode("update", "updates/mode", zoneInfo.Update);
+                    CheckList("updateNetworkACL", "updates/networkAcl", zoneInfo.UpdateNetworkACL, NetworkAccessControl.Parse);
+                }
+
+                bool Owns(string field) => manager.OwnsManifestZoneField(zoneInfo.Name, field);
+
+                void CheckMode<T>(string parameter, string field, T current) where T : struct, Enum
+                {
+                    if (Owns(field) && request.TryGetQueryOrFormEnum(parameter, out T candidate) &&
+                        !EqualityComparer<T>.Default.Equals(current, candidate))
+                        Reject(field);
+                }
+
+                void CheckList<T>(string parameter, string field, IReadOnlyCollection<T> current, Func<string, T> parse)
+                {
+                    if (!Owns(field) || request.QueryOrForm(parameter) is not string value)
+                        return;
+
+                    T[] candidate = value.Length == 0 || value.Equals("false", StringComparison.OrdinalIgnoreCase)
+                        ? [] : value.Split(parse, ',');
+                    if (!(current ?? []).Select(item => item.ToString()).SequenceEqual(candidate.Select(item => item.ToString()), StringComparer.Ordinal))
+                        Reject(field);
+                }
+
+                void Reject(string field) => throw new DnsWebServiceException(
+                    $"{AuthZoneManager.GetManifestZonePath(zoneInfo.Name)}/{field}: Zone policy is managed by the configuration manifest.");
+
                 bool setDisabled = request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled);
                 if (setDisabled)
                     _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneEnabled(zoneInfo, disabled);
@@ -3568,7 +3605,7 @@ namespace DnsServerCore
                             break; //cannot set option for zone that is a member of Secondary Catalog Zone
 
                         string queryAccessNetworkACL = request.QueryOrForm("queryAccessNetworkACL");
-                        if (queryAccessNetworkACL is not null)
+                        if (!Owns("query/networkAcl") && queryAccessNetworkACL is not null)
                         {
                             if ((queryAccessNetworkACL.Length == 0) || queryAccessNetworkACL.Equals("false", StringComparison.OrdinalIgnoreCase))
                                 zoneInfo.QueryAccessNetworkACL = null;
@@ -3576,7 +3613,7 @@ namespace DnsServerCore
                                 zoneInfo.QueryAccessNetworkACL = queryAccessNetworkACL.Split(NetworkAccessControl.Parse, ',');
                         }
 
-                        if (request.TryGetQueryOrFormEnum("queryAccess", out AuthZoneQueryAccess queryAccess))
+                        if (!Owns("query/mode") && request.TryGetQueryOrFormEnum("queryAccess", out AuthZoneQueryAccess queryAccess))
                             zoneInfo.QueryAccess = queryAccess;
 
                         break;
@@ -3593,7 +3630,7 @@ namespace DnsServerCore
                             break; //cannot set option for zone that is a member of Secondary Catalog Zone
 
                         string strZoneTransferNetworkACL = request.QueryOrForm("zoneTransferNetworkACL");
-                        if (strZoneTransferNetworkACL is not null)
+                        if (!Owns("transfer/networkAcl") && strZoneTransferNetworkACL is not null)
                         {
                             if ((strZoneTransferNetworkACL.Length == 0) || strZoneTransferNetworkACL.Equals("false", StringComparison.OrdinalIgnoreCase))
                                 zoneInfo.ZoneTransferNetworkACL = null;
@@ -3601,7 +3638,7 @@ namespace DnsServerCore
                                 zoneInfo.ZoneTransferNetworkACL = strZoneTransferNetworkACL.Split(NetworkAccessControl.Parse, ',');
                         }
 
-                        if (request.TryGetQueryOrFormEnum("zoneTransfer", out AuthZoneTransfer zoneTransfer))
+                        if (!Owns("transfer/mode") && request.TryGetQueryOrFormEnum("zoneTransfer", out AuthZoneTransfer zoneTransfer))
                             zoneInfo.ZoneTransfer = zoneTransfer;
 
                         string strZoneTransferTsigKeyNames = request.QueryOrForm("zoneTransferTsigKeyNames");
@@ -3633,11 +3670,11 @@ namespace DnsServerCore
                     case AuthZoneType.Secondary:
                     case AuthZoneType.Forwarder:
                     case AuthZoneType.Catalog:
-                        if (request.TryGetQueryOrFormEnum("notify", out AuthZoneNotify notify))
+                        if (!Owns("notify/mode") && request.TryGetQueryOrFormEnum("notify", out AuthZoneNotify notify))
                             zoneInfo.Notify = notify;
 
                         string strNotifyNameServers = request.QueryOrForm("notifyNameServers");
-                        if (strNotifyNameServers is not null)
+                        if (!Owns("notify/nameServers") && strNotifyNameServers is not null)
                         {
                             if ((strNotifyNameServers.Length == 0) || strNotifyNameServers.Equals("false", StringComparison.OrdinalIgnoreCase))
                                 zoneInfo.NotifyNameServers = null;
@@ -3667,11 +3704,11 @@ namespace DnsServerCore
                     case AuthZoneType.Secondary:
                     case AuthZoneType.SecondaryForwarder:
                     case AuthZoneType.Forwarder:
-                        if (request.TryGetQueryOrFormEnum("update", out AuthZoneUpdate update))
+                        if (!Owns("updates/mode") && request.TryGetQueryOrFormEnum("update", out AuthZoneUpdate update))
                             zoneInfo.Update = update;
 
                         string strUpdateNetworkACL = request.QueryOrForm("updateNetworkACL");
-                        if (strUpdateNetworkACL is not null)
+                        if (!Owns("updates/networkAcl") && strUpdateNetworkACL is not null)
                         {
                             if ((strUpdateNetworkACL.Length == 0) || strUpdateNetworkACL.Equals("false", StringComparison.OrdinalIgnoreCase))
                                 zoneInfo.UpdateNetworkACL = null;

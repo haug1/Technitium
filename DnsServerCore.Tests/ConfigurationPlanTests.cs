@@ -3173,6 +3173,41 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZonePolicyOwnershipRejectsMixedEditsAndAllowsUnmanagedFields()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"managed-policy.test":{"type":"Primary","query":{
+                  "mode":"UseSpecifiedNetworkACL","networkAcl":["192.0.2.0/24"]
+                }}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+
+            JsonElement rejected = await server.CallAsync(
+                "zones/options/set?zone=managed-policy.test&disabled=true&queryAccessNetworkACL=198.51.100.0%2F24",
+                server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/zones/managed-policy.test/query/networkAcl", rejected.GetProperty("errorMessage").GetString());
+            Assert.Single((await server.QueryAsync("managed-policy.test", DnsResourceRecordType.SOA)).Answer);
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/options/set?zone=managed-policy.test&queryAccess=UseSpecifiedNetworkACL&queryAccessNetworkACL=192.0.2.0%2F24&zoneTransfer=Deny",
+                server.AdminToken));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            const string transfer = """
+                {"schemaVersion":1,"zones":{"managed-policy.test":{"transfer":{"mode":"Deny"}}}}
+                """;
+            Assert.Empty((await PreviewAsync(server, transfer)).GetProperty("changes").EnumerateArray());
+
+            revision = (await PreviewAsync(server, transfer)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, transfer, revision));
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "zones/options/set?zone=managed-policy.test&queryAccess=Allow", server.AdminToken));
+        }
+
+        [Fact]
         public async Task ZoneRecordPreviewLeavesDnsUnchangedUntilApply()
         {
             await using var server = await LoopbackWebService.StartAsync();
