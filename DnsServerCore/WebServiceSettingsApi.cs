@@ -602,6 +602,8 @@ namespace DnsServerCore
                             ["users"] = ConfigurationUsers.Export(_dnsWebService._authManager, missingInputs),
                             ["permissions"] = ConfigurationPermissions.Export(_dnsWebService._authManager)
                         });
+                    else if (_dnsWebService._clusterManager.GetSelfNode().Type == ClusterNodeType.Primary)
+                        manifest["auth"] = new System.Text.Json.Nodes.JsonObject { ["groups"] = ConfigurationGroups.Export(_dnsWebService._authManager) };
                     if (_dnsWebService._authManager.ManifestStaticSessionDefinitions.Count > 0)
                     {
                         manifest["auth"] ??= new System.Text.Json.Nodes.JsonObject();
@@ -1211,6 +1213,11 @@ namespace DnsServerCore
                     if (sso is not null)
                         ConfigurationSso.WriteSnapshot(writer, auth.GetManifestSsoSettings(), sso, _configurationRevisionKey);
                     var groups = ConfigurationGroups.Prepare(manifest, auth);
+                    if (manifest is not null && ConfigurationPlan.CheckClusterGroupSupport(manifest, _dnsWebService._clusterManager, groups.Count > 0) is { } groupPeers)
+                    {
+                        writer.WritePropertyName("groupPeers");
+                        JsonSerializer.Serialize(writer, groupPeers);
+                    }
                     var users = preparedUsers ?? PrepareUsersForSession(manifest, sessionUser, ldap, sso, groups);
                     var staticSessions = preparedStaticSessions ?? PrepareStaticSessionsForSession(manifest, sessionUser, users);
                     ConfigurationStaticSessions.CheckAccountRemovals(auth, users, staticSessions);

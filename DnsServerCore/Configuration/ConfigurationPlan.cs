@@ -304,6 +304,8 @@ namespace DnsServerCore.Configuration
                     ldapPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("ssoPeers", out JsonElement ssoPeers))
                     ssoPeers.WriteTo(writer);
+                if (currentSettings.TryGetProperty("groupPeers", out JsonElement groupPeers))
+                    groupPeers.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -884,8 +886,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/auth/permissions: Applying permissions to a cluster is not implemented.");
             if (ConfigurationUsers.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/auth/users: Applying user settings to a cluster is not implemented.");
-            if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
-                throw new InvalidDataException("/auth/groups: Applying group settings to a cluster is not implemented.");
+            CheckClusterGroupRole(manifest, cluster);
             if (ConfigurationApplications.IsDeclared(manifest))
                 throw new InvalidDataException("/apps/packages: Applying app packages to a cluster is not implemented.");
             CheckClusterSsoRole(manifest, cluster);
@@ -898,6 +899,28 @@ namespace DnsServerCore.Configuration
             if (manifest.GetServerDomain() is not null)
                 throw new InvalidDataException("/dns/serverDomain: Applying server domain changes to a cluster is not implemented.");
             CheckClusterBlockListSupport(manifest, cluster);
+        }
+
+        private static void CheckClusterGroupRole(ConfigurationManifest manifest, ClusterManager cluster)
+        {
+            if (ConfigurationGroups.TryGetDeclaration(manifest, out _) && cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                throw new InvalidDataException("/auth/groups: Only the Primary can apply cluster group settings.");
+        }
+
+        internal static int[] CheckClusterGroupSupport(ConfigurationManifest manifest, ClusterManager cluster, bool groupsChanged)
+        {
+            if (!cluster.ClusterInitialized)
+                return null;
+
+            CheckClusterGroupRole(manifest, cluster);
+            if (cluster.GetSelfNode().Type != ClusterNodeType.Primary)
+                return null;
+
+            var auth = cluster.DnsWebService.AuthManager;
+            if (!groupsChanged && !auth.GroupOwnershipFromPrimary &&
+                auth.ManagedGroupPaths.SequenceEqual(ConfigurationGroups.GetOwnedPaths(manifest)))
+                return null;
+            return cluster.CheckDeclarativeGroupPeers();
         }
 
         private static void CheckClusterSsoRole(ConfigurationManifest manifest, ClusterManager cluster)

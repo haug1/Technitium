@@ -5323,6 +5323,8 @@ The Primary can apply `auth.ldap` when every peer advertises `supportsDeclarativ
 
 The Primary can apply `auth.sso` when every peer advertises `supportsDeclarativeSso`. Secondaries inherit the settings and ownership through configuration sync and restart their web service when the provider configuration requires it.
 
+The Primary can apply `auth.groups` when every peer advertises `supportsDeclarativeGroups`. Secondaries inherit definitions and ownership. The Primary's export includes the group definitions.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7463,6 +7465,7 @@ WHERE:
 - `supportsDeclarativeTsig` (optional): Set to true when the Secondary can inherit manifest ownership of TSIG keys. Required when the Primary manages operator TSIG keys.
 - `supportsDeclarativeLdap` (optional): Set to true when the Secondary can inherit manifest ownership of LDAP settings. Required when the Primary manages any LDAP fields.
 - `supportsDeclarativeSso` (optional): Set to true when the Secondary can inherit manifest ownership of SSO settings. Required when the Primary manages any SSO fields.
+- `supportsDeclarativeGroups` (optional): Set to true when the Secondary can inherit manifest ownership of authentication groups.
 
 RESPONSE:
 ```

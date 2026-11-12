@@ -37,6 +37,8 @@ namespace DnsServerCore.Configuration
                 if (entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("description", out _))
                     paths.Add(path + "/description");
             }
+            if (paths.Count > ushort.MaxValue)
+                throw new InvalidDataException($"{Path}: Too many group ownership declarations.");
             return paths.ToArray();
         }
 

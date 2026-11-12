@@ -161,6 +161,8 @@ def verify(current, previous, folder, propagation, graceful):
         ldap_revision = ok(primary.call("settings/config/plan", manifest=ldap_policy))["revision"]
         sso_policy = {"schemaVersion": 1, "auth": {"sso": {"clientId": "cluster-fixture"}}}
         sso_revision = ok(primary.call("settings/config/plan", manifest=sso_policy))["revision"]
+        group_policy = {"schemaVersion": 1, "auth": {"groups": {"Operators": {}}}}
+        group_revision = ok(primary.call("settings/config/plan", manifest=group_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -176,12 +178,26 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeTsig"] is True
             assert joined["supportsDeclarativeLdap"] is True
             assert joined["supportsDeclarativeSso"] is True
+            assert joined["supportsDeclarativeGroups"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeSso"), joined
+        assert not joined.get("supportsDeclarativeGroups"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=group_policy),
+            primary.call("settings/config/apply", manifest=group_policy, revision=group_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative groups" in rejected["errorMessage"], rejected
+        for node in (primary, secondary):
+            assert node.call("admin/groups/get?group=Operators")["status"] == "error"
+        if joined.get("supportsDeclarativeSso"):
+            plan = ok(primary.call("settings/config/plan", manifest=sso_policy))
+            ok(primary.call("settings/config/apply", manifest=sso_policy, revision=plan["revision"]))
+            assert ok(primary.call("admin/sso/get"))["ssoClientId"] == "cluster-fixture"
+            print("Mixed-build check passed. Existing SSO support allowed the update and rejected group changes.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=sso_policy),
             primary.call("settings/config/apply", manifest=sso_policy, revision=sso_revision),
@@ -547,6 +563,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_tsig_policy(primary, secondary, release, local_web)
     verify_ldap_policy(primary, secondary, release, local_web)
     verify_sso_policy(primary, secondary, release, local_web)
+    verify_group_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -1034,6 +1051,56 @@ def verify_sso_policy(primary, secondary, cluster_manifest, local_web):
              "the Secondary to disable SSO and restart its web service")
     apply(primary, cluster_manifest)
     wait_for(lambda: matches(False, rotated, set()), "the Secondary to release SSO ownership")
+
+
+def verify_group_policy(primary, secondary, cluster_manifest, local_web):
+    groups = {"Operators": {"description": "Cluster operators"}}
+    desired = {**cluster_manifest, "auth": {"groups": groups}}
+    path = "/auth/groups/operators"
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "auth": {"groups": groups}})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, manifest):
+        def preview():
+            result = node.call("settings/config/plan", manifest=manifest)
+            if result["status"] == "error" and "has not advertised support for declarative groups" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm group support")
+        ok(node.call("settings/config/apply", manifest=manifest, revision=plan["revision"]))
+        return plan
+
+    def matches(description, owned):
+        result = secondary.call("admin/groups/get?group=Operators")
+        if result["status"] != "ok":
+            return False
+        group = ok(result)
+        return group["description"] == description and set(group["managedSettings"]) == owned
+
+    owned = {path, path + "/description"}
+    apply(primary, desired)
+    wait_for(lambda: matches("Cluster operators", owned), "the Secondary to inherit the group")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches("Cluster operators", owned)
+    apply(secondary, local_web)
+    assert matches("Cluster operators", owned)
+    denied = secondary.call("admin/groups/set?group=Operators&description=Changed")
+    assert denied["status"] == "error" and path in denied["errorMessage"], denied
+
+    groups["Operators"]["description"] = "Updated operators"
+    apply(primary, desired)
+    wait_for(lambda: matches("Updated operators", owned), "the Secondary to update the group")
+    assert not apply(primary, desired)["changes"]
+    exported = ok(primary.call("settings/config/export"))["manifest"]
+    assert exported["auth"]["groups"]["Operators"]["description"] == "Updated operators"
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches("Updated operators", set()), "the Secondary to release group ownership")
+    groups["Operators"] = None
+    apply(primary, desired)
+    wait_for(lambda: secondary.call("admin/groups/get?group=Operators")["status"] == "error",
+             "the Secondary to remove the group")
+    apply(primary, cluster_manifest)
 
 
 def assert_promoted_policy(state):
