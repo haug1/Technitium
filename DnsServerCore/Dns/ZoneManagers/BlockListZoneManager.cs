@@ -67,7 +67,8 @@ namespace DnsServerCore.Dns.ZoneManagers
         const int BLOCK_LIST_UPDATE_TIMER_PERIODIC_INTERVAL = 900000;
 
         Timer _temporaryDisableBlockingTimer;
-        DateTime _temporaryDisableBlockingTill;
+        readonly object _temporaryDisableBlockingLock = new();
+        long _temporaryDisableBlockingUntilTicks;
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
@@ -123,7 +124,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 return;
 
             _blockListUpdateTimer?.Dispose();
-            _temporaryDisableBlockingTimer?.Dispose();
+            StopTemporaryDisableBlockingTimer();
 
             lock (_saveLock)
             {
@@ -1083,43 +1084,45 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void TemporaryDisableBlocking(int minutes, IPEndPoint userEP, string username)
         {
-            Timer temporaryDisableBlockingTimer = _temporaryDisableBlockingTimer;
-            if (temporaryDisableBlockingTimer is not null)
-                temporaryDisableBlockingTimer.Dispose();
-
-            Timer newTemporaryDisableBlockingTimer = new Timer(delegate (object state)
+            TimeSpan duration = TimeSpan.FromMinutes(minutes);
+            lock (_temporaryDisableBlockingLock)
             {
+                Timer timer = null;
+                timer = new Timer(_ =>
+                {
+                    lock (_temporaryDisableBlockingLock)
+                    {
+                        if (!ReferenceEquals(_temporaryDisableBlockingTimer, timer))
+                            return;
+                        StopTemporaryDisableBlockingTimer();
+                    }
+                    _dnsServer.LogManager.Write(userEP, "[" + username + "] Temporary blocking pause expired.");
+                });
+
                 try
                 {
-                    _dnsServer.EnableBlocking = true;
-                    _dnsServer.LogManager.Write(userEP, "[" + username + "] Blocking was enabled after " + minutes + " minute(s) being temporarily disabled.");
+                    timer.Change(duration, Timeout.InfiniteTimeSpan);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    _dnsServer.LogManager.Write(ex);
+                    timer.Dispose();
+                    throw;
                 }
-            });
-
-            Timer originalTimer = Interlocked.CompareExchange(ref _temporaryDisableBlockingTimer, newTemporaryDisableBlockingTimer, temporaryDisableBlockingTimer);
-            if (ReferenceEquals(originalTimer, temporaryDisableBlockingTimer))
-            {
-                newTemporaryDisableBlockingTimer.Change(minutes * 60 * 1000, Timeout.Infinite);
-                _dnsServer.EnableBlocking = false;
-                _temporaryDisableBlockingTill = DateTime.UtcNow.AddMinutes(minutes);
-
-                _dnsServer.LogManager.Write(userEP, "[" + username + "] Blocking was temporarily disabled for " + minutes + " minute(s).");
+                _temporaryDisableBlockingTimer?.Dispose();
+                _temporaryDisableBlockingTimer = timer;
+                Volatile.Write(ref _temporaryDisableBlockingUntilTicks, DateTime.UtcNow.Add(duration).Ticks);
             }
-            else
-            {
-                newTemporaryDisableBlockingTimer.Dispose();
-            }
+            _dnsServer.LogManager.Write(userEP, "[" + username + "] Blocking was temporarily disabled for " + minutes + " minute(s).");
         }
 
         public void StopTemporaryDisableBlockingTimer()
         {
-            Timer temporaryDisableBlockingTimer = _temporaryDisableBlockingTimer;
-            if (temporaryDisableBlockingTimer is not null)
-                temporaryDisableBlockingTimer.Dispose();
+            lock (_temporaryDisableBlockingLock)
+            {
+                _temporaryDisableBlockingTimer?.Dispose();
+                _temporaryDisableBlockingTimer = null;
+                Volatile.Write(ref _temporaryDisableBlockingUntilTicks, 0);
+            }
         }
 
         #endregion
@@ -1202,7 +1205,16 @@ namespace DnsServerCore.Dns.ZoneManagers
         }
 
         public DateTime TemporaryDisableBlockingTill
-        { get { return _temporaryDisableBlockingTill; } }
+        { get { return new DateTime(Volatile.Read(ref _temporaryDisableBlockingUntilTicks), DateTimeKind.Utc); } }
+
+        internal bool IsBlockingTemporarilyDisabled
+        {
+            get
+            {
+                long until = Volatile.Read(ref _temporaryDisableBlockingUntilTicks);
+                return until != 0 && DateTime.UtcNow.Ticks < until;
+            }
+        }
 
         public int TotalZonesAllowed
         { get { return _allowListZone.Count; } }

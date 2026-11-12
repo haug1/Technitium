@@ -84,6 +84,12 @@ namespace DnsServerCore.Configuration
             ["/dns/cache/prefetch/enabled"] = Field("enableCachePrefetch", true, canApply: true),
             ["/dns/cache/prefetch/eligibility"] = Field("cachePrefetchEligibility", 2, canApply: true),
             ["/dns/cache/prefetch/trigger"] = Field("cachePrefetchTrigger", 9, canApply: true),
+            ["/dns/blocking/enabled"] = Field("configuredEnableBlocking", true, canApply: true),
+            ["/dns/blocking/allowTxtReport"] = Field("allowTxtBlockingReport", true, canApply: true),
+            ["/dns/blocking/bypassNetworks"] = Field("blockingBypassList", Array.Empty<string>(), canApply: true),
+            ["/dns/blocking/responseType"] = Field("blockingType", nameof(DnsServerBlockingType.NxDomain), canApply: true),
+            ["/dns/blocking/answerTtl"] = Field("blockingAnswerTtl", 30u, canApply: true),
+            ["/dns/blocking/customAddresses"] = Field("customBlockingAddresses", Array.Empty<string>(), canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -189,7 +195,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -301,6 +307,33 @@ namespace DnsServerCore.Configuration
             int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
                 ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
             return new DnsServer.StatisticsSettings(inMemory, retention);
+        }
+
+        private static DnsServer.BlockingPolicy GetBlockingPolicy(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("blocking", out JsonElement blocking))
+                return default;
+
+            JsonElement? ttl = Read("answerTtl");
+            JsonElement? response = Read("responseType");
+            return new DnsServer.BlockingPolicy(Read("enabled")?.GetBoolean(), Read("allowTxtReport")?.GetBoolean(),
+                Read("bypassNetworks") is JsonElement bypass ? ConfigurationManifest.ReadNetworks(bypass, "/dns/blocking/bypassNetworks") : null,
+                response.HasValue ? Enum.Parse<DnsServerBlockingType>(response.Value.GetString()) : null,
+                ttl.HasValue ? decimal.ToUInt32(ttl.Value.GetDecimal()) : null,
+                Read("customAddresses") is JsonElement addresses ? ReadBlockingAddresses(addresses) : null);
+
+            JsonElement? Read(string field)
+            {
+                if (!blocking.TryGetProperty(field, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/blocking/" + field].Default : value;
+            }
+        }
+
+        private static IPAddress[] ReadBlockingAddresses(JsonElement value)
+        {
+            return value.ValueKind == JsonValueKind.Null ? [] :
+                DnsServer.NormalizeBlockingAddresses(value.EnumerateArray().Select(address => IPAddress.Parse(address.GetString())));
         }
 
         private static DnsServer.CachePolicy GetCachePolicy(ConfigurationManifest manifest)
@@ -460,6 +493,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
+            if (GetBlockingPolicy(manifest) != default)
+                throw new InvalidDataException("/dns/blocking: Applying blocking policy to a cluster is not implemented.");
             if (GetRecursionPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/recursion: Applying recursion policy to a cluster is not implemented.");
             if (GetClientSubnetSettings(manifest) != default)
@@ -842,10 +877,14 @@ namespace DnsServerCore.Configuration
                         candidate = networks.Length == 0 ? setting.Default : SortAddresses(networks.Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path, family).Select(network => network.ToString()));
                     }
-                    else if (path is "/dns/authoritative/zoneTransferAllowedNetworks" or "/dns/authoritative/notifyAllowedNetworks")
+                    else if (path is "/dns/authoritative/zoneTransferAllowedNetworks" or "/dns/authoritative/notifyAllowedNetworks" or "/dns/blocking/bypassNetworks")
                     {
                         candidate = SortAddresses(ConfigurationManifest.ReadNetworks(desired, path).Select(network => network.ToString()));
                         current = SortAddresses(ConfigurationManifest.ReadNetworks(current, path).Select(network => network.ToString()));
+                    }
+                    else if (path == "/dns/blocking/customAddresses")
+                    {
+                        candidate = JsonSerializer.SerializeToElement(ReadBlockingAddresses(desired).Select(address => address.ToString()));
                     }
                     else if (path == "/dns/recursion/networkAcl")
                     {

@@ -122,6 +122,8 @@ namespace DnsServerCore.Configuration
                     prefetch.TryGetProperty("trigger", out JsonElement prefetchTrigger) && prefetchTrigger.ValueKind == JsonValueKind.Number &&
                     prefetchTrigger.GetDecimal() == 0)
                     throw new InvalidDataException("/dns/cache/prefetch/trigger: Enabled prefetch requires a positive trigger.");
+                if (dns.TryGetProperty("blocking", out JsonElement blocking) && blocking.TryGetProperty("bypassNetworks", out JsonElement bypass))
+                    ReadNetworks(bypass, "/dns/blocking/bypassNetworks");
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))

@@ -212,7 +212,7 @@ namespace DnsServerCore
             if (format == "DC")
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
-                return _dnsServer.HasManagedRecursionPolicy || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
+                return _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
                     _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging || _dnsServer.HasManagedCachePolicy);
             }
 
@@ -220,6 +220,9 @@ namespace DnsServerCore
             {
                 if (!isConfigTransfer && _dnsServer.HasManagedCachePolicy)
                     throw new InvalidDataException("/dns/cache: Cannot verify cache policy in this combined backup format.");
+
+                if (_dnsServer.HasManagedBlockingPolicy)
+                    throw new InvalidDataException("/dns/blocking: Cannot verify blocking policy in this combined backup format.");
 
                 if (_dnsServer.HasManagedRecursionPolicy)
                     throw new InvalidDataException("/dns/recursion: Cannot verify recursion policy in this combined backup format.");

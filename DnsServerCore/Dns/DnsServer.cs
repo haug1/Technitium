@@ -179,7 +179,13 @@ namespace DnsServerCore.Dns
             CacheFailureRecordTtl = 1UL << 48,
             CachePrefetchEnabled = 1UL << 49,
             CachePrefetchEligibility = 1UL << 50,
-            CachePrefetchTrigger = 1UL << 51
+            CachePrefetchTrigger = 1UL << 51,
+            BlockingEnabled = 1UL << 52,
+            BlockingTxtReport = 1UL << 53,
+            BlockingBypass = 1UL << 54,
+            BlockingResponseType = 1UL << 55,
+            BlockingAnswerTtl = 1UL << 56,
+            BlockingCustomAddresses = 1UL << 57
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -205,6 +211,9 @@ namespace DnsServerCore.Dns
             int? StaleMaxWait, long? MaximumEntries, uint? MinimumRecordTtl, uint? MaximumRecordTtl,
             uint? NegativeRecordTtl, uint? FailureRecordTtl,
             bool? PrefetchEnabled = null, int? PrefetchEligibility = null, int? PrefetchTrigger = null);
+
+        internal readonly record struct BlockingPolicy(bool? Enabled, bool? AllowTxtReport, IReadOnlyCollection<NetworkAddress> BypassNetworks,
+            DnsServerBlockingType? ResponseType, uint? AnswerTtl, IPAddress[] CustomAddresses);
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -716,14 +725,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -830,9 +839,22 @@ namespace DnsServerCore.Dns
             ManagedDnsSettings.CachePrefetchEnabled | ManagedDnsSettings.CachePrefetchEligibility | ManagedDnsSettings.CachePrefetchTrigger;
         internal bool HasManagedCachePolicy => (_managedDnsSettings & CacheOwnership) != 0;
 
+        private static readonly (ManagedDnsSettings Flag, string Path)[] _blockingOwnership =
+        [
+            (ManagedDnsSettings.BlockingEnabled, "enabled"),
+            (ManagedDnsSettings.BlockingTxtReport, "allowTxtReport"),
+            (ManagedDnsSettings.BlockingBypass, "bypassNetworks"),
+            (ManagedDnsSettings.BlockingResponseType, "responseType"),
+            (ManagedDnsSettings.BlockingAnswerTtl, "answerTtl"),
+            (ManagedDnsSettings.BlockingCustomAddresses, "customAddresses")
+        ];
+        private const ManagedDnsSettings BlockingOwnership = ManagedDnsSettings.BlockingEnabled | ManagedDnsSettings.BlockingTxtReport |
+            ManagedDnsSettings.BlockingBypass | ManagedDnsSettings.BlockingResponseType | ManagedDnsSettings.BlockingAnswerTtl | ManagedDnsSettings.BlockingCustomAddresses;
+        internal bool HasManagedBlockingPolicy => (_managedDnsSettings & BlockingOwnership) != 0;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership | BlockingOwnership)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -887,6 +909,11 @@ namespace DnsServerCore.Dns
                 yield return "/dns/cache/prefetch/eligibility";
             if (_managedDnsSettings.HasFlag(ManagedDnsSettings.CachePrefetchTrigger))
                 yield return "/dns/cache/prefetch/trigger";
+            foreach ((ManagedDnsSettings flag, string path) in _blockingOwnership)
+            {
+                if (_managedDnsSettings.HasFlag(flag))
+                    yield return "/dns/blocking/" + path;
+            }
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1287,6 +1314,72 @@ namespace DnsServerCore.Dns
             _enableCachePrefetch = cache.PrefetchEnabled ?? _enableCachePrefetch;
             _cachePrefetchEligibility = cache.PrefetchEligibility ?? _cachePrefetchEligibility;
             _cachePrefetchTrigger = cache.PrefetchTrigger ?? _cachePrefetchTrigger;
+        }
+
+        internal static IPAddress[] NormalizeBlockingAddresses(IEnumerable<IPAddress> addresses)
+        {
+            return addresses.OrderBy(address => address.AddressFamily).ToArray();
+        }
+
+        private IEnumerable<IPAddress> GetBlockingAddresses()
+        {
+            return _customBlockingARecords.Select(record => record.Address)
+                .Concat(_customBlockingAAAARecords.Select(record => record.Address));
+        }
+
+        internal BlockingPolicy CheckManifestBlockingPolicy(BlockingPolicy policy)
+        {
+            if (policy.BypassNetworks?.Count > byte.MaxValue)
+                throw new DnsWebServiceException("/dns/blocking/bypassNetworks: A maximum of 255 entries is allowed.");
+            if (policy.CustomAddresses?.Length > byte.MaxValue)
+                throw new DnsWebServiceException("/dns/blocking/customAddresses: A maximum of 255 entries is allowed.");
+
+            return new BlockingPolicy(
+                Check(ManagedDnsSettings.BlockingEnabled, policy.Enabled.HasValue, policy.Enabled != _enableBlocking, "enabled") ? policy.Enabled : null,
+                Check(ManagedDnsSettings.BlockingTxtReport, policy.AllowTxtReport.HasValue, policy.AllowTxtReport != _allowTxtBlockingReport, "allowTxtReport") ? policy.AllowTxtReport : null,
+                Check(ManagedDnsSettings.BlockingBypass, policy.BypassNetworks is not null, !HaveSameNetworks(policy.BypassNetworks, _blockingBypassList), "bypassNetworks") ? policy.BypassNetworks : null,
+                Check(ManagedDnsSettings.BlockingResponseType, policy.ResponseType.HasValue, policy.ResponseType != _blockingType, "responseType") ? policy.ResponseType : null,
+                Check(ManagedDnsSettings.BlockingAnswerTtl, policy.AnswerTtl.HasValue, policy.AnswerTtl != _blockingAnswerTtl, "answerTtl") ? policy.AnswerTtl : null,
+                Check(ManagedDnsSettings.BlockingCustomAddresses, policy.CustomAddresses is not null,
+                    policy.CustomAddresses is not null && !GetBlockingAddresses().SequenceEqual(policy.CustomAddresses), "customAddresses") ? policy.CustomAddresses : null);
+
+            bool Check(ManagedDnsSettings flag, bool present, bool different, string path)
+            {
+                if (!_managedDnsSettings.HasFlag(flag))
+                    return true;
+                if (present && different)
+                    throw new DnsWebServiceException($"/dns/blocking/{path}: Setting is managed by the configuration manifest.");
+                return false;
+            }
+        }
+
+        internal void SetBlockingPolicy(BlockingPolicy policy, bool cancelPause)
+        {
+            if (policy.AllowTxtReport.HasValue)
+                AllowTxtBlockingReport = policy.AllowTxtReport.Value;
+            if (policy.BypassNetworks is not null)
+                BlockingBypassList = policy.BypassNetworks;
+            if (policy.ResponseType.HasValue)
+                BlockingType = policy.ResponseType.Value;
+            if (policy.AnswerTtl.HasValue)
+                BlockingAnswerTtl = policy.AnswerTtl.Value;
+            if (policy.CustomAddresses is not null)
+                SetBlockingAddresses(policy.CustomAddresses);
+            if (policy.Enabled.HasValue)
+            {
+                if (cancelPause)
+                    EnableBlocking = policy.Enabled.Value;
+                else
+                    _enableBlocking = policy.Enabled.Value;
+            }
+        }
+
+        private void SetBlockingAddresses(IEnumerable<IPAddress> addresses)
+        {
+            _customBlockingARecords = addresses.Where(address => address.AddressFamily == AddressFamily.InterNetwork)
+                .Select(address => new DnsARecordData(address)).ToArray();
+            _customBlockingAAAARecords = addresses.Where(address => address.AddressFamily == AddressFamily.InterNetworkV6)
+                .Select(address => new DnsAAAARecordData(address)).ToArray();
         }
 
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
@@ -1907,55 +2000,34 @@ namespace DnsServerCore.Dns
 
             //blocking
             bool enableBlocking = bR.ReadBoolean();
-            if (apply)
-                _enableBlocking = enableBlocking;
             bool allowTxtBlockingReport = bR.ReadBoolean();
-            if (apply)
-                _allowTxtBlockingReport = allowTxtBlockingReport;
-
             var blockingBypassList = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
-            if (apply)
-                _blockingBypassList = blockingBypassList;
-
             DnsServerBlockingType blockingType = (DnsServerBlockingType)bR.ReadByte();
-            if (apply)
-                _blockingType = blockingType;
-
-            {
-                //read custom blocking addresses
-                List<DnsARecordData> dnsARecords = new List<DnsARecordData>();
-                List<DnsAAAARecordData> dnsAAAARecords = new List<DnsAAAARecordData>();
-
-                int count = bR.ReadByte();
-                if (count > 0)
-                {
-                    for (int i = 0; i < count; i++)
-                    {
-                        IPAddress customAddress = IPAddressExtensions.ReadFrom(bR);
-
-                        switch (customAddress.AddressFamily)
-                        {
-                            case AddressFamily.InterNetwork:
-                                dnsARecords.Add(new DnsARecordData(customAddress));
-                                break;
-
-                            case AddressFamily.InterNetworkV6:
-                                dnsAAAARecords.Add(new DnsAAAARecordData(customAddress));
-                                break;
-                        }
-                    }
-                }
-
-                if (apply)
-                {
-                    _customBlockingARecords = dnsARecords;
-                    _customBlockingAAAARecords = dnsAAAARecords;
-                }
-            }
-
+            var customAddresses = new IPAddress[bR.ReadByte()];
+            for (int i = 0; i < customAddresses.Length; i++)
+                customAddresses[i] = IPAddressExtensions.ReadFrom(bR);
             uint blockingAnswerTtl = bR.ReadUInt32();
+
             if (apply)
-                _blockingAnswerTtl = blockingAnswerTtl;
+            {
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingEnabled))
+                    _enableBlocking = enableBlocking;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingTxtReport))
+                    _allowTxtBlockingReport = allowTxtBlockingReport;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingBypass))
+                    _blockingBypassList = blockingBypassList;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingResponseType))
+                    _blockingType = blockingType;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingAnswerTtl))
+                    _blockingAnswerTtl = blockingAnswerTtl;
+                if (readOwnership || !_managedDnsSettings.HasFlag(ManagedDnsSettings.BlockingCustomAddresses))
+                    SetBlockingAddresses(customAddresses);
+            }
+            else if (HasManagedBlockingPolicy)
+            {
+                CheckManifestBlockingPolicy(new BlockingPolicy(enableBlocking, allowTxtBlockingReport, blockingBypassList ?? [],
+                    blockingType, blockingAnswerTtl, NormalizeBlockingAddresses(customAddresses)));
+            }
 
             //proxy & forwarders
             NetProxyType proxyType = (NetProxyType)bR.ReadByte();
@@ -2076,7 +2148,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2277,24 +2349,15 @@ namespace DnsServerCore.Dns
             bW.Write(cache.PrefetchTrigger ?? _cachePrefetchTrigger);
 
             //blocking
-            bW.Write(_enableBlocking);
-            bW.Write(_allowTxtBlockingReport);
-
-            AuthZoneInfo.WriteNetworkAddressesTo(_blockingBypassList, bW);
-
-            bW.Write((byte)_blockingType);
-
-            {
-                bW.Write(Convert.ToByte(_customBlockingARecords.Count + _customBlockingAAAARecords.Count));
-
-                foreach (DnsARecordData record in _customBlockingARecords)
-                    record.Address.WriteTo(bW);
-
-                foreach (DnsAAAARecordData record in _customBlockingAAAARecords)
-                    record.Address.WriteTo(bW);
-            }
-
-            bW.Write(_blockingAnswerTtl);
+            bW.Write(blocking.Enabled ?? _enableBlocking);
+            bW.Write(blocking.AllowTxtReport ?? _allowTxtBlockingReport);
+            AuthZoneInfo.WriteNetworkAddressesTo(blocking.BypassNetworks ?? _blockingBypassList, bW);
+            bW.Write((byte)(blocking.ResponseType ?? _blockingType));
+            IPAddress[] customAddresses = blocking.CustomAddresses ?? GetBlockingAddresses().ToArray();
+            bW.Write(Convert.ToByte(customAddresses.Length));
+            foreach (IPAddress address in customAddresses)
+                address.WriteTo(bW);
+            bW.Write(blocking.AnswerTtl ?? _blockingAnswerTtl);
 
             //proxy & forwarders
             if (_proxy == null)
@@ -5421,7 +5484,7 @@ namespace DnsServerCore.Dns
                 }
             }
 
-            if (_enableBlocking)
+            if (EnableBlocking)
             {
                 if (_blockingBypassList is not null)
                 {
@@ -5456,7 +5519,7 @@ namespace DnsServerCore.Dns
 
         private async Task<DnsDatagram> ProcessBlockedQueryAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol)
         {
-            if (_enableBlocking)
+            if (EnableBlocking)
             {
                 DnsDatagram response = _blockedZoneManager.Query(request);
                 if (response is null)
@@ -7848,7 +7911,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7988,6 +8051,25 @@ namespace DnsServerCore.Dns
                         ownership |= ManagedDnsSettings.CachePrefetchTrigger;
                     cache = NormalizeCachePrefetch(cache);
 
+                    if (blocking.Enabled.HasValue)
+                        ownership |= ManagedDnsSettings.BlockingEnabled;
+                    if (blocking.AllowTxtReport.HasValue)
+                        ownership |= ManagedDnsSettings.BlockingTxtReport;
+                    if (blocking.BypassNetworks is not null)
+                        ownership |= ManagedDnsSettings.BlockingBypass;
+                    if (blocking.ResponseType.HasValue)
+                        ownership |= ManagedDnsSettings.BlockingResponseType;
+                    if (blocking.AnswerTtl.HasValue)
+                        ownership |= ManagedDnsSettings.BlockingAnswerTtl;
+                    if (blocking.CustomAddresses is not null)
+                        ownership |= ManagedDnsSettings.BlockingCustomAddresses;
+
+                    bool blockingChanged = (blocking.Enabled.HasValue && blocking.Enabled != _enableBlocking) ||
+                        (blocking.AllowTxtReport.HasValue && blocking.AllowTxtReport != _allowTxtBlockingReport) ||
+                        (blocking.BypassNetworks is not null && !HaveSameNetworks(blocking.BypassNetworks, _blockingBypassList)) ||
+                        (blocking.ResponseType.HasValue && blocking.ResponseType != _blockingType) ||
+                        (blocking.AnswerTtl.HasValue && blocking.AnswerTtl != _blockingAnswerTtl) ||
+                        (blocking.CustomAddresses is not null && !GetBlockingAddresses().SequenceEqual(blocking.CustomAddresses));
                     bool cacheChanged = (cache.SaveToDisk.HasValue && cache.SaveToDisk != _saveCacheToDisk) ||
                         (cache.ServeStale.HasValue && cache.ServeStale != _serveStale) ||
                         (cache.StaleTtl.HasValue && cache.StaleTtl != _cacheZoneManager.ServeStaleTtl) ||
@@ -8038,7 +8120,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8052,7 +8134,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking));
                         _pendingSave = false;
                     }
                     catch
@@ -8069,6 +8151,7 @@ namespace DnsServerCore.Dns
                     SetClientSubnetSettings(subnet);
                     SetDnsLoggingSettings(dnsLogging);
                     SetCachePolicy(cache);
+                    SetBlockingPolicy(blocking, cancelPause: false);
                     if (recursion.NetworkAcl is not null)
                         RecursionNetworkACL = recursion.NetworkAcl;
                     if (recursion.Mode.HasValue)
@@ -8982,9 +9065,11 @@ namespace DnsServerCore.Dns
             }
         }
 
+        internal bool ConfiguredEnableBlocking => _enableBlocking;
+
         public bool EnableBlocking
         {
-            get { return _enableBlocking; }
+            get { return _enableBlocking && !_blockListZoneManager.IsBlockingTemporarilyDisabled; }
             set
             {
                 _enableBlocking = value;

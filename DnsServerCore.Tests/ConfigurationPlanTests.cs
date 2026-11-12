@@ -466,6 +466,60 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task BlockingPolicyAppliesAndExportsConfiguredStateDuringTemporaryPause()
+        {
+            await using var upstream = new LoopbackDnsServer();
+            upstream.AddPrimaryZone("fixture.net", "blocked.fixture.net", IPAddress.Parse("192.0.2.99"));
+            await upstream.StartAsync();
+
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?recursion=AllowOnlyForPrivateNetworks&dnssecValidation=false&forwarders=" + Uri.EscapeDataString(upstream.EndPoint.ToString()), server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("blocked/add?domain=blocked.fixture.net", server.AdminToken));
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"blocking":{"enabled":true,"allowTxtReport":false,"bypassNetworks":["192.0.2.0/24"],
+                    "responseType":"CustomAddress","answerTtl":90,"customAddresses":["2001:db8::10","192.0.2.10"]}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(6, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            DnsResourceRecord answer = Assert.Single((await server.QueryAsync("blocked.fixture.net", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.10"), Assert.IsType<DnsARecordData>(answer.RDATA).Address);
+            Assert.Equal(90u, answer.OriginalTtlValue);
+
+            JsonElement rejected = await server.CallAsync("settings/set?blockingAnswerTtl=30", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dns/blocking/answerTtl", rejected.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/blocking/", restored.GetProperty("errorMessage").GetString());
+
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/temporaryDisableBlocking?minutes=2", server.AdminToken));
+            settings = await server.GetSettingsAsync();
+            Assert.False(settings.GetProperty("enableBlocking").GetBoolean());
+            DnsResourceRecord forwarded = Assert.Single((await server.QueryAsync("blocked.fixture.net", DnsResourceRecordType.A)).Answer);
+            Assert.Equal(IPAddress.Parse("192.0.2.99"), Assert.IsType<DnsARecordData>(forwarded.RDATA).Address);
+            Assert.True(ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["blocking"]!["enabled"]!.GetValue<bool>());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=123", server.AdminToken));
+            await server.RestartAsync();
+            Assert.True((await server.GetSettingsAsync()).GetProperty("enableBlocking").GetBoolean());
+        }
+
+        [Fact]
         public async Task CachePrefetchPreviewIncludesImplicitChangesAndProtectsOwnedFields()
         {
             await using var server = await LoopbackWebService.StartAsync();

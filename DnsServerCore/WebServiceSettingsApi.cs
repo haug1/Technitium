@@ -348,6 +348,7 @@ namespace DnsServerCore
 
                 //blocking
                 jsonWriter.WriteBoolean("enableBlocking", _dnsWebService._dnsServer.EnableBlocking);
+                jsonWriter.WriteBoolean("configuredEnableBlocking", _dnsWebService._dnsServer.ConfiguredEnableBlocking);
                 jsonWriter.WriteBoolean("allowTxtBlockingReport", _dnsWebService._dnsServer.AllowTxtBlockingReport);
 
                 jsonWriter.WritePropertyName("blockingBypassList");
@@ -976,6 +977,26 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("cachePrefetchTrigger", int.Parse, out int cachePrefetchTrigger) ? cachePrefetchTrigger : null);
                 DnsServer.CachePolicy cachePolicy = _dnsWebService._dnsServer.CheckManifestCachePolicy(
                     _dnsWebService._dnsServer.NormalizeCachePrefetch(requestedCache));
+
+                IPAddress[] blockingAddresses = null;
+                if (request.TryQueryOrFormArray("customBlockingAddresses", out string[] customBlockingAddresses))
+                {
+                    var addresses = new List<IPAddress>();
+                    foreach (string address in customBlockingAddresses)
+                    {
+                        if (IPAddress.TryParse(address, out IPAddress parsed))
+                            addresses.Add(parsed);
+                    }
+                    blockingAddresses = DnsServer.NormalizeBlockingAddresses(addresses);
+                }
+
+                DnsServer.BlockingPolicy blockingPolicy = _dnsWebService._dnsServer.CheckManifestBlockingPolicy(new DnsServer.BlockingPolicy(
+                    request.TryGetQueryOrForm("enableBlocking", bool.Parse, out bool enableBlocking) ? enableBlocking : null,
+                    request.TryGetQueryOrForm("allowTxtBlockingReport", bool.Parse, out bool allowTxtBlockingReport) ? allowTxtBlockingReport : null,
+                    request.TryQueryOrFormArray("blockingBypassList", NetworkAddress.Parse, out NetworkAddress[] blockingBypassList) ? blockingBypassList : null,
+                    request.TryGetQueryOrFormEnum("blockingType", out DnsServerBlockingType blockingType) ? blockingType : null,
+                    request.TryGetQueryOrForm("blockingAnswerTtl", ZoneFile.ParseTtl, out uint blockingAnswerTtl) ? blockingAnswerTtl : null,
+                    blockingAddresses));
 
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
@@ -1761,76 +1782,19 @@ namespace DnsServerCore
 
                         #region blocking
 
-                        if (request.TryGetQueryOrForm("enableBlocking", bool.Parse, out bool enableBlocking))
-                        {
-                            _dnsWebService._dnsServer.EnableBlocking = enableBlocking;
-
-                            clusterParameters.Add("enableBlocking", enableBlocking.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("allowTxtBlockingReport", bool.Parse, out bool allowTxtBlockingReport))
-                        {
-                            _dnsWebService._dnsServer.AllowTxtBlockingReport = allowTxtBlockingReport;
-
-                            clusterParameters.Add("allowTxtBlockingReport", allowTxtBlockingReport.ToString());
-                        }
-
-                        if (request.TryQueryOrFormArray("blockingBypassList", NetworkAddress.Parse, out NetworkAddress[] blockingBypassList))
-                        {
-                            _dnsWebService._dnsServer.BlockingBypassList = blockingBypassList;
-
-                            clusterParameters.Add("blockingBypassList", blockingBypassList.Join());
-                        }
-
-                        if (request.TryGetQueryOrFormEnum("blockingType", out DnsServerBlockingType blockingType))
-                        {
-                            _dnsWebService._dnsServer.BlockingType = blockingType;
-
-                            clusterParameters.Add("blockingType", blockingType.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("blockingAnswerTtl", ZoneFile.ParseTtl, out uint blockingAnswerTtl))
-                        {
-                            _dnsWebService._dnsServer.BlockingAnswerTtl = blockingAnswerTtl;
-
-                            clusterParameters.Add("blockingAnswerTtl", blockingAnswerTtl.ToString());
-                        }
-
-                        if (request.TryQueryOrFormArray("customBlockingAddresses", out string[] customBlockingAddresses))
-                        {
-                            if (customBlockingAddresses.Length == 0)
-                            {
-                                _dnsWebService._dnsServer.CustomBlockingARecords = null;
-                                _dnsWebService._dnsServer.CustomBlockingAAAARecords = null;
-                            }
-                            else
-                            {
-                                List<DnsARecordData> dnsARecords = new List<DnsARecordData>();
-                                List<DnsAAAARecordData> dnsAAAARecords = new List<DnsAAAARecordData>();
-
-                                foreach (string strAddress in customBlockingAddresses)
-                                {
-                                    if (IPAddress.TryParse(strAddress, out IPAddress customAddress))
-                                    {
-                                        switch (customAddress.AddressFamily)
-                                        {
-                                            case AddressFamily.InterNetwork:
-                                                dnsARecords.Add(new DnsARecordData(customAddress));
-                                                break;
-
-                                            case AddressFamily.InterNetworkV6:
-                                                dnsAAAARecords.Add(new DnsAAAARecordData(customAddress));
-                                                break;
-                                        }
-                                    }
-                                }
-
-                                _dnsWebService._dnsServer.CustomBlockingARecords = dnsARecords;
-                                _dnsWebService._dnsServer.CustomBlockingAAAARecords = dnsAAAARecords;
-                            }
-
-                            clusterParameters.Add("customBlockingAddresses", customBlockingAddresses.Join());
-                        }
+                        _dnsWebService._dnsServer.SetBlockingPolicy(blockingPolicy, cancelPause: true);
+                        if (blockingPolicy.Enabled.HasValue)
+                            clusterParameters.Add("enableBlocking", blockingPolicy.Enabled.Value.ToString());
+                        if (blockingPolicy.AllowTxtReport.HasValue)
+                            clusterParameters.Add("allowTxtBlockingReport", blockingPolicy.AllowTxtReport.Value.ToString());
+                        if (blockingPolicy.BypassNetworks is not null)
+                            clusterParameters.Add("blockingBypassList", blockingPolicy.BypassNetworks.Join());
+                        if (blockingPolicy.ResponseType.HasValue)
+                            clusterParameters.Add("blockingType", blockingPolicy.ResponseType.Value.ToString());
+                        if (blockingPolicy.AnswerTtl.HasValue)
+                            clusterParameters.Add("blockingAnswerTtl", blockingPolicy.AnswerTtl.Value.ToString());
+                        if (blockingPolicy.CustomAddresses is not null)
+                            clusterParameters.Add("customBlockingAddresses", blockingPolicy.CustomAddresses.Join());
 
                         if (hasBlockListSources && !_dnsWebService._dnsServer.BlockListZoneManager.ManifestOwnsSources)
                         {
