@@ -50,7 +50,7 @@ Zone record owners use full DNS names with an optional trailing dot. Use `@` for
 | `{"schemaVersion":1,"dhcp":{"scopes":{"Lab":null}}}` | Preview reports deletion if the scope exists. Apply reconciles that explicit deletion. |
 | `{"schemaVersion":1,"web":{"certificate":{"password":{"environment":"MISSING_CERT_PASSWORD"}}}}` | The reference has valid JSON shape. Validation fails when the referenced value is missing and reports `web.certificate.password` without printing secret material. |
 
-Secret references select one environment variable or one file. Resolve relative reference paths from the manifest's directory. A referenced file must contain readable, nonempty UTF-8 text. Resolution preserves the text as written, including trailing newlines. Settings that are server paths, such as a TLS certificate path, use the owning manager's path rules. Preview, diagnostics, and exports report references or missing-input markers and keep resolved values out of their output.
+Secret references select one environment variable or one file. Resolve relative reference paths from the manifest's directory. A referenced file must contain readable, nonempty UTF-8 text. Resolution preserves the text as written, including trailing newlines. Settings that are server paths, such as a TLS certificate path, use the owning manager's path rules. Preview, diagnostics, and exports report references or missing-input markers and keep resolved values out of their output. Remote proxy preview resolves environment references on the server and requires Settings modify permission for password references. Local `config validate` resolves references in the CLI environment. File references require a local manifest. Proxy apply is pending.
 
 ## Previewing changes
 

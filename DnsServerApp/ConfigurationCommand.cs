@@ -30,11 +30,11 @@ namespace DnsServerApp
                         return 0;
 
                     case "plan" when args.Length == 4:
-                        await WritePlanAsync(LoadManifest(args[2]), ParseServerUrl(args[3]));
+                        await WritePlanAsync(ConfigurationManifest.Load(args[2]), ParseServerUrl(args[3]));
                         return 0;
 
                     case "apply" when args.Length == 5 || (args.Length == 7 && args[5] == "--wait"):
-                        return await ApplyAsync(LoadManifest(args[2]), ParseServerUrl(args[3]), args[4],
+                        return await ApplyAsync(ConfigurationManifest.Load(args[2]), ParseServerUrl(args[3]), args[4],
                             args.Length == 7 ? ParseServerUrl(args[6]) : null);
 
                     case "status" when args.Length == 4:

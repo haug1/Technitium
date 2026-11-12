@@ -153,6 +153,7 @@ namespace DnsServerCore.Configuration
         {
             RequireSettingsObject(currentSettings);
 
+            ValidateProxyAndForwarders(manifest, currentSettings);
             int? declaredWebTlsPort = manifest.Settings.TryGetProperty("web", out JsonElement web) &&
                 web.TryGetProperty("tlsPort", out JsonElement tlsPort)
                 ? tlsPort.ValueKind == JsonValueKind.Null ? _settings["/web/tlsPort"].Default.GetInt32() : decimal.ToInt32(tlsPort.GetDecimal())
@@ -174,6 +175,24 @@ namespace DnsServerCore.Configuration
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
         }
 
+        private static void ValidateProxyAndForwarders(ConfigurationManifest manifest, JsonElement snapshot)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns))
+                return;
+
+            IReadOnlyList<NameServerAddress> servers = GetForwardingPolicy(manifest).Servers;
+            NetProxyType proxyType = snapshot.TryGetProperty("proxy", out JsonElement currentProxy) && currentProxy.ValueKind == JsonValueKind.Object
+                ? Enum.Parse<NetProxyType>(currentProxy.GetProperty("type").GetString()) : NetProxyType.None;
+            if (dns.TryGetProperty("proxy", out JsonElement proxy) && proxy.TryGetProperty("type", out JsonElement type))
+            {
+                NetProxyType candidate = type.ValueKind == JsonValueKind.Null ? NetProxyType.None : Enum.Parse<NetProxyType>(type.GetString());
+                if (candidate != proxyType && servers is null && snapshot.TryGetProperty("configuredForwarders", out JsonElement currentServers))
+                    servers = ConfigurationManifest.ReadForwardingServers(currentServers);
+                proxyType = candidate;
+            }
+            DnsServer.ValidateForwardingServers(servers, proxyType);
+        }
+
         internal static string GetRevision(ConfigurationManifest manifest, JsonElement currentSettings, byte[] key)
         {
             var data = new ArrayBufferWriter<byte>();
@@ -188,8 +207,15 @@ namespace DnsServerCore.Configuration
                     GetCurrentSetting(currentSettings, path, setting).WriteTo(writer);
                 }
                 writer.WriteEndObject();
-                if (currentSettings.TryGetProperty("proxy", out JsonElement proxy) && proxy.ValueKind == JsonValueKind.Object)
-                    proxy.GetProperty("type").WriteTo(writer);
+                if (currentSettings.TryGetProperty("proxy", out JsonElement proxy))
+                {
+                    if (manifest.Settings.TryGetProperty("dns", out JsonElement dns) && dns.TryGetProperty("proxy", out _))
+                        proxy.WriteTo(writer);
+                    else if (proxy.ValueKind == JsonValueKind.Object)
+                        proxy.GetProperty("type").WriteTo(writer);
+                }
+                if (currentSettings.TryGetProperty("manifestProxyPassword", out JsonElement proxyPassword))
+                    proxyPassword.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
@@ -714,6 +740,18 @@ namespace DnsServerCore.Configuration
                 section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
             }
 
+            if (includePreviewOnly && currentSettings.TryGetProperty("proxy", out JsonElement currentProxy) && currentProxy.ValueKind == JsonValueKind.Object)
+            {
+                var proxy = new JsonObject();
+                foreach (string field in new[] { "type", "address", "port", "username", "bypass" })
+                {
+                    if (currentProxy.TryGetProperty(field, out JsonElement value))
+                        proxy.Add(field, JsonNode.Parse(value.GetRawText()));
+                }
+                if (proxy.Count > 0)
+                    manifest["dns"]!.AsObject().Add("proxy", proxy);
+            }
+
             return manifest;
         }
 
@@ -895,6 +933,12 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path == "/dns/proxy")
+            {
+                ConfigurationProxy.Compare(desired, currentSettings, changes);
+                return;
+            }
+
             if (path == "/dns/cache/prefetch")
             {
                 DnsServer.CachePolicy prefetch = DnsServer.NormalizeCachePrefetch(ReadCachePrefetch(desired),
@@ -985,9 +1029,6 @@ namespace DnsServerCore.Configuration
                     else if (path == ForwardingServersPath)
                     {
                         NameServerAddress[] servers = ConfigurationManifest.ReadForwardingServers(desired);
-                        NetProxyType proxyType = currentSettings.TryGetProperty("proxy", out JsonElement proxy) && proxy.ValueKind == JsonValueKind.Object
-                            ? Enum.Parse<NetProxyType>(proxy.GetProperty("type").GetString()) : NetProxyType.None;
-                        DnsServer.ValidateForwardingServers(servers, proxyType);
                         candidate = SerializeForwardingServers(servers);
                         current = SerializeForwardingServers(ConfigurationManifest.ReadForwardingServers(current));
                     }

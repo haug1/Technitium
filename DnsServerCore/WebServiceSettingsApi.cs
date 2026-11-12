@@ -776,6 +776,13 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    if (ConfigurationProxy.TryGetPasswordReference(manifest, out JsonElement password))
+                    {
+                        if (password.ValueKind != JsonValueKind.Null &&
+                            !_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
+                            throw new DnsWebServiceException("Access was denied.");
+                        ConfigurationProxy.WritePasswordSnapshot(writer, manifest, password, _dnsWebService._dnsServer.Proxy, _configurationRevisionKey);
+                    }
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
                         WriteManifestZoneSnapshot(writer, zones, sessionUser);
                     if (manifest is not null && manifest.Settings.TryGetProperty("dhcp", out JsonElement dhcp) && dhcp.TryGetProperty("scopes", out JsonElement scopes))

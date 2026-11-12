@@ -466,6 +466,48 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ProxyPreviewResolvesPasswordWithoutReturningIt()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string variable = "TECHNITIUM_TEST_PROXY_PREVIEW_PASSWORD";
+            const string firstSecret = "fixture-current-proxy-password";
+            const string nextSecret = "fixture-next-proxy-password";
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?proxyType=Http&proxyAddress=127.0.0.1&proxyPort=8080&proxyUsername=fixture&proxyPassword=" + firstSecret, server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"proxy":{"password":{"environment":"TECHNITIUM_TEST_PROXY_PREVIEW_PASSWORD"}}}}
+                """;
+            string? original = Environment.GetEnvironmentVariable(variable);
+            try
+            {
+                Environment.SetEnvironmentVariable(variable, firstSecret);
+                JsonElement matched = await PreviewAsync(server, manifest);
+                Assert.Empty(matched.GetProperty("changes").EnumerateArray());
+
+                Environment.SetEnvironmentVariable(variable, nextSecret);
+                JsonElement changed = await PreviewAsync(server, manifest);
+                JsonElement change = Assert.Single(changed.GetProperty("changes").EnumerateArray());
+                Assert.Equal("/dns/proxy/password", change.GetProperty("path").GetString());
+                Assert.NotEqual(matched.GetProperty("revision").GetString(), changed.GetProperty("revision").GetString());
+                Assert.DoesNotContain(firstSecret, changed.GetRawText());
+                Assert.DoesNotContain(nextSecret, changed.GetRawText());
+                Assert.Equal(firstSecret, (await server.GetSettingsAsync()).GetProperty("proxy").GetProperty("password").GetString());
+
+                Environment.SetEnvironmentVariable(variable, null);
+                using var content = new StringContent(manifest, Encoding.UTF8, "application/json");
+                JsonElement missing = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", missing.GetProperty("status").GetString());
+                Assert.Contains("/dns/proxy/password", missing.GetProperty("errorMessage").GetString());
+                Assert.DoesNotContain(variable, missing.GetRawText());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, original);
+            }
+        }
+
+        [Fact]
         public async Task ConfigurationExportEndpointReportsMissingInputsWithoutReturningSecrets()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -493,6 +535,13 @@ namespace DnsServerCore.Tests
             JsonElement manifest = response.GetProperty("manifest");
             Assert.Equal(ConfigurationManifest.CurrentSchemaVersion, manifest.GetProperty("schemaVersion").GetInt32());
             Assert.Equal(ConfigurationPlan.Export(legacy, includePreviewOnly: false).ToJsonString(), manifest.GetRawText());
+
+            JsonElement inspection = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
+            LoopbackWebService.AssertOk(inspection);
+            JsonElement proxy = inspection.GetProperty("response").GetProperty("manifest").GetProperty("dns").GetProperty("proxy");
+            Assert.Equal("Http", proxy.GetProperty("type").GetString());
+            Assert.False(proxy.TryGetProperty("password", out _));
+            Assert.DoesNotContain(proxyPassword, inspection.GetRawText());
 
             JsonElement repeat = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(repeat);
