@@ -1,6 +1,7 @@
 using DnsServerCore.Configuration;
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Xunit;
 
@@ -47,6 +48,45 @@ namespace DnsServerCore.Tests
 
             Assert.Contains("/web/certificate/password", error.Message);
             Assert.DoesNotContain("private-value", error.Message);
+        }
+
+        [Theory]
+        [InlineData("""{"proof":{"type":"NSEC","iterations":1}}""", "/proof/iterations")]
+        [InlineData("""{"enabled":false,"dnsKeyTtl":3600}""", "Enable DNSSEC")]
+        [InlineData("""{"keys":{"next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"unknown"}}}""", "/keys/next/algorithm")]
+        [InlineData("""{"keys":{"next":{"role":"ZoneSigningKey","algorithm":"RSA","hashAlgorithm":"SHA256","keySize":512}}}""", "/keys/next/keySize")]
+        public void RejectsInvalidDnssecSettingsWithoutAServer(string signing, string diagnostic)
+        {
+            string path = WriteManifest($$"""{"schemaVersion":1,"zones":{"example.test":{"dnssec":{{signing}} } } }""");
+
+            var error = Assert.Throws<InvalidDataException>(() => ConfigurationManifest.Load(path));
+
+            Assert.Contains("/zones/example.test/dnssec", error.Message);
+            Assert.Contains(diagnostic, error.Message);
+        }
+
+        [Fact]
+        public void ValidatesDnssecPrivateKeyFilesWithoutPrintingTheirContents()
+        {
+            const string keyFile = "local-signing-key.pem";
+            string path = WriteManifest("""
+                {"schemaVersion":1,"zones":{"example.test":{"dnssec":{"keys":{
+                  "next":{"role":"ZoneSigningKey","algorithm":"ECDSA","curve":"P256","privateKey":{"file":"local-signing-key.pem"}}
+                }}}}}
+                """);
+            var manifest = ConfigurationManifest.Load(path);
+            string keyPath = Path.Combine(_directory.FullName, keyFile);
+            const string invalidKey = "malformed-operator-secret";
+            File.WriteAllText(keyPath, invalidKey);
+
+            var error = Assert.Throws<InvalidDataException>(manifest.ValidateReferences);
+            Assert.Contains("/zones/example.test/dnssec/keys/next/privateKey", error.Message);
+            Assert.DoesNotContain(invalidKey, error.Message);
+            Assert.DoesNotContain(keyFile, error.Message);
+
+            using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+            manifest.ValidateReferences();
         }
 
         [Fact]

@@ -44,6 +44,43 @@ namespace DnsServerCore.Configuration
 
         internal sealed record RolloverChange(ushort Tag, ushort Before, ushort After);
 
+        internal static void ValidateDeclarations(JsonElement root)
+        {
+            if (!root.TryGetProperty("zones", out JsonElement zones))
+                return;
+
+            foreach (JsonProperty zone in zones.EnumerateObject())
+            {
+                if (zone.Value.ValueKind != JsonValueKind.Object || !zone.Value.TryGetProperty("dnssec", out JsonElement dnssec))
+                    continue;
+
+                string path = ConfigurationPlan.AppendPath("/zones", zone.Name) + "/dnssec";
+                if (Read(zone.Value, "type") is JsonElement type && !type.ValueEquals("Primary"))
+                    throw new InvalidDataException($"{path}: DNSSEC signing requires a configurable primary zone.");
+
+                if (dnssec.TryGetProperty("enabled", out _) && Read(dnssec, "enabled")?.GetBoolean() != true &&
+                    dnssec.EnumerateObject().Any(field => field.Name != "enabled"))
+                    throw new InvalidDataException($"{path}: Enable DNSSEC before declaring signing settings.");
+
+                JsonElement proof = Read(dnssec, "proof") ?? default;
+                if (proof.ValueKind == JsonValueKind.Object && proof.TryGetProperty("type", out _) &&
+                    Read(proof, "type")?.ValueEquals("NSEC3") != true)
+                {
+                    if ((Read(proof, "iterations")?.GetDecimal() ?? 0) != 0)
+                        throw new InvalidDataException($"{path}/proof/iterations: Iterations require NSEC3.");
+                    if ((Read(proof, "saltLength")?.GetDecimal() ?? 0) != 0)
+                        throw new InvalidDataException($"{path}/proof/saltLength: Salt length requires NSEC3.");
+                }
+
+                ReadKeys(null, dnssec, path);
+            }
+        }
+
+        internal static void ValidateKeyReferences(ConfigurationManifest manifest, JsonElement dnssec, string path)
+        {
+            ReadKeys(manifest, dnssec, path);
+        }
+
         internal static Signing Prepare(ConfigurationManifest manifest, JsonElement declaration, AuthZoneType type, AuthZoneInfo current, string path)
         {
             if (!declaration.TryGetProperty("dnssec", out JsonElement dnssec))
@@ -79,12 +116,7 @@ namespace DnsServerCore.Configuration
             if (saltLength > 32 || (!useNsec3 && saltLength != 0))
                 throw new InvalidDataException($"{path}/proof/saltLength: NSEC3 salt length must be between 0 and 32.");
 
-            JsonElement keys = Read(dnssec, "keys") ?? default;
-            Key[] parsed = keys.ValueKind == JsonValueKind.Object
-                ? keys.EnumerateObject().Select(key => ReadKey(manifest, key.Value, ConfigurationPlan.AppendPath(path + "/keys", key.Name))).ToArray()
-                : [];
-            if (parsed.Where(key => key.Imported is not null).GroupBy(key => key.Imported.KeyTag).Any(group => group.Count() > 1))
-                throw new InvalidDataException($"{path}/keys: Imported DNSSEC key tags must be distinct.");
+            Key[] parsed = ReadKeys(manifest, dnssec, path);
 
             if (signed)
             {
@@ -205,6 +237,17 @@ namespace DnsServerCore.Configuration
             return result;
         }
 
+        private static Key[] ReadKeys(ConfigurationManifest manifest, JsonElement dnssec, string path)
+        {
+            JsonElement keys = Read(dnssec, "keys") ?? default;
+            Key[] parsed = keys.ValueKind == JsonValueKind.Object
+                ? keys.EnumerateObject().Select(key => ReadKey(manifest, key.Value, ConfigurationPlan.AppendPath(path + "/keys", key.Name))).ToArray()
+                : [];
+            if (parsed.Where(key => key.Imported is not null).GroupBy(key => key.Imported.KeyTag).Any(group => group.Count() > 1))
+                throw new InvalidDataException($"{path}/keys: Imported DNSSEC key tags must be distinct.");
+            return parsed;
+        }
+
         private static Key ReadKey(ConfigurationManifest manifest, JsonElement value, string path)
         {
             if (value.ValueKind != JsonValueKind.Object || Read(value, "role") is not JsonElement roleValue)
@@ -236,7 +279,7 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{path}/rolloverDays: Rollover days apply only to zone signing keys.");
 
             DnssecPrivateKey imported = null;
-            if (reference.HasValue)
+            if (manifest is not null && reference.HasValue)
             {
                 string pem = manifest.ResolveReference(reference.Value, path + "/privateKey");
                 try

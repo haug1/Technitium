@@ -99,6 +99,7 @@ namespace DnsServerCore.Configuration
                 ConfigurationDomainLists.Read(blocked, "/blockZones");
             CheckDnsNameKeys(root, "zones", "", allowRoot: true);
             ValidateZoneRecords(root);
+            ConfigurationZoneDnssec.ValidateDeclarations(root);
             ConfigurationZonePolicies.Validate(root);
             ConfigurationDhcp.Validate(root);
             if (root.TryGetProperty("dns", out JsonElement dns))
@@ -460,6 +461,12 @@ namespace DnsServerCore.Configuration
 
             if (element.ValueKind == JsonValueKind.Object)
             {
+                if (path.Split('/') is ["", "zones", _, "dnssec"])
+                {
+                    ConfigurationZoneDnssec.ValidateKeyReferences(this, element, path);
+                    return;
+                }
+
                 if (IsReferencePath(path) && (element.TryGetProperty("environment", out _) || element.TryGetProperty("file", out _)))
                 {
                     if (path.Split('/') is ["", "apps", "packages", _, "source"])
