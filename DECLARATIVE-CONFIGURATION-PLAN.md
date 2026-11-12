@@ -4,42 +4,9 @@ Use a versioned `technitium.json` manifest to configure a fresh server, preview 
 
 Technitium loads settings across several managers at startup. The DNS settings API saves changes to multiple files and can restart listeners. Cluster configuration transfer uses the backup and restore code. Use the same domain rules and lifecycle operations for file-based configuration, the UI, and the API. [Startup](DnsServerCore/DnsWebService.cs#L2904) · [Settings API](DnsServerCore/WebServiceSettingsApi.cs#L480) · [Cluster transfer](DnsServerCore/Cluster/ClusterManager.cs#L866)
 
-## 1. Inventory every setting and define the schema
+Use the [settings inventory](DECLARATIVE-SETTINGS-INVENTORY.md) as the release coverage checklist. The [schema](configuration/technitium.schema.json), [example manifests](configuration/examples), and [ownership rules](configuration/README.md) define the manifest contract. Update those artifacts together as implementation exposes details that need to be clarified.
 
-Build the field inventory from the persistence readers, settings APIs, and environment variable handling. For each setting, record its type, default, validation, secret handling, cluster scope, and restart requirements. Use the inventory as the release coverage checklist. [Settings inventory](DECLARATIVE-SETTINGS-INVENTORY.md) · [Draft schema](configuration/technitium.schema.json) · [Example manifests](configuration/examples) · [API documentation](APIDOCS.md) · [Environment variables](EnvironmentVariables.md)
-
-| Area | Manifest coverage |
-| --- | --- |
-| DNS and web service | Listeners, TLS, recursion, forwarders, cache, DNSSEC validation, rate limits, and logging settings |
-| Zones and blocking | Authoritative zone definitions, zone options and permissions, operator-managed records, allow and block entries, and blocklist sources |
-| DHCP | Scopes, options, enabled state, and reservations |
-| Authentication | Users, groups, permissions, and SSO settings |
-| DNS apps | App identity, package version and source, and app-owned configuration in its native format |
-| Clustering | Cluster-wide settings, node-local settings, and explicit bootstrap or join configuration |
-
-Keep leases, sessions, issued tokens, caches, logs, statistics, downloaded blocklist contents, and replicated zone contents in their existing runtime stores. Use references for secrets and key material. A reproducible deployment consists of the manifest and its referenced inputs.
-
-### Acceptance criteria
-
-- The inventory reconciles current persistence readers and writers, settings APIs, and environment variables. Every operator-settable field maps to a proposed manifest path, with aliases and legacy inputs traced to the same setting.
-- Each entry records its type, units where applicable, effective default, validation and dependencies, secret handling, cluster scope, and restart requirements. Runtime state and generated values are identified so export can handle them correctly.
-- A draft schema and example manifests cover every area in the table. Examples cover a minimal manifest, named resources, and secret references. Each schema field traces back to the inventory.
-
-## 2. Define ownership and update semantics
-
-- Require `schemaVersion`. Reject unsupported versions, unknown fields, and duplicate keys with diagnostics that identify the manifest path and offending field.
-- Omitted settings remain unmanaged. Explicit values take ownership. Define how to reset a setting to its default and how to update collections by stable identity, such as zone name, scope name, or app ID. Require explicit deletion or explicit ownership of the whole collection before removing entries.
-- Preserve current environment variable behavior for unmanaged settings. Use manifest values for managed settings and surface conflicts with legacy environment variables during validation.
-- Reject UI and API writes that would change managed fields while manifest management is active. Accept changes to unmanaged fields and show which values the manifest owns. Apply the same ownership checks to backup restores and cluster transfers.
-
-### Acceptance criteria
-
-- A documented decision table gives an expected outcome for omission, an explicit value, reset, and an empty collection. It defines stable keys, duplicate identities, deletion, and ownership of collection membership.
-- Examples specify precedence for existing settings, manifest values, and legacy environment variables. They show the expected diagnostic for conflicts and the outcome when a field becomes unmanaged.
-- The policy specifies which writes succeed or fail through the UI, API, restore, and cluster transfer. It covers a request containing both managed and unmanaged changes, and defines how the caller learns which fields are managed.
-- Valid and invalid examples specify the expected results for schema versions, unknown fields, duplicate keys, and missing secret references.
-
-## 3. Build the parser, planner, and apply path
+## 1. Build the parser, planner, and apply path
 
 1. Add typed configuration models and a JSON Schema. Normalize values and reuse existing parsers and validators for DNS names, addresses, networks, records, and DHCP options. Extract shared validation from HTTP handlers where necessary.
 2. Implement `config validate`, `config plan`, `config apply`, and `config export` in the console host. Share startup configuration logic between the console app and Windows service. Produce stable, reviewable exports with secret references or explicit markers for values that need to be supplied. [Console entry point](DnsServerApp/Program.cs#L30) · [Windows service](DnsServerWindowsService/DnsServiceWorker.cs#L41)
@@ -53,7 +20,7 @@ Keep leases, sessions, issued tokens, caches, logs, statistics, downloaded block
 - **Planner.** Tests verify that preview reports additions, updates, removals, and required restarts. Applying a plan after its input settings change fails before mutation. Applying the same manifest twice produces an empty second plan and triggers no restart.
 - **Apply and recovery.** Tests exercise interrupted persistence and a failed listener restart, and verify that the last working settings and service are recoverable. Document and test retry behavior for each supported external operation.
 
-## 4. Deliver in slices and verify full coverage
+## 2. Deliver in slices and verify full coverage
 
 Extend the existing regression suite alongside each delivery slice. Cover observable outcomes for validation, migration, idempotence, and recovery. [Local test instructions](build.md#regression-tests)
 
