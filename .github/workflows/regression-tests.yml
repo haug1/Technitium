@@ -37,6 +37,11 @@ jobs:
           repository: TechnitiumSoftware/TechnitiumLibrary
           ref: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
           path: TechnitiumLibrary
+      - name: Check out the cluster compatibility baseline
+        uses: actions/checkout@v5
+        with:
+          ref: 281fcffd2defec08eeb6def870deb08726c4dc8e
+          path: DnsServerBaseline
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
@@ -62,6 +67,14 @@ jobs:
         run: |
           dotnet publish DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-build"
           python3 DnsServerCore.Tests/mixed_cluster.py "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" --propagation
+      - name: Verify older nodes block unsupported declarative changes
+        working-directory: DnsServer
+        timeout-minutes: 4
+        run: |
+          dotnet publish ../DnsServerBaseline/DnsServerApp/DnsServerApp.csproj -c Release -o "$RUNNER_TEMP/technitium-cluster-baseline"
+          python3 DnsServerCore.Tests/mixed_cluster.py \
+            "$RUNNER_TEMP/technitium-cluster-build/DnsServerApp.dll" \
+            "$RUNNER_TEMP/technitium-cluster-baseline/DnsServerApp.dll"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

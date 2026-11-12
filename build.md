@@ -51,7 +51,7 @@ To verify propagation, use the same build for both nodes. This mode configures t
 python3 DnsServerCore.Tests/mixed_cluster.py /path/to/current/DnsServerApp.dll --propagation
 ```
 
-The GitHub Actions regression workflow publishes the current console host and runs the same-build propagation fixture.
+The GitHub Actions regression workflow runs both modes. It publishes the current console host and the pinned compatibility baseline `281fcffd`.
 
 ## For Windows
 
