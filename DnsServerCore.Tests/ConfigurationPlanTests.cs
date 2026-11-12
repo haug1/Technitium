@@ -2483,7 +2483,7 @@ namespace DnsServerCore.Tests
             const string update = """{"schemaVersion":1,"dhcp":{"scopes":{"Lab":{"endingAddress":"192.0.2.40"}}}}""";
             revision = (await PreviewAsync(server, update)).GetProperty("revision").GetString()!;
             LoopbackWebService.AssertOk(await server.CallAsync(
-                "dhcp/scopes/set?name=Lab&startingAddress=192.0.2.10&endingAddress=192.0.2.35&subnetMask=255.255.255.0", server.AdminToken));
+                "dhcp/scopes/set?name=Lab&leaseTimeHours=2", server.AdminToken));
             Assert.Equal("error", (await ApplyAsync(server, update, revision)).GetProperty("status").GetString());
 
             revision = (await PreviewAsync(server, update)).GetProperty("revision").GetString()!;
@@ -2540,6 +2540,45 @@ namespace DnsServerCore.Tests
                 Assert.Equal("error", result.GetProperty("status").GetString());
                 Assert.Contains(path, result.GetProperty("errorMessage").GetString());
             }
+        }
+
+        [Fact]
+        public async Task DhcpManagedOptionsRejectMixedEditsAndAllowEqualValues()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Default":{
+                    "domainName":"example.test","leaseTime":{"days":4},"dns":{"servers":[],"useThisServer":false},
+                    "vendorInfo":{"a/b":"AA:BB"}
+                }}}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+
+            JsonElement rejected = await server.CallAsync(
+                "dhcp/scopes/set?name=Default&endingAddress=192.168.1.240&leaseTimeDays=5", server.AdminToken);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Default/leaseTime/days", rejected.GetProperty("errorMessage").GetString());
+            JsonElement current = await server.CallAsync("dhcp/scopes/get?name=Default", server.AdminToken);
+            LoopbackWebService.AssertOk(current);
+            Assert.Equal("192.168.1.254", current.GetProperty("response").GetProperty("endingAddress").GetString());
+
+            JsonElement vendorConflict = await server.CallAsync(
+                "dhcp/scopes/set?name=Default&vendorInfo=a%2Fb%7CAA%3ACC", server.AdminToken);
+            Assert.Equal("error", vendorConflict.GetProperty("status").GetString());
+            Assert.Contains("/dhcp/scopes/Default/vendorInfo/a~1b", vendorConflict.GetProperty("errorMessage").GetString());
+
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Default&leaseTimeDays=4&leaseTimeHours=2&domainName=EXAMPLE.TEST&vendorInfo=a%2Fb%7CAA%3ABB%7Cother%7CCC", server.AdminToken));
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            current = await server.CallAsync("dhcp/scopes/get?name=Default", server.AdminToken);
+            Assert.Equal(2, current.GetProperty("response").GetProperty("leaseTimeHours").GetInt32());
+
+            const string release = """{"schemaVersion":1}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            LoopbackWebService.AssertOk(await server.CallAsync("dhcp/scopes/set?name=Default&leaseTimeDays=5", server.AdminToken));
         }
 
         [Fact]

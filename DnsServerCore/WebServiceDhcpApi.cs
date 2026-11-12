@@ -391,7 +391,6 @@ namespace DnsServerCore
                 string strEndingAddress = request.QueryOrForm("endingAddress");
                 string strSubnetMask = request.QueryOrForm("subnetMask");
 
-                bool scopeExists;
                 Scope scope = _dnsWebService._dhcpServer.GetScope(scopeName);
                 bool rename = request.TryGetQueryOrForm("newName", out string newName) && !newName.Equals(scopeName, StringComparison.Ordinal);
                 if (scope is null || rename)
@@ -399,7 +398,8 @@ namespace DnsServerCore
                 if (rename)
                     _dnsWebService._dhcpServer.CheckManifestScopeMembership(newName);
 
-                if (scope is null)
+                bool scopeExists = scope is not null;
+                if (!scopeExists)
                 {
                     //scope does not exists; create new scope
                     if (string.IsNullOrEmpty(strStartingAddress) || !IPAddress.TryParse(strStartingAddress, out IPAddress startingAddress))
@@ -411,14 +411,11 @@ namespace DnsServerCore
                     if (string.IsNullOrEmpty(strSubnetMask) || !IPAddress.TryParse(strSubnetMask, out IPAddress subnetMask))
                         throw new DnsWebServiceException("Parameter 'subnetMask' is missing or invalid.");
 
-                    scopeExists = false;
                     scope = new Scope(scopeName, true, startingAddress, endingAddress, subnetMask, _dnsWebService._log, _dnsWebService._dhcpServer);
                     scope.IgnoreClientIdentifierOption = true;
                 }
                 else
                 {
-                    scopeExists = true;
-
                     IPAddress startingAddress;
                     IPAddress endingAddress;
                     IPAddress subnetMask;
@@ -450,9 +447,39 @@ namespace DnsServerCore
                             throw new DhcpServerException("Scope with overlapping range already exists: " + existingScope.StartingAddress.ToString() + "-" + existingScope.EndingAddress.ToString());
                     }
 
+                    _dnsWebService._dhcpServer.CheckManifestScopeOptions(scope, candidate =>
+                    {
+                        candidate.ChangeNetwork(startingAddress, endingAddress, subnetMask);
+                        SetDhcpScopeOptions(request, candidate, applyReservations: false);
+                    });
                     scope.ChangeNetwork(startingAddress, endingAddress, subnetMask);
                 }
 
+                SetDhcpScopeOptions(request, scope, applyReservations: true);
+
+                if (scopeExists)
+                {
+                    _dnsWebService._dhcpServer.SaveScope(scopeName);
+
+                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was updated successfully: " + scopeName);
+                }
+                else
+                {
+                    await _dnsWebService._dhcpServer.AddScopeAsync(scope);
+
+                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was added successfully: " + scopeName);
+                }
+
+                if (rename)
+                {
+                    _dnsWebService._dhcpServer.RenameScope(scopeName, newName);
+
+                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was renamed successfully: '" + scopeName + "' to '" + newName + "'");
+                }
+            }
+
+            private static void SetDhcpScopeOptions(HttpRequest request, Scope scope, bool applyReservations)
+            {
                 if (request.TryGetQueryOrForm("leaseTimeDays", ushort.Parse, out ushort leaseTimeDays))
                     scope.LeaseTimeDays = leaseTimeDays;
 
@@ -648,7 +675,7 @@ namespace DnsServerCore
                     }
                 }
 
-                string strReservedLeases = request.QueryOrForm("reservedLeases");
+                string strReservedLeases = applyReservations ? request.QueryOrForm("reservedLeases") : null;
                 if (strReservedLeases is not null)
                 {
                     if (strReservedLeases.Length == 0)
@@ -675,26 +702,6 @@ namespace DnsServerCore
 
                 if (request.TryGetQueryOrForm("ignoreClientIdentifierOption", bool.Parse, out bool ignoreClientIdentifierOption))
                     scope.IgnoreClientIdentifierOption = ignoreClientIdentifierOption;
-
-                if (scopeExists)
-                {
-                    _dnsWebService._dhcpServer.SaveScope(scopeName);
-
-                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was updated successfully: " + scopeName);
-                }
-                else
-                {
-                    await _dnsWebService._dhcpServer.AddScopeAsync(scope);
-
-                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was added successfully: " + scopeName);
-                }
-
-                if (rename)
-                {
-                    _dnsWebService._dhcpServer.RenameScope(scopeName, newName);
-
-                    _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] DHCP scope was renamed successfully: '" + scopeName + "' to '" + newName + "'");
-                }
             }
 
             public void AddReservedLease(HttpContext context)

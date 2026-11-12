@@ -522,6 +522,54 @@ namespace DnsServerCore.Configuration
             return exported;
         }
 
+        internal static void AddScopeOptionPaths(JsonElement declaration, string scopePath, List<string> paths)
+        {
+            foreach (JsonProperty option in declaration.EnumerateObject())
+            {
+                string path = ConfigurationPlan.AppendPath(scopePath, option.Name);
+                if (option.Name is "enabled" or "startingAddress" or "endingAddress" or "subnetMask" or "exclusions")
+                    paths.Add(path);
+                else if (_defaultOptions[option.Name] is JsonObject && option.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (JsonProperty field in option.Value.EnumerateObject())
+                        paths.Add(ConfigurationPlan.AppendPath(path, field.Name));
+                }
+                else if (_defaultOptions.ContainsKey(option.Name))
+                    paths.Add(path);
+            }
+        }
+
+        internal static void CheckScopeOptionOwnership(Scope current, Scope candidate, string scopePath, IEnumerable<string> ownedPaths)
+        {
+            JsonObject before = WriteComparableOptions(current);
+            JsonObject after = WriteComparableOptions(candidate);
+            foreach (string path in ownedPaths)
+            {
+                string[] segments = path[(scopePath.Length + 1)..].Split('/');
+                JsonNode previous = ReadOption(before, segments);
+                JsonNode next = ReadOption(after, segments);
+                if (!JsonNode.DeepEquals(previous, next))
+                    throw new DhcpServerException($"{path}: Scope option is managed by the configuration manifest.");
+            }
+
+            static JsonNode ReadOption(JsonObject options, string[] segments)
+            {
+                JsonNode option = options[segments[0]];
+                return segments.Length == 1 ? option : option?[segments[1].Replace("~1", "/").Replace("~0", "~")];
+            }
+
+            static JsonObject WriteComparableOptions(Scope scope)
+            {
+                JsonObject options = WriteScopeOptions(scope);
+                options["startingAddress"] = scope.StartingAddress.ToString();
+                options["endingAddress"] = scope.EndingAddress.ToString();
+                options["subnetMask"] = scope.SubnetMask.ToString();
+                options["enabled"] = scope.Enabled;
+                options["exclusions"] = WriteExclusions(scope.Exclusions);
+                return options;
+            }
+        }
+
         private static JsonObject WriteScopeOptions(Scope scope)
         {
             var vendorInfo = new JsonObject();

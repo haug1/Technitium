@@ -1467,8 +1467,8 @@ namespace DnsServerCore.Dhcp
             {
                 string path = ConfigurationPlan.AppendPath(scopesPath, entry.Name);
                 paths.Add(path);
-                if (entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("enabled", out _))
-                    paths.Add(path + "/enabled");
+                if (entry.Value.ValueKind == JsonValueKind.Object)
+                    ConfigurationDhcp.AddScopeOptionPaths(entry.Value, path, paths);
             }
             paths.Sort(StringComparer.Ordinal);
             return paths.ToArray();
@@ -1496,6 +1496,18 @@ namespace DnsServerCore.Dhcp
             string path = ConfigurationPlan.AppendPath("/dhcp/scopes", name);
             if (_managedPaths.Contains("/dhcp/scopes", StringComparer.Ordinal) || _managedPaths.Contains(path, StringComparer.Ordinal))
                 throw new DhcpServerException($"{path}: Scope membership is managed by the configuration manifest.");
+        }
+
+        internal void CheckManifestScopeOptions(Scope scope, Action<Scope> prepare)
+        {
+            string scopePath = ConfigurationPlan.AppendPath("/dhcp/scopes", scope.Name);
+            string[] paths = _managedPaths.Where(path => path.StartsWith(scopePath + "/", StringComparison.Ordinal)).ToArray();
+            if (paths.Length == 0)
+                return;
+
+            using Scope candidate = scope.CloneForManifest();
+            prepare(candidate);
+            ConfigurationDhcp.CheckScopeOptionOwnership(scope, candidate, scopePath, paths);
         }
 
         internal void CheckManifestScopeEnabled(Scope scope, bool enabled)
