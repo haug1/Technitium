@@ -267,12 +267,14 @@ namespace DnsServerCore
                         {
                             IPv6Mode ipv6Mode = DnsServer.ReadLegacyIpv6Mode(reader);
                             bool pool = version >= 42 ? reader.ReadBoolean() : DnsServer.DefaultUdpSocketPoolEnabled;
+                            bool readExcludedPorts = _dnsServer.HasManagedResolverProtocol || (checkOutbound && _dnsServer.ManifestOwnsSocketPoolExcludedPorts);
+                            ushort[] ports = readExcludedPorts
+                                ? version >= 42 ? DnsServer.ReadSocketPoolExcludedPorts(reader) : [(ushort)web.TlsPort]
+                                : null;
                             if (checkOutbound)
-                                _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(ipv6Mode, pool));
+                                _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(ipv6Mode, pool, ports));
                             if (_dnsServer.HasManagedResolverProtocol)
                             {
-                                if (version >= 42)
-                                    DnsServer.ReadSocketPoolExcludedPorts(reader);
                                 _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null, reader.ReadUInt16(), reader.ReadBoolean()));
                             }
                         }
@@ -307,6 +309,8 @@ namespace DnsServerCore
                     {
                         if (_dnsServer.ManifestOwnsIpv6Mode)
                             throw new InvalidDataException("/dns/ipv6Mode: Cannot verify IPv6 mode in this combined backup format.");
+                        if (_dnsServer.ManifestOwnsSocketPoolExcludedPorts)
+                            throw new InvalidDataException("/dns/udpSocketPool/excludedPorts: Cannot verify the excluded ports in this combined backup format.");
                         _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(null, DnsServer.DefaultUdpSocketPoolEnabled));
                     }
                     _dnsServer.CheckManifestAppAutoUpdate(true);

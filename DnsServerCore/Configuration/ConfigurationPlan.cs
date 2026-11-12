@@ -36,6 +36,7 @@ namespace DnsServerCore.Configuration
         private const string DnsEndpointsPath = "/dns/localEndpoints";
         private const string Ipv4SourcePath = "/dns/sourceNetworks/ipv4";
         private const string Ipv6SourcePath = "/dns/sourceNetworks/ipv6";
+        private const string ExcludedPortsPath = "/dns/udpSocketPool/excludedPorts";
         private const string WebAddressesPath = "/web/localAddresses";
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
@@ -58,6 +59,7 @@ namespace DnsServerCore.Configuration
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
+            [ExcludedPortsPath] = Field("socketPoolExcludedPorts", Array.Empty<ushort>(), canApply: true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232, canApply: true),
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true, canApply: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true, canApply: true),
@@ -96,6 +98,10 @@ namespace DnsServerCore.Configuration
         {
             RequireSettingsObject(currentSettings);
 
+            int? declaredWebTlsPort = manifest.Settings.TryGetProperty("web", out JsonElement web) &&
+                web.TryGetProperty("tlsPort", out JsonElement tlsPort)
+                ? tlsPort.ValueKind == JsonValueKind.Null ? _settings["/web/tlsPort"].Default.GetInt32() : decimal.ToInt32(tlsPort.GetDecimal())
+                : null;
             var changes = new List<ConfigurationChange>();
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
             {
@@ -107,7 +113,7 @@ namespace DnsServerCore.Configuration
                 else if (section.Name == "dhcp" && currentSettings.TryGetProperty("manifestDhcpScopes", out JsonElement scopes))
                     ConfigurationDhcp.Compare(section.Value, scopes, changes);
                 else
-                    Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log);
+                    Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log, declaredWebTlsPort);
             }
 
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
@@ -143,7 +149,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive)
         {
             CheckApplySupport(manifest);
 
@@ -155,7 +161,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -269,7 +275,7 @@ namespace DnsServerCore.Configuration
             return new DnsServer.StatisticsSettings(inMemory, retention);
         }
 
-        private static DnsServer.OutboundSocketSettings GetOutboundSocketSettings(ConfigurationManifest manifest)
+        private static DnsServer.OutboundSocketSettings GetOutboundSocketSettings(ConfigurationManifest manifest, int webTlsPort)
         {
             if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns))
                 return default;
@@ -277,10 +283,22 @@ namespace DnsServerCore.Configuration
             IPv6Mode? ipv6 = dns.TryGetProperty("ipv6Mode", out JsonElement mode)
                 ? mode.ValueKind == JsonValueKind.Null ? IPv6Mode.Disabled : Enum.Parse<IPv6Mode>(mode.GetString())
                 : null;
-            bool? pool = dns.TryGetProperty("udpSocketPool", out JsonElement socketPool) && socketPool.TryGetProperty("enabled", out JsonElement enabled)
+            if (!dns.TryGetProperty("udpSocketPool", out JsonElement socketPool))
+                return new DnsServer.OutboundSocketSettings(ipv6, null);
+
+            bool? pool = socketPool.TryGetProperty("enabled", out JsonElement enabled)
                 ? enabled.ValueKind == JsonValueKind.Null ? DnsServer.DefaultUdpSocketPoolEnabled : enabled.GetBoolean()
                 : null;
-            return new DnsServer.OutboundSocketSettings(ipv6, pool);
+            ushort[] ports = socketPool.TryGetProperty("excludedPorts", out JsonElement excludedPorts)
+                ? ReadExcludedPorts(excludedPorts, webTlsPort) : null;
+            return new DnsServer.OutboundSocketSettings(ipv6, pool, ports);
+        }
+
+        private static ushort[] ReadExcludedPorts(JsonElement value, int? webTlsPort = null)
+        {
+            return value.ValueKind == JsonValueKind.Null
+                ? webTlsPort.HasValue ? [checked((ushort)webTlsPort.Value)] : []
+                : value.EnumerateArray().Select(port => decimal.ToUInt16(port.GetDecimal())).Distinct().Order().ToArray();
         }
 
         private static bool? GetAppAutoUpdate(ConfigurationManifest manifest)
@@ -433,6 +451,9 @@ namespace DnsServerCore.Configuration
         {
             if (!currentSettings.TryGetProperty(setting.ApiField, out JsonElement value))
                 throw new InvalidDataException($"{path}: The server did not return the current setting.");
+
+            if (path == ExcludedPortsPath)
+                return JsonSerializer.SerializeToElement(ReadExcludedPorts(value));
 
             return value;
         }
@@ -593,7 +614,7 @@ namespace DnsServerCore.Configuration
                 comments.EndsWith("' DHCP scope", StringComparison.Ordinal);
         }
 
-        private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log)
+        private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
             if (_settings.TryGetValue(path, out Setting setting))
             {
@@ -663,6 +684,12 @@ namespace DnsServerCore.Configuration
                         string socket = ConfigurationManifest.ReadWebUnixSocketPath(desired, path);
                         candidate = JsonSerializer.SerializeToElement(socket.Length == 0 ? null : socket);
                     }
+                    else if (path == ExcludedPortsPath)
+                    {
+                        int? tlsPort = desired.ValueKind == JsonValueKind.Null
+                            ? declaredWebTlsPort ?? currentSettings.GetProperty("webServiceTlsPort").GetInt32() : null;
+                        candidate = JsonSerializer.SerializeToElement(ReadExcludedPorts(desired, tlsPort));
+                    }
                     else if (path == BlockListSourcesPath)
                     {
                         candidate = NormalizeBlockListSources(desired);
@@ -696,15 +723,15 @@ namespace DnsServerCore.Configuration
 
             if (desired.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket")
             {
-                Compare(desired, path + "/enabled", currentSettings, changes, log);
-                Compare(desired, path + "/path", currentSettings, changes, log);
+                Compare(desired, path + "/enabled", currentSettings, changes, log, declaredWebTlsPort);
+                Compare(desired, path + "/path", currentSettings, changes, log, declaredWebTlsPort);
                 return;
             }
 
             if ((desired.ValueKind == JsonValueKind.Object) && _settings.Keys.Any(field => field.StartsWith(path + "/", StringComparison.Ordinal)))
             {
                 foreach (JsonProperty property in desired.EnumerateObject())
-                    Compare(property.Value, AppendPath(path, property.Name), currentSettings, changes, log);
+                    Compare(property.Value, AppendPath(path, property.Name), currentSettings, changes, log, declaredWebTlsPort);
 
                 return;
             }

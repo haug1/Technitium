@@ -466,6 +466,50 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task UdpPortExclusionsRoundTripAsASetAndResetToWebTlsPort()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "settings/set?enableUdpSocketPool=false&socketPoolExcludedPorts=5300", server.AdminToken));
+            await server.RestartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"dns":{"udpSocketPool":{"excludedPorts":[5302,5301,5302]}}}""";
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            await server.RestartAsync();
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal("[5301,5302]", settings.GetProperty("socketPoolExcludedPorts").GetRawText());
+            Assert.Equal("/dns/udpSocketPool/excludedPorts", Assert.Single(settings.GetProperty("managedSettings").EnumerateArray()).GetString());
+            Assert.Equal("[5301,5302]", ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["udpSocketPool"]!["excludedPorts"]!.ToJsonString());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?socketPoolExcludedPorts=5302,5301", server.AdminToken));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/udpSocketPool/excludedPorts", restored.GetProperty("errorMessage").GetString());
+
+            const string clear = """{"schemaVersion":1,"dns":{"udpSocketPool":{"excludedPorts":[]}}}""";
+            revision = (await PreviewAsync(server, clear)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, clear, revision));
+            Assert.Empty((await server.GetSettingsAsync()).GetProperty("socketPoolExcludedPorts").EnumerateArray());
+
+            const string reset = """{"schemaVersion":1,"dns":{"udpSocketPool":{"excludedPorts":null}}}""";
+            revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            settings = await server.GetSettingsAsync();
+            Assert.Equal(settings.GetProperty("webServiceTlsPort").GetInt32(),
+                Assert.Single(settings.GetProperty("socketPoolExcludedPorts").EnumerateArray()).GetInt32());
+            Assert.Empty((await PreviewAsync(server, reset)).GetProperty("changes").EnumerateArray());
+        }
+
+        [Fact]
         public async Task AppAutoUpdateAppliesAndRejectsConflictingBackup()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -3126,7 +3126,7 @@ namespace DnsServerCore
             DateTime previousCertificateLastModified = _webServiceCertificateLastModifiedOn;
             try
             {
-                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, writeCertificate,
+                await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                     (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive);
             }
             catch

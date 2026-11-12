@@ -923,8 +923,9 @@ namespace DnsServerCore
                 else if (request.TryGetQueryOrForm("preferIPv6", bool.Parse, out bool preferIPv6))
                     requestedIpv6Mode = preferIPv6 ? IPv6Mode.Preferred : IPv6Mode.Disabled;
                 bool hasUdpPool = request.TryGetQueryOrForm("enableUdpSocketPool", bool.Parse, out bool enableUdpSocketPool);
+                bool hasExcludedPorts = request.TryQueryOrFormArray("socketPoolExcludedPorts", ushort.Parse, out ushort[] socketPoolExcludedPorts);
                 _dnsWebService._dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(
-                    requestedIpv6Mode, hasUdpPool ? enableUdpSocketPool : null));
+                    requestedIpv6Mode, hasUdpPool ? enableUdpSocketPool : null, hasExcludedPorts ? socketPoolExcludedPorts : null));
 
                 bool hasAppAutoUpdate = request.TryGetQueryOrForm("dnsAppsEnableAutomaticUpdate", bool.Parse, out bool dnsAppsEnableAutomaticUpdate);
                 if (hasAppAutoUpdate)
@@ -1004,7 +1005,7 @@ namespace DnsServerCore
                         if (hasUdpPool && !_dnsWebService._dnsServer.ManifestOwnsUdpSocketPool)
                             _dnsWebService._dnsServer.EnableUdpSocketPool = enableUdpSocketPool;
 
-                        if (request.TryQueryOrFormArray("socketPoolExcludedPorts", ushort.Parse, out ushort[] socketPoolExcludedPorts))
+                        if (hasExcludedPorts && !_dnsWebService._dnsServer.ManifestOwnsSocketPoolExcludedPorts)
                             UdpClientConnection.SocketPoolExcludedPorts = socketPoolExcludedPorts;
 
                         if (hasUdpPayload)
