@@ -14,6 +14,90 @@ namespace DnsServerCore.Configuration
     {
         internal const string Path = "/auth/users";
 
+        internal static string UserPath(string name) => ConfigurationPlan.AppendPath(Path, name.ToLowerInvariant());
+
+        internal static string[] GetOwnedPaths(ConfigurationManifest manifest)
+        {
+            if (!TryGetDeclaration(manifest, out JsonElement users))
+                return [];
+            if (users.ValueKind == JsonValueKind.Null)
+                return [Path];
+
+            var paths = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (JsonProperty entry in users.EnumerateObject())
+            {
+                string path = UserPath(entry.Name);
+                paths.Add(path);
+                if (entry.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (JsonProperty field in entry.Value.EnumerateObject())
+                        paths.Add(path + "/" + field.Name);
+                }
+            }
+            return paths.ToArray();
+        }
+
+        internal static bool OwnsMembership(IReadOnlyList<string> paths, string name, UserType type) =>
+            paths.Contains(UserPath(name)) ||
+            (type == UserType.Local && !name.Equals("admin", StringComparison.OrdinalIgnoreCase) && paths.Contains(Path));
+
+        internal static void CheckMembership(IReadOnlyList<string> paths, string name, UserType type)
+        {
+            if (OwnsMembership(paths, name, type))
+                throw Conflict(UserPath(name));
+        }
+
+        internal static bool OwnsField(IReadOnlyList<string> paths, User user, string field) =>
+            paths.Contains(UserPath(user.Username) + "/" + field);
+
+        internal static void CheckField(IReadOnlyList<string> paths, User user, string field, bool changes)
+        {
+            if (changes && OwnsField(paths, user, field))
+                throw Conflict(UserPath(user.Username) + "/" + field);
+        }
+
+        internal static bool CheckPassword(IReadOnlyList<string> paths, User user, string password, int iterations)
+        {
+            CheckField(paths, user, "passwordIterations", user.PasswordIterations != iterations);
+            if (!OwnsField(paths, user, "password"))
+                return true;
+            if (user.PasswordIterations != iterations || user.GetPasswordHashFor(password) != user.PasswordHash)
+                throw Conflict(UserPath(user.Username) + "/password");
+            return false;
+        }
+
+        internal static bool SameGroups(User user, IEnumerable<string> names) =>
+            user.MemberOfGroups.Select(group => group.Name.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal).SetEquals(names);
+
+        private static InvalidDataException Conflict(string path) => new($"{path}: This account setting is managed by the manifest.");
+
+        internal static void CheckRestore(AuthManager auth, IReadOnlyDictionary<string, User> candidate)
+        {
+            var paths = auth.ManagedUserPaths;
+            var names = new SortedSet<string>(candidate.Keys, StringComparer.Ordinal);
+            names.UnionWith(auth.Users.Select(user => user.Username));
+            foreach (string name in names)
+            {
+                User current = auth.GetUser(name);
+                candidate.TryGetValue(name, out User restored);
+                if (current?.Type != restored?.Type)
+                {
+                    CheckMembership(paths, name, current?.Type ?? restored.Type);
+                    if (current is not null && restored is not null)
+                        CheckMembership(paths, name, restored.Type);
+                }
+                if (current is null || restored is null)
+                    continue;
+
+                CheckField(paths, current, "displayName", current.DisplayName != restored.DisplayName);
+                CheckField(paths, current, "disabled", current.Disabled != restored.Disabled);
+                CheckField(paths, current, "sessionTimeoutSeconds", current.SessionTimeoutSeconds != restored.SessionTimeoutSeconds);
+                CheckField(paths, current, "groups", !SameGroups(current, restored.MemberOfGroups.Select(group => group.Name.ToLowerInvariant())));
+                CheckField(paths, current, "passwordIterations", current.PasswordIterations != restored.PasswordIterations);
+                CheckField(paths, current, "password", !current.HasSamePasswordState(restored));
+            }
+        }
+
         internal sealed record Change(User Current, string Name, string DisplayName, bool Disabled, int Timeout,
             string[] Groups, string Password, int Iterations, string[] Fields, bool Remove = false)
         {
@@ -158,7 +242,7 @@ namespace DnsServerCore.Configuration
                         fields.Add("disabled");
                     if (current.SessionTimeoutSeconds != timeout)
                         fields.Add("sessionTimeoutSeconds");
-                    if (!groups.Keys.SequenceEqual(current.MemberOfGroups.Select(group => group.Name.ToLowerInvariant()).Order(StringComparer.Ordinal)))
+                    if (!SameGroups(current, groups.Keys))
                         fields.Add("groups");
                     if (password is not null && (current.PasswordIterations != iterations || current.GetPasswordHashFor(password) != current.PasswordHash))
                         fields.Add("password");

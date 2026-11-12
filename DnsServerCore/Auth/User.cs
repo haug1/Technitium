@@ -262,6 +262,10 @@ namespace DnsServerCore.Auth
 
         internal int PasswordIterations => _iterations;
 
+        internal bool HasSamePasswordState(User other) =>
+            _passwordHashType == other._passwordHashType && _iterations == other._iterations &&
+            _passwordHash == other._passwordHash && _salt.AsSpan().SequenceEqual(other._salt);
+
         internal User CopyForManifest()
         {
             var copy = (User)MemberwiseClone();

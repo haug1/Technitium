@@ -156,6 +156,17 @@ namespace DnsServerCore
                 if (includeMoreDetails)
                 {
                     jsonWriter.WriteNumber("sessionTimeoutSeconds", user.SessionTimeoutSeconds);
+                    var paths = _dnsWebService._authManager.ManagedUserPaths;
+                    string userPath = ConfigurationUsers.UserPath(user.Username);
+                    jsonWriter.WriteStartArray("managedSettings");
+                    if (ConfigurationUsers.OwnsMembership(paths, user.Username, user.Type))
+                        jsonWriter.WriteStringValue(userPath);
+                    foreach (string path in paths)
+                    {
+                        if (path.StartsWith(userPath + "/", StringComparison.Ordinal))
+                            jsonWriter.WriteStringValue(path);
+                    }
+                    jsonWriter.WriteEndArray();
 
                     switch (user.Type)
                     {
@@ -940,7 +951,10 @@ namespace DnsServerCore
                 User sessionUser = _dnsWebService.GetSessionUser(context, true);
                 HttpRequest request = context.Request;
 
-                if (request.TryQueryOrForm("displayName", out string displayName))
+                CheckOwnedUserProfile(request, sessionUser);
+
+                var paths = _dnsWebService._authManager.ManagedUserPaths;
+                if (!ConfigurationUsers.OwnsField(paths, sessionUser, "displayName") && request.TryQueryOrForm("displayName", out string displayName))
                 {
                     switch (sessionUser.Type)
                     {
@@ -954,7 +968,7 @@ namespace DnsServerCore
                     sessionUser.DisplayName = displayName;
                 }
 
-                if (request.TryGetQueryOrForm("sessionTimeoutSeconds", int.Parse, out int sessionTimeoutSeconds))
+                if (!ConfigurationUsers.OwnsField(paths, sessionUser, "sessionTimeoutSeconds") && request.TryGetQueryOrForm("sessionTimeoutSeconds", int.Parse, out int sessionTimeoutSeconds))
                     sessionUser.SessionTimeoutSeconds = sessionTimeoutSeconds;
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] User profile was updated successfully.");
@@ -969,6 +983,19 @@ namespace DnsServerCore
 
                 Utf8JsonWriter jsonWriter = context.GetCurrentJsonWriter();
                 WriteUserDetails(jsonWriter, sessionUser, session, true, false);
+            }
+
+            private void CheckOwnedUserProfile(HttpRequest request, User user)
+            {
+                var paths = _dnsWebService._authManager.ManagedUserPaths;
+                if (paths.Count == 0)
+                    return;
+                if (request.TryQueryOrForm("displayName", out string displayName))
+                    ConfigurationUsers.CheckField(paths, user, "displayName",
+                        user.DisplayName != (string.IsNullOrWhiteSpace(displayName) ? user.Username : displayName));
+                if (request.TryGetQueryOrForm("sessionTimeoutSeconds", int.Parse, out int timeout))
+                    ConfigurationUsers.CheckField(paths, user, "sessionTimeoutSeconds",
+                        user.SessionTimeoutSeconds != (timeout is > 0 and < 60 ? 60 : timeout));
             }
 
             public void ListSessions(HttpContext context)
@@ -1176,6 +1203,89 @@ namespace DnsServerCore
                 if (user is null)
                     throw new DnsWebServiceException("No such user exists: " + username);
 
+                var paths = _dnsWebService._authManager.ManagedUserPaths;
+                CheckOwnedUserProfile(request, user);
+                if (request.TryGetQueryOrForm("newUser", out string requestedName) && !user.Username.Equals(requestedName, StringComparison.OrdinalIgnoreCase))
+                {
+                    ConfigurationUsers.CheckMembership(paths, user.Username, user.Type);
+                    ConfigurationUsers.CheckMembership(paths, requestedName, user.Type);
+                }
+                if (request.TryGetQueryOrForm("disabled", bool.Parse, out bool requestedDisabled))
+                    ConfigurationUsers.CheckField(paths, user, "disabled", user.Disabled != requestedDisabled);
+
+                string newPassword = request.QueryOrForm("newPass");
+                int iterations = User.DEFAULT_ITERATIONS;
+                bool changePassword = !string.IsNullOrWhiteSpace(newPassword);
+                if (changePassword)
+                {
+                    iterations = request.GetQueryOrForm("iterations", int.Parse, User.DEFAULT_ITERATIONS);
+                    changePassword = ConfigurationUsers.CheckPassword(paths, user, newPassword, iterations);
+                }
+
+                Dictionary<string, Group> groups = null;
+                if (request.TryQueryOrForm("memberOfGroups", out string memberOfGroups))
+                {
+                    switch (user.Type)
+                    {
+                        case UserType.RemoteSSO:
+                            if (_dnsWebService._authManager.SsoManagedGroups)
+                                throw new DnsWebServiceException("Cannot update user profile: SSO user's group membership is managed by SSO provider.");
+
+                            break;
+
+                        case UserType.RemoteLDAP:
+                            if (_dnsWebService._authManager.LdapManagedGroups)
+                                throw new DnsWebServiceException("Cannot update user profile: LDAP user's group membership is managed by directory service.");
+
+                            break;
+                    }
+
+                    string[] parts = memberOfGroups.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    groups = new Dictionary<string, Group>(parts.Length);
+
+                    foreach (string part in parts)
+                    {
+                        Group group = _dnsWebService._authManager.GetGroup(part);
+                        if (group is null)
+                            throw new DnsWebServiceException("No such group exists: " + part);
+
+                        groups.Add(group.Name.ToLowerInvariant(), group);
+                    }
+
+                    //ensure user is member of everyone group
+                    Group everyone = _dnsWebService._authManager.GetGroup(Group.EVERYONE);
+                    groups[everyone.Name.ToLowerInvariant()] = everyone;
+
+                    bool isClusterUser = false;
+
+                    if (user.Type == UserType.Local)
+                    {
+                        List<UserSession> userSessions = _dnsWebService._authManager.GetSessions(user);
+
+                        if (_dnsWebService._clusterManager.ClusterInitialized)
+                        {
+                            foreach (UserSession userSession in userSessions)
+                            {
+                                if (userSession.Type == UserSessionType.ClusterApiToken)
+                                {
+                                    isClusterUser = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (isClusterUser || (sessionUser == user))
+                    {
+                        //ensure cluster user is always a member of administrators group
+                        //ensure current admin user is member of administrators group to avoid self lockout
+                        Group admins = _dnsWebService._authManager.GetGroup(Group.ADMINISTRATORS);
+                        groups[admins.Name.ToLowerInvariant()] = admins;
+                    }
+
+                    ConfigurationUsers.CheckField(paths, user, "groups", !ConfigurationUsers.SameGroups(user, groups.Keys));
+                }
+
                 try
                 {
                     if (request.TryGetQueryOrForm("newUser", out string newUsername))
@@ -1194,7 +1304,7 @@ namespace DnsServerCore
                         _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), $"User account's username was changed from '{username}' to '{user.Username}'.");
                     }
 
-                    if (request.TryQueryOrForm("displayName", out string displayName))
+                    if (!ConfigurationUsers.OwnsField(paths, user, "displayName") && request.TryQueryOrForm("displayName", out string displayName))
                     {
                         switch (user.Type)
                         {
@@ -1216,78 +1326,13 @@ namespace DnsServerCore
                         user.DisableTOTP();
                     }
 
-                    string newPassword = request.QueryOrForm("newPass");
-                    if (!string.IsNullOrWhiteSpace(newPassword))
-                    {
-                        int iterations = request.GetQueryOrForm("iterations", int.Parse, User.DEFAULT_ITERATIONS);
-
+                    if (changePassword)
                         user.ChangePassword(newPassword, iterations);
-                    }
 
-                    if (request.TryQueryOrForm("memberOfGroups", out string memberOfGroups))
-                    {
-                        switch (user.Type)
-                        {
-                            case UserType.RemoteSSO:
-                                if (_dnsWebService._authManager.SsoManagedGroups)
-                                    throw new DnsWebServiceException("Cannot update user profile: SSO user's group membership is managed by SSO provider.");
-
-                                break;
-
-                            case UserType.RemoteLDAP:
-                                if (_dnsWebService._authManager.LdapManagedGroups)
-                                    throw new DnsWebServiceException("Cannot update user profile: LDAP user's group membership is managed by directory service.");
-
-                                break;
-                        }
-
-                        string[] parts = memberOfGroups.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                        Dictionary<string, Group> groups = new Dictionary<string, Group>(parts.Length);
-
-                        foreach (string part in parts)
-                        {
-                            Group group = _dnsWebService._authManager.GetGroup(part);
-                            if (group is null)
-                                throw new DnsWebServiceException("No such group exists: " + part);
-
-                            groups.Add(group.Name.ToLowerInvariant(), group);
-                        }
-
-                        //ensure user is member of everyone group
-                        Group everyone = _dnsWebService._authManager.GetGroup(Group.EVERYONE);
-                        groups[everyone.Name.ToLowerInvariant()] = everyone;
-
-                        bool isClusterUser = false;
-
-                        if (user.Type == UserType.Local)
-                        {
-                            List<UserSession> userSessions = _dnsWebService._authManager.GetSessions(user);
-
-                            if (_dnsWebService._clusterManager.ClusterInitialized)
-                            {
-                                foreach (UserSession userSession in userSessions)
-                                {
-                                    if (userSession.Type == UserSessionType.ClusterApiToken)
-                                    {
-                                        isClusterUser = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (isClusterUser || (sessionUser == user))
-                        {
-                            //ensure cluster user is always a member of administrators group
-                            //ensure current admin user is member of administrators group to avoid self lockout
-                            Group admins = _dnsWebService._authManager.GetGroup(Group.ADMINISTRATORS);
-                            groups[admins.Name.ToLowerInvariant()] = admins;
-                        }
-
+                    if (groups is not null && !ConfigurationUsers.OwnsField(paths, user, "groups"))
                         user.SyncGroups(groups);
-                    }
 
-                    if (request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled))
+                    if (!ConfigurationUsers.OwnsField(paths, user, "disabled") && request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled))
                     {
                         if (disabled && (sessionUser == user)) //to avoid self lockout
                             throw new DnsWebServiceException("Cannot update user profile: cannot disable current user's account.");
@@ -1336,7 +1381,7 @@ namespace DnsServerCore
                         }
                     }
 
-                    if (request.TryGetQueryOrForm("sessionTimeoutSeconds", int.Parse, out int sessionTimeoutSeconds))
+                    if (!ConfigurationUsers.OwnsField(paths, user, "sessionTimeoutSeconds") && request.TryGetQueryOrForm("sessionTimeoutSeconds", int.Parse, out int sessionTimeoutSeconds))
                         user.SessionTimeoutSeconds = sessionTimeoutSeconds;
                 }
                 finally
@@ -1509,6 +1554,46 @@ namespace DnsServerCore
                 if (updateDescription && managedPaths.Contains(descriptionPath) && group.Description != description)
                     throw ConfigurationGroups.Conflict(descriptionPath);
 
+                Dictionary<string, User> users = null;
+                string members = request.QueryOrForm("members");
+                if (members is not null)
+                {
+                    string[] parts = members.Split(',');
+                    users = new Dictionary<string, User>();
+
+                    foreach (string part in parts)
+                    {
+                        if (part.Length == 0)
+                            continue;
+
+                        User user = _dnsWebService._authManager.GetUser(part);
+                        if (user is null)
+                            throw new DnsWebServiceException("No such user exists: " + part);
+
+                        switch (user.Type)
+                        {
+                            case UserType.RemoteSSO:
+                                if (_dnsWebService._authManager.SsoManagedGroups && !user.IsMemberOfGroup(group))
+                                    throw new DnsWebServiceException("Cannot add user '" + user.Username + "' since group memberships for SSO users are managed by the SSO provider.");
+
+                                break;
+
+                            case UserType.RemoteLDAP:
+                                if (_dnsWebService._authManager.LdapManagedGroups && !user.IsMemberOfGroup(group))
+                                    throw new DnsWebServiceException("Cannot add user '" + user.Username + "' since group memberships for LDAP users are managed by the directory service.");
+
+                                break;
+                        }
+
+                        users.Add(user.Username, user);
+                    }
+
+                    if ((rename ? newGroup : group.Name).Equals("administrators", StringComparison.OrdinalIgnoreCase))
+                        users[sessionUser.Username] = sessionUser; //ensure current admin user is member of administrators group to avoid self lockout
+
+                    _dnsWebService._authManager.CheckGroupMembershipChanges(group, users);
+                }
+
                 try
                 {
                     if (rename)
@@ -1521,44 +1606,8 @@ namespace DnsServerCore
                     if (updateDescription && group.Description != description)
                         group.Description = description;
 
-                    string members = request.QueryOrForm("members");
-                    if (members is not null)
-                    {
-                        string[] parts = members.Split(',');
-                        Dictionary<string, User> users = new Dictionary<string, User>();
-
-                        foreach (string part in parts)
-                        {
-                            if (part.Length == 0)
-                                continue;
-
-                            User user = _dnsWebService._authManager.GetUser(part);
-                            if (user is null)
-                                throw new DnsWebServiceException("No such user exists: " + part);
-
-                            switch (user.Type)
-                            {
-                                case UserType.RemoteSSO:
-                                    if (_dnsWebService._authManager.SsoManagedGroups && !user.IsMemberOfGroup(group))
-                                        throw new DnsWebServiceException("Cannot add user '" + user.Username + "' since group memberships for SSO users are managed by the SSO provider.");
-
-                                    break;
-
-                                case UserType.RemoteLDAP:
-                                    if (_dnsWebService._authManager.LdapManagedGroups && !user.IsMemberOfGroup(group))
-                                        throw new DnsWebServiceException("Cannot add user '" + user.Username + "' since group memberships for LDAP users are managed by the directory service.");
-
-                                    break;
-                            }
-
-                            users.Add(user.Username, user);
-                        }
-
-                        if (group.Name.Equals("administrators", StringComparison.OrdinalIgnoreCase))
-                            users[sessionUser.Username] = sessionUser; //ensure current admin user is member of administrators group to avoid self lockout
-
+                    if (users is not null)
                         _dnsWebService._authManager.SyncGroupMembers(group, users);
-                    }
                 }
                 finally
                 {

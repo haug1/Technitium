@@ -1312,6 +1312,8 @@ function showUserDetailsModal(objMenuItem) {
         url: "api/admin/users/get?user=" + encodeURIComponent(username) + "&includeGroups=true",
         token: sessionData.token,
         success: function (responseJSON) {
+            var userPath = "/auth/users/" + responseJSON.response.username.toLowerCase();
+            var managedSettings = responseJSON.response.managedSettings || [];
             $("#txtUserDetailsDisplayName").val(responseJSON.response.displayName);
             $("#txtUserDetailsUsername").val(responseJSON.response.username);
 
@@ -1332,15 +1334,15 @@ function showUserDetailsModal(objMenuItem) {
 
                 case "Local":
                 default:
-                    $("#txtUserDetailsDisplayName").prop("disabled", false);
-                    $("#txtUserDetailsUsername").prop("disabled", false);
+                    $("#txtUserDetailsDisplayName").prop("disabled", managedSettings.includes(userPath + "/displayName"));
+                    $("#txtUserDetailsUsername").prop("disabled", managedSettings.includes(userPath));
                     $("#lblUserDetailsUserType").text(responseJSON.response.type);
                     $("#lblUserDetails2FAStatus").text(responseJSON.response.totpEnabled ? "Enabled" : "Disabled");
                     break;
             }
 
-            $("#chkUserDetailsDisableAccount").prop("checked", responseJSON.response.disabled);
-            $("#txtUserDetailsSessionTimeout").val(responseJSON.response.sessionTimeoutSeconds);
+            $("#chkUserDetailsDisableAccount").prop("checked", responseJSON.response.disabled).prop("disabled", managedSettings.includes(userPath + "/disabled"));
+            $("#txtUserDetailsSessionTimeout").val(responseJSON.response.sessionTimeoutSeconds).prop("disabled", managedSettings.includes(userPath + "/sessionTimeoutSeconds"));
 
             var memberOf = "";
 
@@ -1348,8 +1350,9 @@ function showUserDetailsModal(objMenuItem) {
                 memberOf += htmlEncode(responseJSON.response.memberOfGroups[i]) + "\n";
             }
 
-            $("#txtUserDetailsMemberOf").prop("disabled", responseJSON.response.remotelyManagedGroups)
-            $("#optUserDetailsGroupList").prop("disabled", responseJSON.response.remotelyManagedGroups)
+            var groupsManaged = responseJSON.response.remotelyManagedGroups || managedSettings.includes(userPath + "/groups");
+            $("#txtUserDetailsMemberOf").prop("disabled", groupsManaged);
+            $("#optUserDetailsGroupList").prop("disabled", groupsManaged);
 
             $("#txtUserDetailsMemberOf").val(memberOf);
 
@@ -1488,7 +1491,11 @@ function saveUserDetails(objBtn) {
     if (sessionTimeoutSeconds === "")
         sessionTimeoutSeconds = 1800;
 
-    var params = "user=" + encodeURIComponent(username) + "&disabled=" + disabled + "&sessionTimeoutSeconds=" + encodeURIComponent(sessionTimeoutSeconds);
+    var params = "user=" + encodeURIComponent(username);
+    if (!$("#chkUserDetailsDisableAccount").prop("disabled"))
+        params += "&disabled=" + disabled;
+    if (!$("#txtUserDetailsSessionTimeout").prop("disabled"))
+        params += "&sessionTimeoutSeconds=" + encodeURIComponent(sessionTimeoutSeconds);
 
     if (!$("#txtUserDetailsDisplayName").prop("disabled")) {
         var displayName = $("#txtUserDetailsDisplayName").val();

@@ -3384,6 +3384,12 @@ namespace DnsServerCore.Tests
                     grant => grant.GetProperty("username").ValueEquals("retired"));
             }
 
+            JsonElement recreation = await server.CallAsync(createUser, server.AdminToken);
+            Assert.Equal("error", recreation.GetProperty("status").GetString());
+            Assert.Contains("/auth/users/retired", recreation.GetProperty("errorMessage").GetString());
+            const string release = """{"schemaVersion":1}""";
+            string releaseRevision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, releaseRevision));
             LoopbackWebService.AssertOk(await server.CallAsync(createUser, server.AdminToken));
             const string reset = """{"schemaVersion":1,"auth":{"users":null}}""";
             string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
@@ -3436,6 +3442,12 @@ namespace DnsServerCore.Tests
                 JsonElement group = await server.CallAsync("admin/groups/get?group=Operators", server.AdminToken);
                 Assert.Contains(group.GetProperty("response").GetProperty("members").EnumerateArray(), member => member.ValueEquals("operator"));
 
+                using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+                backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+                using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+                backup.EnsureSuccessStatusCode();
+                byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
                 Environment.SetEnvironmentVariable(variable, initial);
                 preview = await PreviewAsync(server, manifest);
                 Assert.Contains(preview.GetProperty("changes").EnumerateArray(), change => change.GetProperty("path").ValueEquals("/auth/users/operator/password"));
@@ -3443,6 +3455,33 @@ namespace DnsServerCore.Tests
                 await server.RestartAsync();
                 await server.LoginAsync("operator", initial);
                 Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement deniedEdit = await server.CallAsync(
+                    "admin/users/set?user=operator&displayName=Legacy&disabled=true", server.AdminToken);
+                Assert.Equal("error", deniedEdit.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/operator/displayName", deniedEdit.GetProperty("errorMessage").GetString());
+
+                JsonElement deniedMembership = await server.CallAsync(
+                    "admin/groups/set?group=Operators&description=Legacy&members=", server.AdminToken);
+                Assert.Equal("error", deniedMembership.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/operator/groups", deniedMembership.GetProperty("errorMessage").GetString());
+                group = await server.CallAsync("admin/groups/get?group=Operators", server.AdminToken);
+                Assert.Contains(group.GetProperty("response").GetProperty("members").EnumerateArray(), member => member.ValueEquals("operator"));
+
+                token = await server.LoginAsync("operator", initial);
+                JsonElement deniedProfile = await server.CallAsync("user/profile/set?sessionTimeoutSeconds=120", token);
+                Assert.Equal("error", deniedProfile.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/operator/sessionTimeoutSeconds", deniedProfile.GetProperty("errorMessage").GetString());
+                using var password = new FormUrlEncodedContent([new("pass", initial), new("newPass", rotated)]);
+                JsonElement deniedPassword = await server.CallAsync("user/changePassword", token, password);
+                Assert.Equal("error", deniedPassword.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/operator/password", deniedPassword.GetProperty("errorMessage").GetString());
+
+                using var restoreForm = new MultipartFormDataContent();
+                restoreForm.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+                JsonElement deniedRestore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, restoreForm);
+                Assert.Equal("error", deniedRestore.GetProperty("status").GetString());
+                Assert.Contains("/auth/users/operator/password", deniedRestore.GetProperty("errorMessage").GetString());
 
                 const string lockout = """{"schemaVersion":1,"auth":{"users":{"admin":{"groups":[],"disabled":true}}}}""";
                 using var lockoutContent = new StringContent(lockout, Encoding.UTF8, "application/json");

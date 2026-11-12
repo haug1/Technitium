@@ -301,6 +301,8 @@ namespace DnsServerCore.Configuration
                     groupOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestGroups", out JsonElement groups))
                     groups.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestUserOwnership", out JsonElement userOwnership))
+                    userOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestUsers", out JsonElement users))
                     users.WriteTo(writer);
                 writer.WriteEndArray();

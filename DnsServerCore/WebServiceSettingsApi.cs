@@ -984,6 +984,8 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WritePropertyName("manifestUserOwnership");
+                    JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedUserPaths);
                     writer.WritePropertyName("manifestGroupOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedGroupPaths);
                     writer.WritePropertyName("manifestLdapOwnership");
@@ -2323,8 +2325,11 @@ namespace DnsServerCore
                                 {
                                     if (checkAuth && archive.GetEntry("auth.config") is ZipArchiveEntry authEntry)
                                     {
+                                        var auth = _dnsWebService._authManager;
+                                        ConfigurationUsers.CheckField(auth.ManagedUserPaths, sessionUser, "groups",
+                                            !sessionUser.IsMemberOfGroup(auth.GetGroup(Group.ADMINISTRATORS)));
                                         using Stream authConfiguration = authEntry.Open();
-                                        _dnsWebService._authManager.CheckManifestRestoreOwnership(authConfiguration);
+                                        auth.CheckManifestRestoreOwnership(authConfiguration);
                                     }
                                     if (checkZones)
                                         _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRestore(archive, deleteExistingFiles);

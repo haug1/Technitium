@@ -88,7 +88,10 @@ namespace DnsServerCore.Auth
         internal const string GroupOwnershipFile = "group-ownership.config";
         private string[] _managedGroupPaths = [];
         internal IReadOnlyList<string> ManagedGroupPaths => _managedGroupPaths;
-        internal bool HasManagedAuthSettings => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0;
+        internal const string UserOwnershipFile = "user-ownership.config";
+        private string[] _managedUserPaths = [];
+        internal IReadOnlyList<string> ManagedUserPaths => _managedUserPaths;
+        internal bool HasManagedAuthSettings => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0 || _managedUserPaths.Length > 0;
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
@@ -108,6 +111,7 @@ namespace DnsServerCore.Auth
 
             _managedLdapFields = ReadOwnership(LdapOwnershipFile);
             _managedGroupPaths = ReadOwnership(GroupOwnershipFile);
+            _managedUserPaths = ReadOwnership(UserOwnershipFile);
 
             _saveTimer = new Timer(delegate (object state)
             {
@@ -502,9 +506,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, IReadOnlyDictionary<string, ConfigurationUsers.Change> userChanges, string[] userOwnership, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null && userChanges.Count == 0 && userOwnership is null)
             {
                 persist(null);
                 return;
@@ -586,6 +590,8 @@ namespace DnsServerCore.Auth
                         WriteOwnership(LdapOwnershipFile, ldapOwnership);
                     if (groupOwnership is not null)
                         WriteOwnership(GroupOwnershipFile, groupOwnership);
+                    if (userOwnership is not null)
+                        WriteOwnership(UserOwnershipFile, userOwnership);
                 });
                 foreach (var (name, group) in groupChanges)
                 {
@@ -620,6 +626,8 @@ namespace DnsServerCore.Auth
                     _managedLdapFields = ldapOwnership;
                 if (groupOwnership is not null)
                     _managedGroupPaths = groupOwnership;
+                if (userOwnership is not null)
+                    _managedUserPaths = userOwnership;
                 foreach (var (section, permission) in permissions)
                     _permissions[section] = permission;
                 if (ldap is not null)
@@ -655,11 +663,13 @@ namespace DnsServerCore.Auth
         }
 
         internal void CheckManifestRestoreOwnership(Stream stream) =>
-            ReadConfigFrom(stream, false, out _, (ldap, groups) =>
+            ReadConfigFrom(stream, false, out _, (ldap, groups, users) =>
             {
                 ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
                 if (_managedGroupPaths.Length > 0)
                     ConfigurationGroups.CheckRestore(this, groups);
+                if (_managedUserPaths.Length > 0)
+                    ConfigurationUsers.CheckRestore(this, users);
             });
 
         internal ConfigurationLdap.Settings GetManifestLdapSettings() => new(
@@ -694,7 +704,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>> inspect = null)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>, IReadOnlyDictionary<string, User>> inspect = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -872,14 +882,14 @@ namespace DnsServerCore.Auth
                         ConfigurationLdap.Settings ldap = ReadLdapSettings(bR);
                         if (inspect is not null)
                         {
-                            inspect(ldap, groups);
+                            inspect(ldap, groups, users);
                             return;
                         }
                         SetLdapSettings(ldap);
                     }
                     else if (inspect is not null)
                     {
-                        inspect(GetManifestLdapSettings(), groups);
+                        inspect(GetManifestLdapSettings(), groups, users);
                         return;
                     }
 
@@ -1477,6 +1487,7 @@ namespace DnsServerCore.Auth
         {
             lock (_saveLock)
             {
+                ConfigurationUsers.CheckMembership(_managedUserPaths, user.Username, user.Type);
                 if (_users.Count >= byte.MaxValue)
                     throw new DnsWebServiceException("Cannot create more than 255 users.");
 
@@ -1501,6 +1512,8 @@ namespace DnsServerCore.Auth
                 if (user.Username.Equals(newUsername, StringComparison.OrdinalIgnoreCase))
                     return;
 
+                ConfigurationUsers.CheckMembership(_managedUserPaths, user.Username, user.Type);
+                ConfigurationUsers.CheckMembership(_managedUserPaths, newUsername, user.Type);
                 string oldUsername = user.Username;
                 user.SetUsername(newUsername);
 
@@ -1518,13 +1531,16 @@ namespace DnsServerCore.Auth
         {
             User user = await AuthenticateUserAsync(username, password, totp, remoteAddress);
 
-            user.ChangePassword(newPassword, iterations);
+            if (ConfigurationUsers.CheckPassword(_managedUserPaths, user, newPassword, iterations))
+                user.ChangePassword(newPassword, iterations);
 
             return user;
         }
 
         public bool DeleteUser(string username)
         {
+            if (GetUser(username) is User current)
+                ConfigurationUsers.CheckMembership(_managedUserPaths, username, current.Type);
             if (_users.TryRemove(username.ToLowerInvariant(), out User deletedUser))
             {
                 //delete all sessions
@@ -1566,6 +1582,18 @@ namespace DnsServerCore.Auth
             }
 
             return members;
+        }
+
+        internal void CheckGroupMembershipChanges(Group group, IReadOnlyDictionary<string, User> users)
+        {
+            foreach (User user in _users.Values)
+                ConfigurationUsers.CheckField(_managedUserPaths, user, "groups", user.IsMemberOfGroup(group) != users.ContainsKey(user.Username));
+        }
+
+        private void CheckGroupIdentityChanges(Group group)
+        {
+            foreach (User user in GetGroupMembers(group))
+                ConfigurationUsers.CheckField(_managedUserPaths, user, "groups", changes: true);
         }
 
         public void SyncGroupMembers(Group group, IReadOnlyDictionary<string, User> users)
@@ -1611,6 +1639,7 @@ namespace DnsServerCore.Auth
                 return;
             }
 
+            CheckGroupIdentityChanges(group);
             string oldGroupName = group.Name;
             group.Name = newGroupName;
 
@@ -1640,6 +1669,8 @@ namespace DnsServerCore.Auth
                     throw new InvalidOperationException("Access was denied.");
 
                 default:
+                    if (_groups.TryGetValue(name, out Group group))
+                        CheckGroupIdentityChanges(group);
                     if (_groups.TryRemove(name, out Group deletedGroup))
                     {
                         //remove all users from deleted group
