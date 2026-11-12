@@ -78,7 +78,10 @@ namespace DnsServerCore.Cluster
         const int NOTIFY_ALL_SECONDARY_NODES_TIMER_INTERVAL = 5000;
 
         readonly Timer _clusterUpdateForSecondaryNodeChangesTimer;
-        bool _clusterUpdateForSecondaryNodeChangesTimerTriggered;
+        readonly Lock _secondaryUpdateLock = new Lock();
+        bool _secondaryUpdateScheduled;
+        bool _secondaryUpdatePending;
+        volatile bool _secondaryUpdateStopped;
         const int CLUSTER_UPDATE_FOR_SECONDARY_NODE_CHANGES_TIMER_INTERVAL = 5000;
 
         readonly Lock _saveLock = new Lock();
@@ -168,7 +171,11 @@ namespace DnsServerCore.Cluster
 
             _configRefreshTimer?.Dispose();
             _notifyAllSecondaryNodesTimer?.Dispose();
-            _clusterUpdateForSecondaryNodeChangesTimer?.Dispose();
+            lock (_secondaryUpdateLock)
+            {
+                _secondaryUpdateStopped = true;
+                _clusterUpdateForSecondaryNodeChangesTimer.Dispose();
+            }
 
             DisposeAllNodes();
 
@@ -2027,38 +2034,65 @@ namespace DnsServerCore.Cluster
 
         private void TriggerClusterUpdateForSecondaryNodeChanges()
         {
-            if (_clusterUpdateForSecondaryNodeChangesTimerTriggered)
-                return;
+            lock (_secondaryUpdateLock)
+            {
+                if (_secondaryUpdateStopped)
+                    return;
 
-            _clusterUpdateForSecondaryNodeChangesTimer.Change(CLUSTER_UPDATE_FOR_SECONDARY_NODE_CHANGES_TIMER_INTERVAL, Timeout.Infinite);
-            _clusterUpdateForSecondaryNodeChangesTimerTriggered = true;
+                _secondaryUpdatePending = true;
+                if (!_secondaryUpdateScheduled)
+                {
+                    _secondaryUpdateScheduled = true;
+                    _clusterUpdateForSecondaryNodeChangesTimer.Change(CLUSTER_UPDATE_FOR_SECONDARY_NODE_CHANGES_TIMER_INTERVAL, Timeout.Infinite);
+                }
+            }
         }
 
         private async void ClusterUpdateForSecondaryNodeChangesTimerCallbackAsync(object state)
         {
+            lock (_secondaryUpdateLock)
+            {
+                if (_secondaryUpdateStopped)
+                    return;
+                _secondaryUpdatePending = false;
+            }
+
+            ClusterNode secondaryNode = null;
+            bool retry = false;
             try
             {
+                if (!ClusterInitialized || GetSelfNode().Type != ClusterNodeType.Secondary)
+                    return;
+
+                secondaryNode = GetSelfNode();
                 ClusterNode primaryNode = GetPrimaryNode();
-
-                if (primaryNode.State == ClusterNodeState.Self)
-                    throw new InvalidOperationException();
-
-                ClusterNode secondaryNode = GetSelfNode();
-
-                if (secondaryNode.Type != ClusterNodeType.Secondary)
-                    throw new InvalidOperationException();
-
-                UpdateClusterFromPrimaryNode(await primaryNode.UpdateSecondaryNodeAsync(secondaryNode, _dnsWebService.WebServiceTlsCertificate));
-
-                _dnsWebService.LogManager.Write("DNS Server updated this Secondary node's details on the Primary node successfully.");
+                ClusterInfo updated = await primaryNode.UpdateSecondaryNodeAsync(secondaryNode, _dnsWebService.WebServiceTlsCertificate);
+                if (!_secondaryUpdateStopped && ClusterInitialized && ReferenceEquals(GetSelfNode(), secondaryNode) &&
+                    secondaryNode.Type == ClusterNodeType.Secondary && ReferenceEquals(GetPrimaryNode(), primaryNode))
+                {
+                    UpdateClusterFromPrimaryNode(updated);
+                    _dnsWebService.LogManager.Write("DNS Server updated this Secondary node's details on the Primary node successfully.");
+                }
             }
             catch (Exception ex)
             {
+                retry = secondaryNode?.Type == ClusterNodeType.Secondary;
                 _dnsWebService.LogManager.Write("DNS Server failed to update this Secondary node's details on the Primary node.", ex);
             }
             finally
             {
-                _clusterUpdateForSecondaryNodeChangesTimerTriggered = false;
+                lock (_secondaryUpdateLock)
+                {
+                    if (!_secondaryUpdateStopped)
+                    {
+                        _secondaryUpdateScheduled = _secondaryUpdatePending || (retry && ClusterInitialized);
+                        if (_secondaryUpdateScheduled)
+                        {
+                            int delay = _secondaryUpdatePending ? CLUSTER_UPDATE_FOR_SECONDARY_NODE_CHANGES_TIMER_INTERVAL : _configRetryIntervalSeconds * 1000;
+                            _clusterUpdateForSecondaryNodeChangesTimer.Change(delay, Timeout.Infinite);
+                        }
+                    }
+                }
             }
         }
 

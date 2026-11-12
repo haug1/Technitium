@@ -2359,10 +2359,10 @@ namespace DnsServerCore
             _webService.MapGetAndPost("/api/admin/cluster/state", _clusterApi.GetClusterState);
             _webService.MapGetAndPost("/api/admin/cluster/init", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.InitializeCluster));
             _webService.MapGetAndPost("/api/admin/cluster/primary/delete", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.DeleteCluster));
-            _webService.MapGetAndPost("/api/admin/cluster/primary/join", _clusterApi.JoinCluster);
+            _webService.MapGetAndPost("/api/admin/cluster/primary/join", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.JoinCluster));
             _webService.MapGetAndPost("/api/admin/cluster/primary/removeSecondary", _clusterApi.RemoveSecondaryNodeAsync);
-            _webService.MapGetAndPost("/api/admin/cluster/primary/deleteSecondary", _clusterApi.DeleteSecondaryNode);
-            _webService.MapGetAndPost("/api/admin/cluster/primary/updateSecondary", _clusterApi.UpdateSecondaryNode);
+            _webService.MapGetAndPost("/api/admin/cluster/primary/deleteSecondary", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.DeleteSecondaryNode));
+            _webService.MapGetAndPost("/api/admin/cluster/primary/updateSecondary", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.UpdateSecondaryNode));
             _webService.MapGetAndPost("/api/admin/cluster/primary/transferConfig", _clusterApi.TransferConfigAsync);
             _webService.MapGetAndPost("/api/admin/cluster/primary/setOptions", context => _settingsApi.WithConfigurationLockAsync(context, _clusterApi.SetClusterOptions));
             _webService.MapGetAndPost("/api/admin/cluster/initJoin", _clusterApi.InitializeAndJoinClusterAsync);
