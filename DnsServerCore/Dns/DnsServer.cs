@@ -146,13 +146,19 @@ namespace DnsServerCore.Dns
             ServerDomain = 32768,
             StatsInMemory = 65536,
             StatsRetention = 131072,
-            AppAutoUpdate = 262144
+            AppAutoUpdate = 262144,
+            Ipv6Mode = 524288,
+            UdpSocketPoolEnabled = 1048576
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
         {
             internal bool HasValues => CheckForUpdates.HasValue || UdpPayloadSize.HasValue || DnssecValidation.HasValue;
         }
+
+        internal readonly record struct OutboundSocketSettings(IPv6Mode? Ipv6Mode, bool? PoolEnabled);
+
+        internal static bool DefaultUdpSocketPoolEnabled => OperatingSystem.IsWindows();
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -664,14 +670,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -741,8 +747,13 @@ namespace DnsServerCore.Dns
 
         internal bool ManifestOwnsAppAutoUpdate => _managedDnsSettings.HasFlag(ManagedDnsSettings.AppAutoUpdate);
 
+        internal bool ManifestOwnsIpv6Mode => _managedDnsSettings.HasFlag(ManagedDnsSettings.Ipv6Mode);
+        internal bool ManifestOwnsUdpSocketPool => _managedDnsSettings.HasFlag(ManagedDnsSettings.UdpSocketPoolEnabled);
+        internal bool HasManagedOutboundSockets => ManifestOwnsIpv6Mode || ManifestOwnsUdpSocketPool;
+        private const ManagedDnsSettings OutboundSocketOwnership = ManagedDnsSettings.Ipv6Mode | ManagedDnsSettings.UdpSocketPoolEnabled;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate)) != 0;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership)) != 0;
         internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate;
 
         internal IEnumerable<string> GetManagedDnsPaths()
@@ -761,6 +772,10 @@ namespace DnsServerCore.Dns
                 yield return "/dns/udpPayloadSize";
             if (ManifestOwnsDnssecValidation)
                 yield return "/dns/dnssecValidation";
+            if (ManifestOwnsIpv6Mode)
+                yield return "/dns/ipv6Mode";
+            if (ManifestOwnsUdpSocketPool)
+                yield return "/dns/udpSocketPool/enabled";
             if (ManifestOwnsAppAutoUpdate)
                 yield return "/apps/autoUpdate";
             if (ManifestOwnsInMemoryStatistics)
@@ -947,6 +962,43 @@ namespace DnsServerCore.Dns
                 DnssecValidation = settings.DnssecValidation.Value;
         }
 
+        private void SetOutboundSocketSettings(OutboundSocketSettings settings)
+        {
+            IPv6Mode mode = settings.Ipv6Mode ?? _ipv6Mode;
+            bool pool = settings.PoolEnabled ?? _enableUdpSocketPool;
+            bool poolChanged = pool != _enableUdpSocketPool;
+            if (mode == _ipv6Mode && !poolChanged)
+                return;
+
+            _ipv6Mode = mode;
+            _enableUdpSocketPool = pool;
+            if (!pool && !poolChanged)
+                return;
+
+            ThreadPool.QueueUserWorkItem(delegate (object state)
+            {
+                try
+                {
+                    if (_enableUdpSocketPool)
+                        UdpClientConnection.CreateSocketPool(_ipv6Mode != IPv6Mode.Disabled);
+                    else if (poolChanged)
+                        UdpClientConnection.DisposeSocketPool();
+                }
+                catch (Exception ex)
+                {
+                    _log.Write(ex);
+                }
+            });
+        }
+
+        internal void CheckManifestOutboundSockets(OutboundSocketSettings settings)
+        {
+            if (ManifestOwnsIpv6Mode && settings.Ipv6Mode.HasValue && settings.Ipv6Mode != _ipv6Mode)
+                throw new DnsWebServiceException("/dns/ipv6Mode: Setting is managed by the configuration manifest.");
+            if (ManifestOwnsUdpSocketPool && settings.PoolEnabled.HasValue && settings.PoolEnabled != _enableUdpSocketPool)
+                throw new DnsWebServiceException("/dns/udpSocketPool/enabled: Setting is managed by the configuration manifest.");
+        }
+
         internal void CheckManifestAppAutoUpdate(bool enabled)
         {
             if (ManifestOwnsAppAutoUpdate && enabled != _dnsApplicationManager.EnableAutomaticUpdate)
@@ -961,6 +1013,11 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/statistics/retentionDays: Setting is managed by the configuration manifest.");
             if (settings.RetentionDays < 0)
                 throw new DnsWebServiceException("/statistics/retentionDays: Expected a non-negative number of days.");
+        }
+
+        internal static IPv6Mode ReadLegacyIpv6Mode(BinaryReader reader)
+        {
+            return reader.ReadBoolean() ? IPv6Mode.Preferred : IPv6Mode.Disabled;
         }
 
         internal static ushort[] ReadSocketPoolExcludedPorts(BinaryReader reader)
@@ -987,15 +1044,17 @@ namespace DnsServerCore.Dns
                     CheckManifestServerDomain(NormalizeServerDomain(serverDomain));
                 CheckManifestLocalEndPoints(endpoints);
             }
-            if (HasManagedClusterDnsSettings || (!isConfigTransfer && HasManagedSourceNetworks))
+            bool checkOutbound = !isConfigTransfer && HasManagedOutboundSockets;
+            if (HasManagedClusterDnsSettings || (!isConfigTransfer && HasManagedSourceNetworks) || checkOutbound)
             {
                 SourceNetworks source = ReadSourceNetworks(reader);
                 if (!isConfigTransfer && HasManagedSourceNetworks)
                     CheckManifestSourceNetworks(source);
-                if (!HasManagedClusterDnsSettings)
+                if (!HasManagedClusterDnsSettings && !checkOutbound)
                     return;
 
-                bool readUpdateChecks = ManifestOwnsUpdateChecks || HasManagedResolverProtocol || ManifestOwnsAppAutoUpdate;
+                bool readOutbound = HasManagedResolverProtocol || checkOutbound;
+                bool readUpdateChecks = ManifestOwnsUpdateChecks || readOutbound || ManifestOwnsAppAutoUpdate;
                 bool readNetworks = HasManagedAuthoritativeNetworks || readUpdateChecks;
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
                 if (HasManagedSoaTiming || ManifestOwnsResponsiblePerson || readNetworks)
@@ -1014,15 +1073,20 @@ namespace DnsServerCore.Dns
                     bool updateChecks = ReadUpdateChecks(reader, version);
                     ushort? payloadSize = null;
                     bool? dnssec = null;
-                    if (HasManagedResolverProtocol || ManifestOwnsAppAutoUpdate)
+                    if (readOutbound || ManifestOwnsAppAutoUpdate)
                         CheckManifestAppAutoUpdate(reader.ReadBoolean());
-                    if (HasManagedResolverProtocol)
+                    if (readOutbound)
                     {
-                        reader.ReadByte(); // IPv6 mode or preference
-                        reader.ReadBoolean(); // UDP socket pool enabled
-                        ReadSocketPoolExcludedPorts(reader);
-                        payloadSize = reader.ReadUInt16();
-                        dnssec = reader.ReadBoolean();
+                        IPv6Mode mode = version >= 3 ? (IPv6Mode)reader.ReadByte() : ReadLegacyIpv6Mode(reader);
+                        bool poolEnabled = reader.ReadBoolean();
+                        if (checkOutbound)
+                            CheckManifestOutboundSockets(new OutboundSocketSettings(mode, poolEnabled));
+                        if (HasManagedResolverProtocol)
+                        {
+                            ReadSocketPoolExcludedPorts(reader);
+                            payloadSize = reader.ReadUInt16();
+                            dnssec = reader.ReadBoolean();
+                        }
                     }
                     CheckManifestResolverSettings(new ResolverSettings(updateChecks, payloadSize, dnssec));
                 }
@@ -1572,7 +1636,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -1611,8 +1675,8 @@ namespace DnsServerCore.Dns
             bW.Write(_enableCheckForUpdate);
             bW.Write(appAutoUpdate ?? _dnsApplicationManager.EnableAutomaticUpdate);
 
-            bW.Write((byte)_ipv6Mode);
-            bW.Write(_enableUdpSocketPool);
+            bW.Write((byte)(outbound.Ipv6Mode ?? _ipv6Mode));
+            bW.Write(outbound.PoolEnabled ?? _enableUdpSocketPool);
 
             ushort[] socketPoolExcludedPorts = UdpClientConnection.SocketPoolExcludedPorts;
             if (socketPoolExcludedPorts is null)
@@ -7364,7 +7428,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7423,6 +7487,13 @@ namespace DnsServerCore.Dns
                     if (appAutoUpdate.HasValue)
                         ownership |= ManagedDnsSettings.AppAutoUpdate;
 
+                    if (outbound.Ipv6Mode.HasValue)
+                        ownership |= ManagedDnsSettings.Ipv6Mode;
+                    if (outbound.PoolEnabled.HasValue)
+                        ownership |= ManagedDnsSettings.UdpSocketPoolEnabled;
+
+                    bool ipv6Changed = outbound.Ipv6Mode.HasValue && outbound.Ipv6Mode != _ipv6Mode;
+                    bool poolChanged = outbound.PoolEnabled.HasValue && outbound.PoolEnabled != _enableUdpSocketPool;
                     bool appAutoUpdateChanged = appAutoUpdate.HasValue && appAutoUpdate != _dnsApplicationManager.EnableAutomaticUpdate;
                     bool inMemoryChanged = statistics.InMemory.HasValue && statistics.InMemory != _statsManager.EnableInMemoryStats;
                     bool retentionChanged = statistics.RetentionDays.HasValue && statistics.RetentionDays != _statsManager.MaxStatFileDays;
@@ -7445,7 +7516,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7459,7 +7530,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound));
                         _pendingSave = false;
                     }
                     catch
@@ -7471,6 +7542,8 @@ namespace DnsServerCore.Dns
                         SetSourceNetworks(previousSourceNetworks);
                         throw;
                     }
+
+                    SetOutboundSocketSettings(outbound);
 
                     if (appAutoUpdateChanged)
                         _dnsApplicationManager.EnableAutomaticUpdate = appAutoUpdate.Value;
@@ -7625,55 +7698,13 @@ namespace DnsServerCore.Dns
         public IPv6Mode IPv6Mode
         {
             get { return _ipv6Mode; }
-            set
-            {
-                if (_ipv6Mode != value)
-                {
-                    _ipv6Mode = value;
-
-                    //init udp socket pool async for port randomization
-                    ThreadPool.QueueUserWorkItem(delegate (object state)
-                    {
-                        try
-                        {
-                            if (_enableUdpSocketPool)
-                                UdpClientConnection.CreateSocketPool(_ipv6Mode != IPv6Mode.Disabled);
-                        }
-                        catch (Exception ex)
-                        {
-                            _log.Write(ex);
-                        }
-                    });
-                }
-            }
+            set { SetOutboundSocketSettings(new OutboundSocketSettings(value, null)); }
         }
 
         public bool EnableUdpSocketPool
         {
             get { return _enableUdpSocketPool; }
-            set
-            {
-                if (_enableUdpSocketPool != value)
-                {
-                    _enableUdpSocketPool = value;
-
-                    //init udp socket pool async for port randomization
-                    ThreadPool.QueueUserWorkItem(delegate (object state)
-                    {
-                        try
-                        {
-                            if (_enableUdpSocketPool)
-                                UdpClientConnection.CreateSocketPool(_ipv6Mode != IPv6Mode.Disabled);
-                            else
-                                UdpClientConnection.DisposeSocketPool();
-                        }
-                        catch (Exception ex)
-                        {
-                            _log.Write(ex);
-                        }
-                    });
-                }
-            }
+            set { SetOutboundSocketSettings(new OutboundSocketSettings(null, value)); }
         }
 
         public ushort UdpPayloadSize

@@ -917,6 +917,15 @@ namespace DnsServerCore
                     hasUpdateChecks ? dnsServerEnableCheckForUpdate : null, hasUdpPayload ? udpPayloadSize : null,
                     hasDnssecValidation ? dnssecValidation : null));
 
+                IPv6Mode? requestedIpv6Mode = null;
+                if (request.TryGetQueryOrFormEnum("ipv6Mode", out IPv6Mode ipv6Mode))
+                    requestedIpv6Mode = ipv6Mode;
+                else if (request.TryGetQueryOrForm("preferIPv6", bool.Parse, out bool preferIPv6))
+                    requestedIpv6Mode = preferIPv6 ? IPv6Mode.Preferred : IPv6Mode.Disabled;
+                bool hasUdpPool = request.TryGetQueryOrForm("enableUdpSocketPool", bool.Parse, out bool enableUdpSocketPool);
+                _dnsWebService._dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(
+                    requestedIpv6Mode, hasUdpPool ? enableUdpSocketPool : null));
+
                 bool hasAppAutoUpdate = request.TryGetQueryOrForm("dnsAppsEnableAutomaticUpdate", bool.Parse, out bool dnsAppsEnableAutomaticUpdate);
                 if (hasAppAutoUpdate)
                     _dnsWebService._dnsServer.CheckManifestAppAutoUpdate(dnsAppsEnableAutomaticUpdate);
@@ -989,12 +998,10 @@ namespace DnsServerCore
                             clusterParameters.Add("dnsAppsEnableAutomaticUpdate", dnsAppsEnableAutomaticUpdate.ToString());
                         }
 
-                        if (request.TryGetQueryOrFormEnum("ipv6Mode", out IPv6Mode ipv6Mode))
-                            _dnsWebService._dnsServer.IPv6Mode = ipv6Mode;
-                        else if (request.TryGetQueryOrForm("preferIPv6", bool.Parse, out bool preferIPv6))
-                            _dnsWebService._dnsServer.IPv6Mode = preferIPv6 ? IPv6Mode.Preferred : IPv6Mode.Disabled;
+                        if (requestedIpv6Mode.HasValue && !_dnsWebService._dnsServer.ManifestOwnsIpv6Mode)
+                            _dnsWebService._dnsServer.IPv6Mode = requestedIpv6Mode.Value;
 
-                        if (request.TryGetQueryOrForm("enableUdpSocketPool", bool.Parse, out bool enableUdpSocketPool))
+                        if (hasUdpPool && !_dnsWebService._dnsServer.ManifestOwnsUdpSocketPool)
                             _dnsWebService._dnsServer.EnableUdpSocketPool = enableUdpSocketPool;
 
                         if (request.TryQueryOrFormArray("socketPoolExcludedPorts", ushort.Parse, out ushort[] socketPoolExcludedPorts))

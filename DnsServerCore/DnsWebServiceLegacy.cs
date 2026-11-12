@@ -235,7 +235,9 @@ namespace DnsServerCore
                     if (!isConfigTransfer && _dnsServer.ManifestOwnsServerDomain)
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
-                    bool readAppAutoUpdate = _dnsServer.HasManagedResolverProtocol || _dnsServer.ManifestOwnsAppAutoUpdate;
+                    bool checkOutbound = !isConfigTransfer && _dnsServer.HasManagedOutboundSockets;
+                    bool readOutbound = _dnsServer.HasManagedResolverProtocol || checkOutbound;
+                    bool readAppAutoUpdate = readOutbound || _dnsServer.ManifestOwnsAppAutoUpdate;
                     if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks || readAppAutoUpdate)
                     {
                         var (ipv4, ipv6, recordTtl) = ReadLegacyDnsDefaults(reader, version);
@@ -261,15 +263,18 @@ namespace DnsServerCore
                         _dnsServer.CheckManifestAuthoritativeDefaults(defaults);
                         if (readAppAutoUpdate)
                             _dnsServer.CheckManifestAppAutoUpdate(reader.ReadBoolean());
-                        if (_dnsServer.HasManagedResolverProtocol)
+                        if (readOutbound)
                         {
-                            reader.ReadBoolean(); // IPv6 preference
-                            if (version >= 42)
+                            IPv6Mode ipv6Mode = DnsServer.ReadLegacyIpv6Mode(reader);
+                            bool pool = version >= 42 ? reader.ReadBoolean() : DnsServer.DefaultUdpSocketPoolEnabled;
+                            if (checkOutbound)
+                                _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(ipv6Mode, pool));
+                            if (_dnsServer.HasManagedResolverProtocol)
                             {
-                                reader.ReadBoolean(); // UDP socket pool enabled
-                                DnsServer.ReadSocketPoolExcludedPorts(reader);
+                                if (version >= 42)
+                                    DnsServer.ReadSocketPoolExcludedPorts(reader);
+                                _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null, reader.ReadUInt16(), reader.ReadBoolean()));
                             }
-                            _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null, reader.ReadUInt16(), reader.ReadBoolean()));
                         }
                     }
                     return;
@@ -298,6 +303,12 @@ namespace DnsServerCore
                     if (version >= 26 && _dnsServer.ManifestOwnsDnssecValidation)
                         throw new InvalidDataException("/dns/dnssecValidation: Cannot verify DNSSEC validation in this backup format.");
 
+                    if (!isConfigTransfer)
+                    {
+                        if (_dnsServer.ManifestOwnsIpv6Mode)
+                            throw new InvalidDataException("/dns/ipv6Mode: Cannot verify IPv6 mode in this combined backup format.");
+                        _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(null, DnsServer.DefaultUdpSocketPoolEnabled));
+                    }
                     _dnsServer.CheckManifestAppAutoUpdate(true);
                     _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null,
                         version < 25 ? DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE : null, version < 26 ? true : null));

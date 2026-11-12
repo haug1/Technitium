@@ -423,6 +423,49 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task OutboundSocketSettingsPersistAndRejectConflictingRestore()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?ipv6Mode=Disabled&enableUdpSocketPool=false", server.AdminToken));
+            await server.RestartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """{"schemaVersion":1,"dns":{"ipv6Mode":"Enabled","udpSocketPool":{"enabled":false}}}""";
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal("/dns/ipv6Mode", Assert.Single(preview.GetProperty("changes").EnumerateArray()).GetProperty("path").GetString());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal("Enabled", settings.GetProperty("ipv6Mode").GetString());
+            Assert.False(settings.GetProperty("enableUdpSocketPool").GetBoolean());
+            Assert.Equal(2, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            JsonNode export = ConfigurationPlan.Export(settings, includePreviewOnly: false);
+            Assert.Equal("Enabled", export["dns"]!["ipv6Mode"]!.GetValue<string>());
+            Assert.False(export["dns"]!["udpSocketPool"]!["enabled"]!.GetValue<bool>());
+
+            JsonElement aliasEdit = await server.CallAsync("settings/set?preferIPv6=true", server.AdminToken);
+            Assert.Equal("error", aliasEdit.GetProperty("status").GetString());
+            Assert.Contains("/dns/ipv6Mode", aliasEdit.GetProperty("errorMessage").GetString());
+            JsonElement poolEdit = await server.CallAsync("settings/set?enableUdpSocketPool=true", server.AdminToken);
+            Assert.Equal("error", poolEdit.GetProperty("status").GetString());
+            Assert.Contains("/dns/udpSocketPool/enabled", poolEdit.GetProperty("errorMessage").GetString());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?ipv6Mode=Enabled&preferIPv6=true", server.AdminToken));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/ipv6Mode", restored.GetProperty("errorMessage").GetString());
+            Assert.Equal("Enabled", (await server.GetSettingsAsync()).GetProperty("ipv6Mode").GetString());
+        }
+
+        [Fact]
         public async Task AppAutoUpdateAppliesAndRejectsConflictingBackup()
         {
             await using var server = await LoopbackWebService.StartAsync();

@@ -56,6 +56,8 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/notifyAllowedNetworks"] = Field("notifyAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
+            ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
+            ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
             ["/dns/udpPayloadSize"] = Field("udpPayloadSize", 1232, canApply: true),
             [WebAddressesPath] = Field("webServiceLocalAddresses", Array.Empty<string>(), restartWebService: true, canApply: true),
             ["/web/httpPort"] = Field("webServiceHttpPort", 5380, restartWebService: true, canApply: true),
@@ -153,7 +155,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -265,6 +267,20 @@ namespace DnsServerCore.Configuration
             int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
                 ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
             return new DnsServer.StatisticsSettings(inMemory, retention);
+        }
+
+        private static DnsServer.OutboundSocketSettings GetOutboundSocketSettings(ConfigurationManifest manifest)
+        {
+            if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns))
+                return default;
+
+            IPv6Mode? ipv6 = dns.TryGetProperty("ipv6Mode", out JsonElement mode)
+                ? mode.ValueKind == JsonValueKind.Null ? IPv6Mode.Disabled : Enum.Parse<IPv6Mode>(mode.GetString())
+                : null;
+            bool? pool = dns.TryGetProperty("udpSocketPool", out JsonElement socketPool) && socketPool.TryGetProperty("enabled", out JsonElement enabled)
+                ? enabled.ValueKind == JsonValueKind.Null ? DnsServer.DefaultUdpSocketPoolEnabled : enabled.GetBoolean()
+                : null;
+            return new DnsServer.OutboundSocketSettings(ipv6, pool);
         }
 
         private static bool? GetAppAutoUpdate(ConfigurationManifest manifest)
