@@ -499,6 +499,11 @@ namespace DnsServerCore.Configuration
             ValidateSocket(candidate.HttpSocketEnabled, candidate.HttpSocketPath, current.HttpSocketEnabled, current.HttpSocketPath, "http");
             ValidateSocket(candidate.HttpsSocketEnabled, candidate.HttpsSocketPath, current.HttpsSocketEnabled, current.HttpsSocketPath, "https");
 
+            if (candidate.HttpsEnabled.HasValue || candidate.Http3Enabled.HasValue)
+                ConfigurationManifest.ValidateDnsHttp3Dependency(
+                    (candidate.HttpsEnabled ?? current.HttpsEnabled) == true,
+                    (candidate.Http3Enabled ?? current.Http3Enabled) == true);
+
             if (candidate.QuicEnabled == true || candidate.Http3Enabled == true)
             {
                 try
@@ -509,12 +514,6 @@ namespace DnsServerCore.Configuration
                 {
                     throw new InvalidDataException("/dns/listeners: QUIC is unavailable on this host.");
                 }
-            }
-
-            if (candidate.Http3Enabled == true || (candidate.HttpsEnabled.HasValue && (candidate.Http3Enabled ?? current.Http3Enabled) == true))
-            {
-                if ((candidate.HttpsEnabled ?? current.HttpsEnabled) != true)
-                    throw new InvalidDataException("/dns/listeners/https/http3Enabled: DNS-over-HTTPS must be enabled.");
             }
 
             if (!hasCertificate && (candidate.TlsEnabled == true || candidate.HttpsEnabled == true ||

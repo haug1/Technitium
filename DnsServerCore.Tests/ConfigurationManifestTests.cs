@@ -50,6 +50,8 @@ namespace DnsServerCore.Tests
         [InlineData("""{"schemaVersion":1,"dns":{"tuning":{"clientTimeoutMs":999}}}""", "/dns/tuning/clientTimeoutMs", "outside the supported range")]
         [InlineData("""{"schemaVersion":1,"web":{"tlsEnabled":false,"http3Enabled":true}}""", "/web/http3Enabled", "requires web TLS")]
         [InlineData("""{"schemaVersion":1,"web":{"tlsEnabled":null,"redirectHttpToTls":true}}""", "/web/redirectHttpToTls", "requires web TLS")]
+        [InlineData("""{"schemaVersion":1,"dns":{"listeners":{"https":{"enabled":null,"http3Enabled":true}}}}""",
+            "/dns/listeners/https/http3Enabled", "DNS-over-HTTPS must be enabled")]
         public void RejectsInvalidManifestsWithFieldDiagnostics(string json, string field, string diagnostic)
         {
             string path = WriteManifest(json);
@@ -58,6 +60,13 @@ namespace DnsServerCore.Tests
 
             Assert.Contains(field, error.Message);
             Assert.Contains(diagnostic, error.Message);
+        }
+
+        [Fact]
+        public void DnsHttp3MayDependOnAnExistingHttpsListener()
+        {
+            string path = WriteManifest("""{"schemaVersion":1,"dns":{"listeners":{"https":{"http3Enabled":true}}}}""");
+            ConfigurationManifest.Load(path).ValidateReferences();
         }
 
         [Fact]

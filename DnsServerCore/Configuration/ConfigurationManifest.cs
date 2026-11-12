@@ -126,6 +126,10 @@ namespace DnsServerCore.Configuration
                         ReadNetworkAcl(acl, "/dns/listeners/reverseProxyAcl");
                     if (listeners.TryGetProperty("http", out JsonElement http) && http.TryGetProperty("realIpHeader", out JsonElement header))
                         ReadDnsRealIpHeader(header);
+                    if (listeners.TryGetProperty("https", out JsonElement https) &&
+                        https.TryGetProperty("enabled", out JsonElement httpsEnabled) &&
+                        https.TryGetProperty("http3Enabled", out JsonElement http3Enabled))
+                        ValidateDnsHttp3Dependency(httpsEnabled.ValueKind == JsonValueKind.True, http3Enabled.ValueKind == JsonValueKind.True);
                 }
                 if (dns.TryGetProperty("clientSubnet", out JsonElement clientSubnet))
                 {
@@ -198,6 +202,12 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/web/http3Enabled: HTTP/3 requires web TLS.");
             if (redirectToTls)
                 throw new InvalidDataException("/web/redirectHttpToTls: Redirecting HTTP to HTTPS requires web TLS.");
+        }
+
+        internal static void ValidateDnsHttp3Dependency(bool httpsEnabled, bool http3Enabled)
+        {
+            if (http3Enabled && !httpsEnabled)
+                throw new InvalidDataException("/dns/listeners/https/http3Enabled: DNS-over-HTTPS must be enabled.");
         }
 
         internal string GetServerDomain()
