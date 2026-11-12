@@ -97,7 +97,10 @@ namespace DnsServerCore.Configuration
                 if (section.Name is "schemaVersion" or "$schema")
                     continue;
 
-                Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log);
+                if (section.Name == "zones" && currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
+                    CompareZones(section.Value, zones, changes);
+                else
+                    Compare(section.Value, AppendPath("", section.Name), currentSettings, changes, log);
             }
 
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
@@ -121,6 +124,8 @@ namespace DnsServerCore.Configuration
                     clusterDomain.WriteTo(writer);
                 if (currentSettings.TryGetProperty("managedSettings", out JsonElement ownership))
                     ownership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestZones", out JsonElement zones))
+                    zones.WriteTo(writer);
                 writer.WriteEndArray();
             }
 
@@ -384,6 +389,55 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException($"{path}: The server did not return the current setting.");
 
             return value;
+        }
+
+        private static void CompareZones(JsonElement declaredZones, JsonElement currentZones, List<ConfigurationChange> changes)
+        {
+            foreach (JsonProperty declaration in declaredZones.EnumerateObject())
+            {
+                string path = AppendPath("/zones", declaration.Name);
+                string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, path, allowRoot: true);
+                bool exists = currentZones.TryGetProperty(name, out JsonElement current) && current.ValueKind == JsonValueKind.Object;
+                if (declaration.Value.ValueKind == JsonValueKind.Null)
+                {
+                    if (exists)
+                    {
+                        if (current.GetProperty("clusterProtected").GetBoolean())
+                            throw new InvalidDataException($"{path}: A cluster infrastructure zone cannot be deleted.");
+                        changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Remove, false));
+                    }
+                    continue;
+                }
+
+                foreach (JsonProperty field in declaration.Value.EnumerateObject())
+                {
+                    if (field.Name is not ("type" or "enabled"))
+                        throw new InvalidDataException($"{AppendPath(path, field.Name)}: Planning for this zone setting is not implemented.");
+                }
+
+                string type = declaration.Value.TryGetProperty("type", out JsonElement declaredType) ? declaredType.GetString() : null;
+                if (!exists)
+                {
+                    if (type is null)
+                        throw new InvalidDataException($"{path}/type: A zone type is required to create a zone.");
+                    if (type != "Primary")
+                        throw new InvalidDataException($"{path}/type: Preview of creation is currently supported for primary zones.");
+                    changes.Add(new ConfigurationChange(path, ConfigurationChangeKind.Add, false));
+                    continue;
+                }
+
+                if (type is not null && !current.GetProperty("type").ValueEquals(type))
+                    throw new InvalidDataException($"{path}/type: The declared type differs from the existing zone type.");
+
+                if (declaration.Value.TryGetProperty("enabled", out JsonElement enabled))
+                {
+                    bool effectiveEnabled = enabled.ValueKind == JsonValueKind.Null || enabled.GetBoolean();
+                    if (!effectiveEnabled && current.GetProperty("clusterProtected").GetBoolean())
+                        throw new InvalidDataException($"{path}/enabled: A cluster infrastructure zone cannot be disabled.");
+                    if (effectiveEnabled != current.GetProperty("enabled").GetBoolean())
+                        changes.Add(new ConfigurationChange(path + "/enabled", ConfigurationChangeKind.Update, false));
+                }
+            }
         }
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log)

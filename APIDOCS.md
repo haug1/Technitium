@@ -5295,7 +5295,7 @@ RESPONSE:
 
 Send a versioned manifest as the JSON body of `POST /api/settings/config/plan`. Authenticate with a bearer token that has Settings view permission.
 
-The response contains a `revision` and a `changes` array. Each change contains a manifest `path` as a JSON Pointer, a `kind` of `Add`, `Update`, or `Remove`, and the `restartWebService` and `restartDnsService` booleans. The revision identifies the manifest and settings snapshot on the current server process. The operation reads the snapshot and leaves settings untouched. An optional `warnings` array identifies legacy environment settings overridden by the manifest.
+The response contains a `revision` and a `changes` array. Each change contains a manifest `path` as a JSON Pointer, a `kind` of `Add`, `Update`, or `Remove`, and the `restartWebService` and `restartDnsService` booleans. The revision identifies the manifest and settings snapshot on the current server process. The operation reads the snapshot and leaves settings untouched. An optional `warnings` array identifies legacy environment settings overridden by the manifest. Zone previews also require Zones view permission and access to the declared existing zones.
 
 ### Apply Declarative Configuration
 

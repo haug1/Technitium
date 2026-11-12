@@ -936,6 +936,40 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZonePreviewTracksCreationDeletionAndEnabledStateWithoutMutatingZones()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=update.test&type=Primary", server.AdminToken));
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=remove.test&type=Primary", server.AdminToken));
+
+            const string manifest = """
+                {"schemaVersion":1,"zones":{"ADD.TEST.":{"type":"Primary"},"update.test":{"enabled":false},"remove.test":null}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => AssertChange(change, "/zones/ADD.TEST.", "Add"),
+                change => AssertChange(change, "/zones/remove.test", "Remove"),
+                change => AssertChange(change, "/zones/update.test/enabled", "Update"));
+
+            JsonElement repeated = await PreviewAsync(server, manifest);
+            Assert.Equal(preview.GetProperty("revision").GetString(), repeated.GetProperty("revision").GetString());
+            Assert.True(JsonElement.DeepEquals(preview.GetProperty("changes"), repeated.GetProperty("changes")));
+
+            LoopbackWebService.AssertOk(await server.CallAsync("zones/create?zone=add.test&type=Primary", server.AdminToken));
+            JsonElement after = await PreviewAsync(server, manifest);
+            Assert.NotEqual(preview.GetProperty("revision").GetString(), after.GetProperty("revision").GetString());
+            Assert.Collection(after.GetProperty("changes").EnumerateArray(),
+                change => AssertChange(change, "/zones/remove.test", "Remove"),
+                change => AssertChange(change, "/zones/update.test/enabled", "Update"));
+
+            static void AssertChange(JsonElement change, string path, string kind)
+            {
+                Assert.Equal(path, change.GetProperty("path").GetString());
+                Assert.Equal(kind, change.GetProperty("kind").GetString());
+            }
+        }
+
+        [Fact]
         public async Task FailedDnsBindRestoresPreviousServiceAndLeavesLoggingUnchanged()
         {
             await using var server = await LoopbackWebService.StartAsync();

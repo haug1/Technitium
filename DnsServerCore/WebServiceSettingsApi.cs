@@ -22,6 +22,7 @@ using DnsServerCore.Cluster;
 using DnsServerCore.Configuration;
 using DnsServerCore.Dns;
 using DnsServerCore.Dns.ZoneManagers;
+using DnsServerCore.Dns.Zones;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Collections.Generic;
@@ -541,7 +542,7 @@ namespace DnsServerCore
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
                     _dnsWebService.ValidateManifestWebListeners(ConfigurationPlan.GetWebListeners(manifest));
-                    using JsonDocument current = CaptureConfigurationSnapshot();
+                    using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser);
                     var changes = ConfigurationPlan.Create(manifest, current.RootElement, _dnsWebService._log);
                     string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
 
@@ -588,8 +589,8 @@ namespace DnsServerCore
                 try
                 {
                     ConfigurationManifest manifest = await ConfigurationManifest.ReadAsync(context.Request.Body, context.RequestAborted);
-                    CheckApplyRevision(manifest, expected);
                     ConfigurationPlan.CheckApplySupport(manifest);
+                    CheckApplyRevision(manifest, expected);
                     ConfigurationPlan.CheckClusterApplySupport(manifest, _dnsWebService._clusterManager.ClusterInitialized);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners);
@@ -713,18 +714,48 @@ namespace DnsServerCore
                 }
             }
 
-            private JsonDocument CaptureConfigurationSnapshot()
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer);
+                    if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
+                        WriteManifestZoneSnapshot(writer, zones, sessionUser);
                     writer.WriteEndObject();
                 }
 
                 snapshot.Position = 0;
                 return JsonDocument.Parse(snapshot);
+            }
+
+            private void WriteManifestZoneSnapshot(Utf8JsonWriter writer, JsonElement zones, User sessionUser)
+            {
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
+                    throw new DnsWebServiceException("Access was denied.");
+
+                writer.WriteStartObject("manifestZones");
+                foreach (JsonProperty declaration in zones.EnumerateObject())
+                {
+                    string name = ConfigurationManifest.CanonicalDnsName(declaration.Name, "/zones", allowRoot: true);
+                    AuthZoneInfo zone = _dnsWebService._dnsServer.AuthZoneManager.GetAuthZoneInfo(name);
+                    if (zone is null)
+                    {
+                        writer.WriteNull(name);
+                        continue;
+                    }
+                    if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zone.Name, sessionUser, PermissionFlag.View))
+                        throw new DnsWebServiceException("Access was denied.");
+
+                    writer.WriteStartObject(name);
+                    writer.WriteString("type", zone.Type.ToString());
+                    writer.WriteBoolean("enabled", !zone.Disabled);
+                    writer.WriteBoolean("clusterProtected", _dnsWebService._clusterManager.ClusterInitialized &&
+                        (_dnsWebService._clusterManager.IsClusterPrimaryZone(name) || _dnsWebService._clusterManager.IsClusterCatalogZone(name)));
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndObject();
             }
 
             private static (LoggingType? Destination, bool? NoStackTrace, int? RetentionDays, bool? UseLocalTime) ReadLoggingFields(HttpRequest request)

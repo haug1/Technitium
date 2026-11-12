@@ -449,7 +449,7 @@ namespace DnsServerCore.Configuration
             }
         }
 
-        private static string CanonicalDnsName(string value, string path, bool allowRoot)
+        internal static string CanonicalDnsName(string value, string path, bool allowRoot)
         {
             string name = value.TrimEnd('.');
             try
