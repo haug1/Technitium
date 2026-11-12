@@ -205,26 +205,27 @@ namespace DnsServerCore
                 version >= 40 ? reader.ReadUInt32() : 300u, version >= 40 ? reader.ReadUInt32() : 300u);
         }
 
-        private void CheckRestoreManifestDnsSettings(Stream stream, bool isConfigTransfer = false)
+        private bool CheckRestoreManifestDnsSettings(Stream stream, bool isConfigTransfer = false)
         {
-            if (!isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention))
-                throw new InvalidDataException("/statistics: Release statistics ownership before restoring DNS settings from a backup.");
-
-            if (!isConfigTransfer && _dnsServer.ManifestOwnsResolverLogging)
-                throw new InvalidDataException("/logging/ignoreResolverLogs: Release resolver logging ownership before restoring DNS settings from a backup.");
-            if (!isConfigTransfer && _dnsServer.ManifestOwnsQueryLogging)
-                throw new InvalidDataException("/logging/logQueries: Release query logging ownership before restoring DNS settings from a backup.");
-
             var reader = new BinaryReader(stream);
             string format = Encoding.ASCII.GetString(stream.ReadExactly(2));
             if (format == "DC")
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
-                return;
+                return !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
+                    _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging);
             }
 
             if (format == "DS")
             {
+                if (!isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention))
+                    throw new InvalidDataException("/statistics: Release statistics ownership before restoring this combined DNS backup format.");
+
+                if (!isConfigTransfer && _dnsServer.ManifestOwnsResolverLogging)
+                    throw new InvalidDataException("/logging/ignoreResolverLogs: Release resolver logging ownership before restoring this combined DNS backup format.");
+                if (!isConfigTransfer && _dnsServer.ManifestOwnsQueryLogging)
+                    throw new InvalidDataException("/logging/logQueries: Release query logging ownership before restoring this combined DNS backup format.");
+
                 if (_dnsServer.BlockListZoneManager.ManifestOwnsSources)
                     throw new InvalidDataException("/blocklists/sources: Cannot verify the source list in this combined backup format.");
                 if (_dnsServer.BlockListZoneManager.ManifestOwnsUpdateInterval)
@@ -288,7 +289,7 @@ namespace DnsServerCore
                             }
                         }
                     }
-                    return;
+                    return false;
                 }
 
                 if (version is >= 2 and <= 27)
@@ -328,7 +329,7 @@ namespace DnsServerCore
                         version < 25 ? DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE : null, version < 26 ? true : null));
                     _dnsServer.CheckManifestAuthoritativeDefaults(new DnsServer.AuthoritativeDefaults(
                         version < 23 ? 3600u : null, null, null, false, 300, 300, "", [], []));
-                    return;
+                    return false;
                 }
             }
 

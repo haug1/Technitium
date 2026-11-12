@@ -1227,7 +1227,12 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false)
+        internal void CheckRestoreManifestLocalDnsSettings(Stream stream)
+        {
+            ReadConfigFrom(stream, isConfigTransfer: false, apply: false);
+        }
+
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, bool readOwnership = false, bool apply = true)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "DC")
                 throw new InvalidDataException("DNS Server config file format is invalid.");
@@ -1237,7 +1242,7 @@ namespace DnsServerCore.Dns
 
             //general
             string serverDomain = s.ReadShortString();
-            if (!isConfigTransfer && (readOwnership || !ManifestOwnsServerDomain))
+            if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsServerDomain))
             {
                 try
                 {
@@ -1251,61 +1256,71 @@ namespace DnsServerCore.Dns
             }
 
             IReadOnlyList<IPEndPoint> localEndPoints = ReadLocalEndPoints(bR);
-            if (!isConfigTransfer && (readOwnership || !ManifestOwnsLocalEndPoints))
+            if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsLocalEndPoints))
                 _localEndPoints = localEndPoints;
 
             SourceNetworks sourceNetworks = ReadSourceNetworks(bR);
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 SetSourceNetworks(sourceNetworks);
 
             AuthoritativeDefaults defaults = ReadAuthoritativeTtls(bR, version);
 
             string rp = s.ReadShortString();
-            if (rp.Length == 0)
-                _defaultResponsiblePerson = null;
-            else
-                _defaultResponsiblePerson = new MailAddress(rp);
+            if (apply)
+                _defaultResponsiblePerson = rp.Length == 0 ? null : new MailAddress(rp);
 
-            defaults = ReadSoaTiming(bR, defaults);
-            SetAuthoritativeDefaults(ReadAuthoritativeNetworks(bR, defaults));
+            defaults = ReadAuthoritativeNetworks(bR, ReadSoaTiming(bR, defaults));
+            if (apply)
+                SetAuthoritativeDefaults(defaults);
 
-            _enableCheckForUpdate = ReadUpdateChecks(bR, version);
+            bool enableCheckForUpdate = ReadUpdateChecks(bR, version);
+            if (apply)
+                _enableCheckForUpdate = enableCheckForUpdate;
 
-            _dnsApplicationManager.EnableAutomaticUpdate = bR.ReadBoolean();
+            bool enableAppUpdates = bR.ReadBoolean();
+            if (apply)
+                _dnsApplicationManager.EnableAutomaticUpdate = enableAppUpdates;
 
             if (version >= 3)
             {
                 IPv6Mode ipv6Mode = (IPv6Mode)bR.ReadByte();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _ipv6Mode = ipv6Mode;
             }
             else
             {
                 bool preferIPv6 = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _ipv6Mode = preferIPv6 ? IPv6Mode.Preferred : IPv6Mode.Disabled;
             }
 
             {
                 bool enableUdpSocketPool = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableUdpSocketPool = enableUdpSocketPool;
 
                 ushort[] socketPoolExcludedPorts = ReadSocketPoolExcludedPorts(bR);
 
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     UdpClientConnection.SocketPoolExcludedPorts = socketPoolExcludedPorts;
             }
 
-            _udpPayloadSize = bR.ReadUInt16();
-            _dnssecValidation = bR.ReadBoolean();
+            ushort udpPayloadSize = bR.ReadUInt16();
+            if (apply)
+                _udpPayloadSize = udpPayloadSize;
+            bool dnssecValidation = bR.ReadBoolean();
+            if (apply)
+                _dnssecValidation = dnssecValidation;
 
             ClientSubnetSettings subnet = ReadClientSubnetSettings(bR);
-            _eDnsClientSubnet = subnet.Enabled.Value;
-            _eDnsClientSubnetIPv4PrefixLength = subnet.Ipv4Prefix.Value;
-            _eDnsClientSubnetIPv6PrefixLength = subnet.Ipv6Prefix.Value;
-            _eDnsClientSubnetIpv4Override = subnet.Ipv4Override;
-            _eDnsClientSubnetIpv6Override = subnet.Ipv6Override;
+            if (apply)
+            {
+                _eDnsClientSubnet = subnet.Enabled.Value;
+                _eDnsClientSubnetIPv4PrefixLength = subnet.Ipv4Prefix.Value;
+                _eDnsClientSubnetIPv6PrefixLength = subnet.Ipv6Prefix.Value;
+                _eDnsClientSubnetIpv4Override = subnet.Ipv4Override;
+                _eDnsClientSubnetIpv6Override = subnet.Ipv6Override;
+            }
 
             {
                 int count = bR.ReadByte();
@@ -1314,7 +1329,8 @@ namespace DnsServerCore.Dns
                 for (int i = 0; i < count; i++)
                     qpmPrefixLimitsIPv4.Add(bR.ReadInt32(), (bR.ReadInt32(), bR.ReadInt32()));
 
-                _qpmPrefixLimitsIPv4 = qpmPrefixLimitsIPv4;
+                if (apply)
+                    _qpmPrefixLimitsIPv4 = qpmPrefixLimitsIPv4;
             }
 
             {
@@ -1324,65 +1340,83 @@ namespace DnsServerCore.Dns
                 for (int i = 0; i < count; i++)
                     qpmPrefixLimitsIPv6.Add(bR.ReadInt32(), (bR.ReadInt32(), bR.ReadInt32()));
 
-                _qpmPrefixLimitsIPv6 = qpmPrefixLimitsIPv6;
+                if (apply)
+                    _qpmPrefixLimitsIPv6 = qpmPrefixLimitsIPv6;
             }
 
-            _qpmLimitSampleMinutes = bR.ReadInt32();
-            _qpmLimitUdpTruncationPercentage = bR.ReadInt32();
+            int qpmSampleMinutes = bR.ReadInt32();
+            if (apply)
+                _qpmLimitSampleMinutes = qpmSampleMinutes;
+            int qpmTruncationPercentage = bR.ReadInt32();
+            if (apply)
+                _qpmLimitUdpTruncationPercentage = qpmTruncationPercentage;
 
-            _qpmLimitBypassList = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
+            var qpmBypassList = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
+            if (apply)
+                _qpmLimitBypassList = qpmBypassList;
 
-            _clientTimeout = bR.ReadInt32();
-            _tcpSendTimeout = bR.ReadInt32();
-            _tcpReceiveTimeout = bR.ReadInt32();
-            _quicIdleTimeout = bR.ReadInt32();
-            _quicMaxInboundStreams = bR.ReadInt32();
-            _listenBacklog = bR.ReadInt32();
+            int clientTimeout = bR.ReadInt32();
+            if (apply)
+                _clientTimeout = clientTimeout;
+            int tcpSendTimeout = bR.ReadInt32();
+            if (apply)
+                _tcpSendTimeout = tcpSendTimeout;
+            int tcpReceiveTimeout = bR.ReadInt32();
+            if (apply)
+                _tcpReceiveTimeout = tcpReceiveTimeout;
+            int quicIdleTimeout = bR.ReadInt32();
+            if (apply)
+                _quicIdleTimeout = quicIdleTimeout;
+            int quicMaxInboundStreams = bR.ReadInt32();
+            if (apply)
+                _quicMaxInboundStreams = quicMaxInboundStreams;
+            int listenBacklog = bR.ReadInt32();
+            if (apply)
+                _listenBacklog = listenBacklog;
 
-            if (version >= 3)
+            int udpSendBufferSize = version >= 3 ? bR.ReadInt32() : 2048;
+            int udpReceiveBufferSize = version >= 3 ? bR.ReadInt32() : 2048;
+            if (apply)
             {
-                _udpSendBufferSizeKB = bR.ReadInt32();
-                _udpReceiveBufferSizeKB = bR.ReadInt32();
-            }
-            else
-            {
-                _udpSendBufferSizeKB = 2048;
-                _udpReceiveBufferSizeKB = 2048;
+                _udpSendBufferSizeKB = udpSendBufferSize;
+                _udpReceiveBufferSizeKB = udpReceiveBufferSize;
             }
 
-            MaxConcurrentResolutionsPerCore = bR.ReadUInt16();
+            ushort maxConcurrentResolutions = bR.ReadUInt16();
+            if (apply)
+                MaxConcurrentResolutionsPerCore = maxConcurrentResolutions;
 
             //optional protocols
             if (version >= 3)
             {
                 bool enableEDnsClientSubnetSourceAddress = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableEDnsClientSubnetSourceAddress = enableEDnsClientSubnetSourceAddress;
             }
-            else
+            else if (apply)
             {
                 _enableEDnsClientSubnetSourceAddress = false;
             }
 
             bool enableDnsOverUdpProxy = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverUdpProxy = enableDnsOverUdpProxy;
 
             bool enableDnsOverTcpProxy = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverTcpProxy = enableDnsOverTcpProxy;
 
             bool enableDnsOverHttp = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverHttp = enableDnsOverHttp;
 
             if (version >= 4)
             {
                 bool enableDnsOverHttpUnixSocket = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableDnsOverHttpUnixSocket = enableDnsOverHttpUnixSocket;
             }
-            else
+            else if (apply)
             {
                 _enableDnsOverHttpUnixSocket = false;
             }
@@ -1390,98 +1424,98 @@ namespace DnsServerCore.Dns
             if (version >= 5)
             {
                 bool enableDnsOverHttpsUnixSocket = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableDnsOverHttpsUnixSocket = enableDnsOverHttpsUnixSocket;
             }
-            else
+            else if (apply)
             {
                 _enableDnsOverHttpsUnixSocket = false;
             }
 
             bool enableDnsOverTls = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverTls = enableDnsOverTls;
 
             bool enableDnsOverHttps = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverHttps = enableDnsOverHttps;
 
             bool enableDnsOverHttp3 = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverHttp3 = enableDnsOverHttp3;
 
             bool enableDnsOverQuic = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _enableDnsOverQuic = enableDnsOverQuic;
 
             if (version >= 4)
             {
                 bool enableDnsOverHttpHelpRedirect = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableDnsOverHttpHelpRedirect = enableDnsOverHttpHelpRedirect;
             }
             else
             {
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableDnsOverHttpHelpRedirect = true;
             }
 
             int dnsOverUdpProxyPort = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverUdpProxyPort = dnsOverUdpProxyPort;
 
             int dnsOverTcpProxyPort = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverTcpProxyPort = dnsOverTcpProxyPort;
 
             int dnsOverHttpPort = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverHttpPort = dnsOverHttpPort;
 
             if (version >= 4)
             {
                 string unixSocket = s.ReadShortString();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _dnsOverHttpUnixSocket = unixSocket.Length == 0 ? null : unixSocket;
             }
             else
             {
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _dnsOverHttpUnixSocket = null;
             }
 
             if (version >= 5)
             {
                 string unixSocket = s.ReadShortString();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _dnsOverHttpsUnixSocket = unixSocket.Length == 0 ? null : unixSocket;
             }
             else
             {
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _dnsOverHttpsUnixSocket = null;
             }
 
             int dnsOverTlsPort = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverTlsPort = dnsOverTlsPort;
 
             int dnsOverHttpsPort = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverHttpsPort = dnsOverHttpsPort;
 
             int dnsOverQuicPort = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverQuicPort = dnsOverQuicPort;
 
             NetworkAccessControl[] dnsReverseProxyNetworkACL = AuthZoneInfo.ReadNetworkACLFrom(bR);
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsReverseProxyNetworkACL = dnsReverseProxyNetworkACL;
 
             string dnsTlsCertificatePath = s.ReadShortString();
             string dnsTlsCertificatePassword = s.ReadShortString();
 
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
             {
                 _dnsTlsCertificatePath = dnsTlsCertificatePath;
                 _dnsTlsCertificatePassword = dnsTlsCertificatePassword;
@@ -1511,7 +1545,7 @@ namespace DnsServerCore.Dns
             }
 
             string dnsOverHttpRealIpHeader = s.ReadShortString();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _dnsOverHttpRealIpHeader = dnsOverHttpRealIpHeader;
 
             //tsig
@@ -1528,89 +1562,105 @@ namespace DnsServerCore.Dns
                     tsigKeys.Add(keyName, new TsigKey(keyName, sharedSecret, algorithm));
                 }
 
-                _tsigKeys = tsigKeys;
+                if (apply)
+                    _tsigKeys = tsigKeys;
             }
 
             //recursion
-            _recursion = (DnsServerRecursion)bR.ReadByte();
-            _recursionNetworkACL = AuthZoneInfo.ReadNetworkACLFrom(bR);
+            DnsServerRecursion recursion = (DnsServerRecursion)bR.ReadByte();
+            if (apply)
+                _recursion = recursion;
+            var recursionAcl = AuthZoneInfo.ReadNetworkACLFrom(bR);
+            if (apply)
+                _recursionNetworkACL = recursionAcl;
 
-            _randomizeName = bR.ReadBoolean();
-            _qnameMinimization = bR.ReadBoolean();
+            bool randomizeName = bR.ReadBoolean();
+            if (apply)
+                _randomizeName = randomizeName;
+            bool qnameMinimization = bR.ReadBoolean();
+            if (apply)
+                _qnameMinimization = qnameMinimization;
 
-            if (version >= 4)
-                _locallyServedDnsZones = bR.ReadBoolean();
-            else
-                _locallyServedDnsZones = true;
+            bool locallyServedDnsZones = version < 4 || bR.ReadBoolean();
+            if (apply)
+                _locallyServedDnsZones = locallyServedDnsZones;
 
-            _resolverRetries = bR.ReadInt32();
-            _resolverTimeout = bR.ReadInt32();
-            _resolverConcurrency = bR.ReadInt32();
-            _resolverMaxStackCount = bR.ReadInt32();
+            int resolverRetries = bR.ReadInt32();
+            if (apply)
+                _resolverRetries = resolverRetries;
+            int resolverTimeout = bR.ReadInt32();
+            if (apply)
+                _resolverTimeout = resolverTimeout;
+            int resolverConcurrency = bR.ReadInt32();
+            if (apply)
+                _resolverConcurrency = resolverConcurrency;
+            int resolverMaxStackCount = bR.ReadInt32();
+            if (apply)
+                _resolverMaxStackCount = resolverMaxStackCount;
 
             //cache
             bool saveCacheToDisk = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _saveCacheToDisk = saveCacheToDisk;
 
             bool serveStale = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _serveStale = serveStale;
 
             uint serveStaleTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.ServeStaleTtl = serveStaleTtl;
 
             uint serveStaleAnswerTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.ServeStaleAnswerTtl = serveStaleAnswerTtl;
 
             uint serveStaleResetTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.ServeStaleResetTtl = serveStaleResetTtl;
 
             int serveStaleMaxWaitTime = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _serveStaleMaxWaitTime = serveStaleMaxWaitTime;
 
             long cacheMaximumEntries = bR.ReadInt64();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.MaximumEntries = cacheMaximumEntries;
 
             uint minimumRecordTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.MinimumRecordTtl = minimumRecordTtl;
 
             uint maximumRecordTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.MaximumRecordTtl = maximumRecordTtl;
 
             uint negativeRecordTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.NegativeRecordTtl = negativeRecordTtl;
 
             uint failureRecordTtl = bR.ReadUInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cacheZoneManager.FailureRecordTtl = failureRecordTtl;
 
             if (version >= 7)
             {
                 bool enableCachePrefetch = bR.ReadBoolean();
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableCachePrefetch = enableCachePrefetch;
             }
             else
             {
-                if (!isConfigTransfer)
+                if (apply && !isConfigTransfer)
                     _enableCachePrefetch = true;
             }
 
             int cachePrefetchEligibility = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
                 _cachePrefetchEligibility = cachePrefetchEligibility;
 
             int cachePrefetchTrigger = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer)
             {
                 _cachePrefetchTrigger = cachePrefetchTrigger;
 
@@ -1628,12 +1678,20 @@ namespace DnsServerCore.Dns
             }
 
             //blocking
-            _enableBlocking = bR.ReadBoolean();
-            _allowTxtBlockingReport = bR.ReadBoolean();
+            bool enableBlocking = bR.ReadBoolean();
+            if (apply)
+                _enableBlocking = enableBlocking;
+            bool allowTxtBlockingReport = bR.ReadBoolean();
+            if (apply)
+                _allowTxtBlockingReport = allowTxtBlockingReport;
 
-            _blockingBypassList = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
+            var blockingBypassList = AuthZoneInfo.ReadNetworkAddressesFrom(bR);
+            if (apply)
+                _blockingBypassList = blockingBypassList;
 
-            _blockingType = (DnsServerBlockingType)bR.ReadByte();
+            DnsServerBlockingType blockingType = (DnsServerBlockingType)bR.ReadByte();
+            if (apply)
+                _blockingType = blockingType;
 
             {
                 //read custom blocking addresses
@@ -1660,11 +1718,16 @@ namespace DnsServerCore.Dns
                     }
                 }
 
-                _customBlockingARecords = dnsARecords;
-                _customBlockingAAAARecords = dnsAAAARecords;
+                if (apply)
+                {
+                    _customBlockingARecords = dnsARecords;
+                    _customBlockingAAAARecords = dnsAAAARecords;
+                }
             }
 
-            _blockingAnswerTtl = bR.ReadUInt32();
+            uint blockingAnswerTtl = bR.ReadUInt32();
+            if (apply)
+                _blockingAnswerTtl = blockingAnswerTtl;
 
             //proxy & forwarders
             NetProxyType proxyType = (NetProxyType)bR.ReadByte();
@@ -1677,17 +1740,19 @@ namespace DnsServerCore.Dns
                 if (bR.ReadBoolean()) //credential set
                     credential = new NetworkCredential(s.ReadShortString(), s.ReadShortString());
 
-                _proxy = NetProxy.CreateProxy(proxyType, address, port, credential);
-
                 int count = bR.ReadByte();
                 List<NetProxyBypassItem> bypassList = new List<NetProxyBypassItem>(count);
 
                 for (int i = 0; i < count; i++)
                     bypassList.Add(new NetProxyBypassItem(s.ReadShortString()));
 
-                _proxy.BypassList = bypassList;
+                if (apply)
+                {
+                    _proxy = NetProxy.CreateProxy(proxyType, address, port, credential);
+                    _proxy.BypassList = bypassList;
+                }
             }
-            else
+            else if (apply)
             {
                 _proxy = null;
             }
@@ -1706,22 +1771,32 @@ namespace DnsServerCore.Dns
                             forwarders[i] = forwarders[i].Clone(DnsTransportProtocol.Https);
                     }
 
-                    _forwarders = forwarders;
+                    if (apply)
+                        _forwarders = forwarders;
                 }
                 else
                 {
-                    _forwarders = null;
+                    if (apply)
+                        _forwarders = null;
                 }
             }
 
-            _concurrentForwarding = bR.ReadBoolean();
-            _forwarderRetries = bR.ReadInt32();
-            _forwarderTimeout = bR.ReadInt32();
-            _forwarderConcurrency = bR.ReadInt32();
+            bool concurrentForwarding = bR.ReadBoolean();
+            if (apply)
+                _concurrentForwarding = concurrentForwarding;
+            int forwarderRetries = bR.ReadInt32();
+            if (apply)
+                _forwarderRetries = forwarderRetries;
+            int forwarderTimeout = bR.ReadInt32();
+            if (apply)
+                _forwarderTimeout = forwarderTimeout;
+            int forwarderConcurrency = bR.ReadInt32();
+            if (apply)
+                _forwarderConcurrency = forwarderConcurrency;
 
             //logging
             bool ignoreResolverLogs = bR.ReadBoolean(); //ignore resolver logs
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsResolverLogging))
             {
                 if (ignoreResolverLogs)
                     _resolverLog = null;
@@ -1730,7 +1805,7 @@ namespace DnsServerCore.Dns
             }
 
             bool logQueries = bR.ReadBoolean(); //log all queries
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsQueryLogging))
             {
                 if (logQueries)
                     _queryLog = _log;
@@ -1739,12 +1814,19 @@ namespace DnsServerCore.Dns
             }
 
             bool enableInMemoryStats = bR.ReadBoolean();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsInMemoryStatistics))
                 _statsManager.EnableInMemoryStats = enableInMemoryStats;
 
             int maxStatFileDays = bR.ReadInt32();
-            if (!isConfigTransfer)
+            if (apply && !isConfigTransfer && (readOwnership || !ManifestOwnsStatisticsRetention))
                 _statsManager.MaxStatFileDays = maxStatFileDays;
+
+            if (!apply)
+            {
+                CheckManifestDnsLogging(new DnsLoggingSettings(ignoreResolverLogs, logQueries));
+                CheckManifestStatistics(new StatisticsSettings(enableInMemoryStats, maxStatFileDays));
+                return;
+            }
 
             if (readOwnership)
             {

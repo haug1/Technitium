@@ -2233,8 +2233,14 @@ namespace DnsServerCore
                                     }
                                     if (checkDns && archive.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                                     {
-                                        using Stream dnsConfiguration = dnsEntry.Open();
-                                        _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
+                                        bool checkLocalDnsSettings;
+                                        using (Stream dnsConfiguration = dnsEntry.Open())
+                                            checkLocalDnsSettings = _dnsWebService.CheckRestoreManifestDnsSettings(dnsConfiguration);
+                                        if (checkLocalDnsSettings)
+                                        {
+                                            using Stream dnsConfiguration = dnsEntry.Open();
+                                            _dnsWebService._dnsServer.CheckRestoreManifestLocalDnsSettings(dnsConfiguration);
+                                        }
                                     }
                                     if (checkWeb && archive.GetEntry("webservice.config") is ZipArchiveEntry webEntry)
                                     {

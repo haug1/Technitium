@@ -466,6 +466,39 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DnsRestoreAcceptsMatchingOwnedLoggingAndStatistics()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"logging":{"logQueries":true,"ignoreResolverLogs":true},
+                 "statistics":{"inMemory":true,"retentionDays":180}}
+                """;
+            string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+            JsonElement previous = await server.GetSettingsAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            int originalTtl = previous.GetProperty("defaultRecordTtl").GetInt32();
+            int changedTtl = originalTtl == 60 ? 61 : 60;
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=" + changedTtl, server.AdminToken));
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form));
+
+            JsonElement restored = await server.GetSettingsAsync();
+            Assert.Equal(originalTtl, restored.GetProperty("defaultRecordTtl").GetInt32());
+            Assert.True(restored.GetProperty("logQueries").GetBoolean());
+            Assert.True(restored.GetProperty("ignoreResolverLogs").GetBoolean());
+            Assert.True(restored.GetProperty("enableInMemoryStats").GetBoolean());
+            Assert.Equal(180, restored.GetProperty("maxStatFileDays").GetInt32());
+            Assert.True(JsonElement.DeepEquals(previous.GetProperty("managedSettings"), restored.GetProperty("managedSettings")));
+        }
+
+        [Fact]
         public async Task DnsLoggingFlagsApplyPersistAndRejectMixedEdits()
         {
             await using var server = await LoopbackWebService.StartAsync();
@@ -498,11 +531,14 @@ namespace DnsServerCore.Tests
             Assert.Equal(ttl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
             LoopbackWebService.AssertOk(await server.CallAsync("settings/set?ignoreResolverLogs=true&logQueries=true", server.AdminToken));
 
+            int unownedTtl = ttl == 90 ? 91 : 90;
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?defaultRecordTtl=" + unownedTtl, server.AdminToken));
             using var form = new MultipartFormDataContent();
             form.Add(new ByteArrayContent(original), "file", "backup.zip");
             JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
             Assert.Equal("error", restored.GetProperty("status").GetString());
             Assert.Contains("/logging/", restored.GetProperty("errorMessage").GetString());
+            Assert.Equal(unownedTtl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
 
             const string reset = """{"schemaVersion":1,"logging":{"logQueries":null}}""";
             revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
