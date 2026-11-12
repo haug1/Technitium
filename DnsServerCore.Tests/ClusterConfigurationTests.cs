@@ -503,19 +503,13 @@ namespace DnsServerCore.Tests
             LoopbackWebService.AssertOk(beforeJoin);
             string beforeJoinRevision = beforeJoin.GetProperty("response").GetProperty("revision").GetString()!;
 
-            using (var certificate = X509CertificateLoader.LoadPkcs12FromFile(
-                Path.Combine(primary.ConfigurationDirectory, "self-signed-cert.pfx"), null))
-            using (var legacy = new HttpApiClient(new Uri($"https://127.0.0.1:{primaryUrl.Port}/"), ipv6Mode: default, ignoreCertificateErrors: true))
+            using var certificate = X509CertificateLoader.LoadPkcs12FromFile(
+                Path.Combine(primary.ConfigurationDirectory, "self-signed-cert.pfx"), null);
+            using var legacy = new HttpApiClient(new Uri($"https://127.0.0.1:{primaryUrl.Port}/"), ipv6Mode: default, ignoreCertificateErrors: true);
+            legacy.UseApiToken(primary.AdminToken);
+            const int legacyId = 1235;
+            await JoinLegacyAsync();
             {
-                legacy.UseApiToken(primary.AdminToken);
-                const int legacyId = 1235;
-                await legacy.JoinClusterWithCapabilitiesAsync(legacyId, new Uri("https://legacy.cluster.test:53443/"),
-                    [IPAddress.Loopback], certificate, supportsDeclarativeClusterOptions: false, supportsDeclarativeBlockLists: false,
-                    supportsDeclarativeDomainLists: false, supportsDeclarativeDnsPolicy: false, supportsDeclarativeResolverPolicy: false,
-                    supportsDeclarativeRateLimits: false, supportsDeclarativeProxy: false, supportsDeclarativeDnsTuning: false,
-                    supportsDeclarativeTsig: false, supportsDeclarativeLdap: false, supportsDeclarativeSso: false,
-                    supportsDeclarativeGroups: false, supportsDeclarativeUsers: false, supportsDeclarativePermissions: false,
-                    supportsDeclarativeApps: true, cancellationToken: default);
                 using var blockedBody = new StringContent(clear, Encoding.UTF8, "application/json");
                 JsonElement blocked = await primary.CallAsync("settings/config/plan", primary.AdminToken, blockedBody);
                 Assert.Equal("error", blocked.GetProperty("status").GetString());
@@ -570,6 +564,13 @@ namespace DnsServerCore.Tests
                 Assert.Contains("Only the Primary", denied.GetProperty("errorMessage").GetString());
             }
             await ApplyPrimaryAsync(clear);
+            var joinError = await Assert.ThrowsAsync<HttpApiClientException>(JoinLegacyAsync);
+            Assert.Contains("must support declarative app package digests before joining", joinError.Message);
+            JsonElement membership = await primary.CallAsync("admin/cluster/state", primary.AdminToken);
+            LoopbackWebService.AssertOk(membership);
+            var nodes = membership.GetProperty("response").GetProperty("clusterNodes");
+            Assert.Equal(2, nodes.GetArrayLength());
+            Assert.DoesNotContain(nodes.EnumerateArray(), node => node.GetProperty("id").GetInt32() == legacyId);
             Assert.True(await WaitForAsync(async () => (await ReadSecondaryAppAsync()).GetProperty("config").ValueKind == JsonValueKind.Null),
                 "The Secondary did not clear the installed app's configuration.");
             Assert.Contains((await ReadSecondaryAppAsync()).GetProperty("managedSettings").EnumerateArray(),
@@ -616,6 +617,15 @@ namespace DnsServerCore.Tests
             JsonElement restoredApp = await restored.CallAsync("apps/config/get?name=Fixture", restored.AdminToken);
             LoopbackWebService.AssertOk(restoredApp);
             Assert.Equal(JsonValueKind.Null, restoredApp.GetProperty("response").GetProperty("config").ValueKind);
+
+            Task JoinLegacyAsync() => legacy.JoinClusterWithCapabilitiesAsync(
+                legacyId, new Uri("https://legacy.cluster.test:53443/"), [IPAddress.Loopback], certificate,
+                supportsDeclarativeClusterOptions: false, supportsDeclarativeBlockLists: false,
+                supportsDeclarativeDomainLists: false, supportsDeclarativeDnsPolicy: false, supportsDeclarativeResolverPolicy: false,
+                supportsDeclarativeRateLimits: false, supportsDeclarativeProxy: false, supportsDeclarativeDnsTuning: false,
+                supportsDeclarativeTsig: false, supportsDeclarativeLdap: false, supportsDeclarativeSso: false,
+                supportsDeclarativeGroups: false, supportsDeclarativeUsers: false, supportsDeclarativePermissions: false,
+                supportsDeclarativeApps: true, cancellationToken: default);
 
             async Task ApplyPrimaryAsync(string manifest)
             {
