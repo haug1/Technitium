@@ -931,6 +931,19 @@ namespace DnsServerCore
                 if (hasAppAutoUpdate)
                     _dnsWebService._dnsServer.CheckManifestAppAutoUpdate(dnsAppsEnableAutomaticUpdate);
 
+                string ipv4Override = request.QueryOrForm("eDnsClientSubnetIpv4Override");
+                string ipv6Override = request.QueryOrForm("eDnsClientSubnetIpv6Override");
+                var requestedSubnet = new DnsServer.ClientSubnetSettings(
+                    request.TryGetQueryOrForm("eDnsClientSubnet", bool.Parse, out bool ecsEnabled) ? ecsEnabled : null,
+                    request.TryGetQueryOrForm("eDnsClientSubnetIPv4PrefixLength", byte.Parse, out byte ecsIpv4) ? ecsIpv4 : null,
+                    request.TryGetQueryOrForm("eDnsClientSubnetIPv6PrefixLength", byte.Parse, out byte ecsIpv6) ? ecsIpv6 : null,
+                    ipv4Override is not null, ConfigurationManifest.ReadNetwork(string.IsNullOrEmpty(ipv4Override) ? null : ipv4Override,
+                        "/dns/clientSubnet/ipv4Override", AddressFamily.InterNetwork),
+                    ipv6Override is not null, ConfigurationManifest.ReadNetwork(string.IsNullOrEmpty(ipv6Override) ? null : ipv6Override,
+                        "/dns/clientSubnet/ipv6Override", AddressFamily.InterNetworkV6));
+                DnsServer.ClientSubnetSettings subnet = _dnsWebService._dnsServer.CheckManifestClientSubnet(
+                    _dnsWebService._dnsServer.NormalizeClientSubnetSettings(requestedSubnet));
+
                 bool hasInMemoryStats = request.TryGetQueryOrForm("enableInMemoryStats", bool.Parse, out bool enableInMemoryStats);
                 bool hasStatRetention = request.TryGetQueryOrForm("maxStatFileDays", int.Parse, out int maxStatFileDays);
                 _dnsWebService._dnsServer.CheckManifestStatistics(new DnsServer.StatisticsSettings(
@@ -1022,48 +1035,17 @@ namespace DnsServerCore
                             clusterParameters.Add("dnssecValidation", dnssecValidation.ToString());
                         }
 
-                        if (request.TryGetQueryOrForm("eDnsClientSubnet", bool.Parse, out bool eDnsClientSubnet))
-                        {
-                            _dnsWebService._dnsServer.EDnsClientSubnet = eDnsClientSubnet;
-
-                            clusterParameters.Add("eDnsClientSubnet", eDnsClientSubnet.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("eDnsClientSubnetIPv4PrefixLength", byte.Parse, out byte eDnsClientSubnetIPv4PrefixLength))
-                        {
-                            _dnsWebService._dnsServer.EDnsClientSubnetIPv4PrefixLength = eDnsClientSubnetIPv4PrefixLength;
-
-                            clusterParameters.Add("eDnsClientSubnetIPv4PrefixLength", eDnsClientSubnetIPv4PrefixLength.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("eDnsClientSubnetIPv6PrefixLength", byte.Parse, out byte eDnsClientSubnetIPv6PrefixLength))
-                        {
-                            _dnsWebService._dnsServer.EDnsClientSubnetIPv6PrefixLength = eDnsClientSubnetIPv6PrefixLength;
-
-                            clusterParameters.Add("eDnsClientSubnetIPv6PrefixLength", eDnsClientSubnetIPv6PrefixLength.ToString());
-                        }
-
-                        string eDnsClientSubnetIpv4Override = request.QueryOrForm("eDnsClientSubnetIpv4Override");
-                        if (eDnsClientSubnetIpv4Override is not null)
-                        {
-                            if (eDnsClientSubnetIpv4Override.Length == 0)
-                                _dnsWebService._dnsServer.EDnsClientSubnetIpv4Override = null;
-                            else
-                                _dnsWebService._dnsServer.EDnsClientSubnetIpv4Override = NetworkAddress.Parse(eDnsClientSubnetIpv4Override);
-
-                            clusterParameters.Add("eDnsClientSubnetIpv4Override", eDnsClientSubnetIpv4Override);
-                        }
-
-                        string eDnsClientSubnetIpv6Override = request.QueryOrForm("eDnsClientSubnetIpv6Override");
-                        if (eDnsClientSubnetIpv6Override is not null)
-                        {
-                            if (eDnsClientSubnetIpv6Override.Length == 0)
-                                _dnsWebService._dnsServer.EDnsClientSubnetIpv6Override = null;
-                            else
-                                _dnsWebService._dnsServer.EDnsClientSubnetIpv6Override = NetworkAddress.Parse(eDnsClientSubnetIpv6Override);
-
-                            clusterParameters.Add("eDnsClientSubnetIpv6Override", eDnsClientSubnetIpv6Override);
-                        }
+                        _dnsWebService._dnsServer.SetClientSubnetSettings(subnet);
+                        if (subnet.Enabled.HasValue)
+                            clusterParameters.Add("eDnsClientSubnet", subnet.Enabled.Value.ToString());
+                        if (subnet.Ipv4Prefix.HasValue)
+                            clusterParameters.Add("eDnsClientSubnetIPv4PrefixLength", subnet.Ipv4Prefix.Value.ToString());
+                        if (subnet.Ipv6Prefix.HasValue)
+                            clusterParameters.Add("eDnsClientSubnetIPv6PrefixLength", subnet.Ipv6Prefix.Value.ToString());
+                        if (subnet.HasIpv4Override)
+                            clusterParameters.Add("eDnsClientSubnetIpv4Override", ipv4Override);
+                        if (subnet.HasIpv6Override)
+                            clusterParameters.Add("eDnsClientSubnetIpv6Override", ipv6Override);
 
                         if (request.TryQueryOrFormArray("qpmPrefixLimitsIPv4", delegate (JsonElement jsonObject)
                         {

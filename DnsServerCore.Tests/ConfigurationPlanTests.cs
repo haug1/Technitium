@@ -466,6 +466,57 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ClientSubnetApplyNormalizesOverridesAndProtectsOwnedSettings()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?dnsSettings=true");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(request);
+            backup.EnsureSuccessStatusCode();
+            byte[] original = await backup.Content.ReadAsByteArrayAsync();
+
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"clientSubnet":{"enabled":true,"ipv4PrefixLength":25,
+                    "ipv6PrefixLength":60,"ipv4Override":"192.0.2.200","ipv6Override":"2001:db8:1234:5678::abcd"}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(5, preview.GetProperty("changes").GetArrayLength());
+            Assert.DoesNotContain("192.0.2.", preview.GetRawText());
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.True(settings.GetProperty("eDnsClientSubnet").GetBoolean());
+            Assert.Equal("192.0.2.128/25", settings.GetProperty("eDnsClientSubnetIpv4Override").GetString());
+            Assert.Equal("2001:db8:1234:5670::/60", settings.GetProperty("eDnsClientSubnetIpv6Override").GetString());
+            Assert.Equal(5, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+            Assert.Equal("192.0.2.128/25",
+                ConfigurationPlan.Export(settings, includePreviewOnly: false)["dns"]!["clientSubnet"]!["ipv4Override"]!.GetValue<string>());
+
+            int ttl = settings.GetProperty("defaultRecordTtl").GetInt32();
+            JsonElement edit = await server.CallAsync("settings/set?eDnsClientSubnetIpv4Override=&defaultRecordTtl=123", server.AdminToken);
+            Assert.Equal("error", edit.GetProperty("status").GetString());
+            Assert.Contains("/dns/clientSubnet/ipv4Override", edit.GetProperty("errorMessage").GetString());
+            Assert.Equal(ttl, (await server.GetSettingsAsync()).GetProperty("defaultRecordTtl").GetInt32());
+            LoopbackWebService.AssertOk(await server.CallAsync("settings/set?eDnsClientSubnetIpv4Override=192.0.2.201", server.AdminToken));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(original), "file", "backup.zip");
+            JsonElement restored = await server.CallAsync("settings/restore?dnsSettings=true", server.AdminToken, form);
+            Assert.Equal("error", restored.GetProperty("status").GetString());
+            Assert.Contains("/dns/clientSubnet/", restored.GetProperty("errorMessage").GetString());
+
+            const string reset = """{"schemaVersion":1,"dns":{"clientSubnet":{"enabled":null,"ipv4Override":null}}}""";
+            string revision = (await PreviewAsync(server, reset)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, reset, revision));
+            settings = await server.GetSettingsAsync();
+            Assert.False(settings.GetProperty("eDnsClientSubnet").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, settings.GetProperty("eDnsClientSubnetIpv4Override").ValueKind);
+            Assert.Equal(25, settings.GetProperty("eDnsClientSubnetIPv4PrefixLength").GetInt32());
+        }
+
+        [Fact]
         public async Task UdpPortExclusionsRoundTripAsASetAndResetToWebTlsPort()
         {
             await using var server = await LoopbackWebService.StartAsync();

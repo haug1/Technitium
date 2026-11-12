@@ -236,7 +236,8 @@ namespace DnsServerCore
                         _dnsServer.CheckManifestServerDomain(DnsServer.NormalizeServerDomain(domain));
                     _dnsServer.CheckManifestLocalEndPoints(ReadLegacyLocalEndPoints(reader));
                     bool checkOutbound = !isConfigTransfer && _dnsServer.HasManagedOutboundSockets;
-                    bool readOutbound = _dnsServer.HasManagedResolverProtocol || checkOutbound;
+                    bool readResolver = _dnsServer.HasManagedResolverProtocol || _dnsServer.HasManagedClientSubnet;
+                    bool readOutbound = readResolver || checkOutbound;
                     bool readAppAutoUpdate = readOutbound || _dnsServer.ManifestOwnsAppAutoUpdate;
                     if (_dnsServer.ManifestOwnsDefaultRecordTtl || _dnsServer.HasManagedSoaTiming || _dnsServer.ManifestOwnsResponsiblePerson || _dnsServer.HasManagedAuthoritativeNetworks || _dnsServer.HasManagedSourceNetworks || readAppAutoUpdate)
                     {
@@ -267,15 +268,18 @@ namespace DnsServerCore
                         {
                             IPv6Mode ipv6Mode = DnsServer.ReadLegacyIpv6Mode(reader);
                             bool pool = version >= 42 ? reader.ReadBoolean() : DnsServer.DefaultUdpSocketPoolEnabled;
-                            bool readExcludedPorts = _dnsServer.HasManagedResolverProtocol || (checkOutbound && _dnsServer.ManifestOwnsSocketPoolExcludedPorts);
+                            bool readExcludedPorts = readResolver || (checkOutbound && _dnsServer.ManifestOwnsSocketPoolExcludedPorts);
                             ushort[] ports = readExcludedPorts
                                 ? version >= 42 ? DnsServer.ReadSocketPoolExcludedPorts(reader) : [(ushort)web.TlsPort]
                                 : null;
                             if (checkOutbound)
                                 _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(ipv6Mode, pool, ports));
-                            if (_dnsServer.HasManagedResolverProtocol)
+                            if (readResolver)
                             {
                                 _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null, reader.ReadUInt16(), reader.ReadBoolean()));
+                                if (_dnsServer.HasManagedClientSubnet)
+                                    _dnsServer.CheckManifestClientSubnet(_dnsServer.NormalizeClientSubnetSettings(
+                                        DnsServer.ReadClientSubnetSettings(reader, version >= 29, version >= 35)));
                             }
                         }
                     }
@@ -313,6 +317,7 @@ namespace DnsServerCore
                             throw new InvalidDataException("/dns/udpSocketPool/excludedPorts: Cannot verify the excluded ports in this combined backup format.");
                         _dnsServer.CheckManifestOutboundSockets(new DnsServer.OutboundSocketSettings(null, DnsServer.DefaultUdpSocketPoolEnabled));
                     }
+                    _dnsServer.CheckManifestClientSubnet(new DnsServer.ClientSubnetSettings(false, 24, 56, true, null, true, null));
                     _dnsServer.CheckManifestAppAutoUpdate(true);
                     _dnsServer.CheckManifestResolverSettings(new DnsServer.ResolverSettings(null,
                         version < 25 ? DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE : null, version < 26 ? true : null));

@@ -56,6 +56,11 @@ namespace DnsServerCore.Configuration
             ["/dns/authoritative/zoneTransferAllowedNetworks"] = Field("zoneTransferAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/authoritative/notifyAllowedNetworks"] = Field("notifyAllowedNetworks", Array.Empty<string>(), canApply: true),
             ["/dns/checkForUpdates"] = Field("dnsServerEnableCheckForUpdate", true, canApply: true),
+            ["/dns/clientSubnet/enabled"] = Field("eDnsClientSubnet", false, canApply: true),
+            ["/dns/clientSubnet/ipv4PrefixLength"] = Field("eDnsClientSubnetIPv4PrefixLength", 24, canApply: true),
+            ["/dns/clientSubnet/ipv6PrefixLength"] = Field("eDnsClientSubnetIPv6PrefixLength", 56, canApply: true),
+            ["/dns/clientSubnet/ipv4Override"] = Field<string>("eDnsClientSubnetIpv4Override", null, canApply: true),
+            ["/dns/clientSubnet/ipv6Override"] = Field<string>("eDnsClientSubnetIpv6Override", null, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -161,7 +166,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), alreadyActive, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -275,6 +280,30 @@ namespace DnsServerCore.Configuration
             return new DnsServer.StatisticsSettings(inMemory, retention);
         }
 
+        private static DnsServer.ClientSubnetSettings GetClientSubnetSettings(ConfigurationManifest manifest)
+        {
+            return manifest.Settings.TryGetProperty("dns", out JsonElement dns) && dns.TryGetProperty("clientSubnet", out JsonElement subnet)
+                ? ReadClientSubnetSettings(subnet) : default;
+        }
+
+        private static DnsServer.ClientSubnetSettings ReadClientSubnetSettings(JsonElement subnet)
+        {
+            bool? enabled = subnet.TryGetProperty("enabled", out JsonElement value)
+                ? value.ValueKind != JsonValueKind.Null && value.GetBoolean() : null;
+            bool hasIpv4 = subnet.TryGetProperty("ipv4Override", out JsonElement ipv4);
+            bool hasIpv6 = subnet.TryGetProperty("ipv6Override", out JsonElement ipv6);
+            return new DnsServer.ClientSubnetSettings(enabled, ReadPrefix("ipv4PrefixLength", 24), ReadPrefix("ipv6PrefixLength", 56),
+                hasIpv4, hasIpv4 ? ConfigurationManifest.ReadNetwork(ipv4.GetString(), "/dns/clientSubnet/ipv4Override", AddressFamily.InterNetwork) : null,
+                hasIpv6, hasIpv6 ? ConfigurationManifest.ReadNetwork(ipv6.GetString(), "/dns/clientSubnet/ipv6Override", AddressFamily.InterNetworkV6) : null);
+
+            byte? ReadPrefix(string name, byte defaultValue)
+            {
+                if (!subnet.TryGetProperty(name, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? defaultValue : decimal.ToByte(value.GetDecimal());
+            }
+        }
+
         private static DnsServer.OutboundSocketSettings GetOutboundSocketSettings(ConfigurationManifest manifest, int webTlsPort)
         {
             if (!manifest.Settings.TryGetProperty("dns", out JsonElement dns))
@@ -326,6 +355,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
+            if (GetClientSubnetSettings(manifest) != default)
+                throw new InvalidDataException("/dns/clientSubnet: Applying EDNS Client Subnet settings to a cluster is not implemented.");
             if (GetResolverSettings(manifest).HasValues)
                 throw new InvalidDataException("/dns: Applying update checks, UDP payload size, or DNSSEC validation to a cluster is not implemented.");
         }
@@ -616,6 +647,27 @@ namespace DnsServerCore.Configuration
 
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes, LogManager log, int? declaredWebTlsPort)
         {
+            if (path == "/dns/clientSubnet")
+            {
+                DnsServer.ClientSubnetSettings subnet = ReadClientSubnetSettings(desired);
+                foreach (JsonProperty field in desired.EnumerateObject())
+                {
+                    JsonElement value = field.Value;
+                    if (field.Name == "ipv4Override" && subnet.Ipv4Override is not null)
+                    {
+                        byte prefix = subnet.Ipv4Prefix ?? currentSettings.GetProperty("eDnsClientSubnetIPv4PrefixLength").GetByte();
+                        value = JsonSerializer.SerializeToElement(DnsServer.NormalizeClientSubnetOverride(subnet.Ipv4Override, prefix).ToString());
+                    }
+                    else if (field.Name == "ipv6Override" && subnet.Ipv6Override is not null)
+                    {
+                        byte prefix = subnet.Ipv6Prefix ?? currentSettings.GetProperty("eDnsClientSubnetIPv6PrefixLength").GetByte();
+                        value = JsonSerializer.SerializeToElement(DnsServer.NormalizeClientSubnetOverride(subnet.Ipv6Override, prefix).ToString());
+                    }
+                    Compare(value, AppendPath(path, field.Name), currentSettings, changes, log, declaredWebTlsPort);
+                }
+                return;
+            }
+
             if (_settings.TryGetValue(path, out Setting setting))
             {
                 JsonElement current = GetCurrentSetting(currentSettings, path, setting);

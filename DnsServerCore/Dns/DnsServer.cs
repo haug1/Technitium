@@ -149,7 +149,12 @@ namespace DnsServerCore.Dns
             AppAutoUpdate = 262144,
             Ipv6Mode = 524288,
             UdpSocketPoolEnabled = 1048576,
-            UdpSocketPoolExcludedPorts = 2097152
+            UdpSocketPoolExcludedPorts = 2097152,
+            ClientSubnetEnabled = 4194304,
+            ClientSubnetIpv4Prefix = 8388608,
+            ClientSubnetIpv6Prefix = 16777216,
+            ClientSubnetIpv4Override = 33554432,
+            ClientSubnetIpv6Override = 67108864
         }
 
         internal readonly record struct ResolverSettings(bool? CheckForUpdates, ushort? UdpPayloadSize, bool? DnssecValidation)
@@ -160,6 +165,9 @@ namespace DnsServerCore.Dns
         internal readonly record struct OutboundSocketSettings(IPv6Mode? Ipv6Mode, bool? PoolEnabled, ushort[] ExcludedPorts = null);
 
         internal static bool DefaultUdpSocketPoolEnabled => OperatingSystem.IsWindows();
+
+        internal readonly record struct ClientSubnetSettings(bool? Enabled, byte? Ipv4Prefix, byte? Ipv6Prefix,
+            bool HasIpv4Override, NetworkAddress Ipv4Override, bool HasIpv6Override, NetworkAddress Ipv6Override);
 
         internal readonly record struct StatisticsSettings(bool? InMemory, int? RetentionDays);
 
@@ -671,14 +679,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -754,12 +762,30 @@ namespace DnsServerCore.Dns
         internal bool HasManagedOutboundSockets => (_managedDnsSettings & OutboundSocketOwnership) != 0;
         private const ManagedDnsSettings OutboundSocketOwnership = ManagedDnsSettings.Ipv6Mode | ManagedDnsSettings.UdpSocketPoolEnabled | ManagedDnsSettings.UdpSocketPoolExcludedPorts;
 
+        private static readonly (ManagedDnsSettings Flag, string Field)[] _clientSubnetOwnership =
+        [
+            (ManagedDnsSettings.ClientSubnetEnabled, "enabled"),
+            (ManagedDnsSettings.ClientSubnetIpv4Prefix, "ipv4PrefixLength"),
+            (ManagedDnsSettings.ClientSubnetIpv6Prefix, "ipv6PrefixLength"),
+            (ManagedDnsSettings.ClientSubnetIpv4Override, "ipv4Override"),
+            (ManagedDnsSettings.ClientSubnetIpv6Override, "ipv6Override")
+        ];
+        private const ManagedDnsSettings ClientSubnetOwnership = ManagedDnsSettings.ClientSubnetEnabled |
+            ManagedDnsSettings.ClientSubnetIpv4Prefix | ManagedDnsSettings.ClientSubnetIpv6Prefix |
+            ManagedDnsSettings.ClientSubnetIpv4Override | ManagedDnsSettings.ClientSubnetIpv6Override;
+        internal bool HasManagedClientSubnet => (_managedDnsSettings & ClientSubnetOwnership) != 0;
+
         internal bool HasManagedAuthoritativeDefaults =>
-            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate;
+            (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership)) != 0;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
+            foreach ((ManagedDnsSettings flag, string field) in _clientSubnetOwnership)
+            {
+                if (_managedDnsSettings.HasFlag(flag))
+                    yield return "/dns/clientSubnet/" + field;
+            }
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1028,6 +1054,69 @@ namespace DnsServerCore.Dns
                 throw new DnsWebServiceException("/statistics/retentionDays: Expected a non-negative number of days.");
         }
 
+        internal static NetworkAddress NormalizeClientSubnetOverride(NetworkAddress value, byte prefix)
+        {
+            return value is not null && value.IsHostAddress ? new NetworkAddress(value.Address, prefix) : value;
+        }
+
+        internal ClientSubnetSettings CheckManifestClientSubnet(ClientSubnetSettings settings)
+        {
+            Check(ManagedDnsSettings.ClientSubnetEnabled, settings.Enabled.HasValue, settings.Enabled != _eDnsClientSubnet, "enabled");
+            Check(ManagedDnsSettings.ClientSubnetIpv4Prefix, settings.Ipv4Prefix.HasValue, settings.Ipv4Prefix != _eDnsClientSubnetIPv4PrefixLength, "ipv4PrefixLength");
+            Check(ManagedDnsSettings.ClientSubnetIpv6Prefix, settings.Ipv6Prefix.HasValue, settings.Ipv6Prefix != _eDnsClientSubnetIPv6PrefixLength, "ipv6PrefixLength");
+            Check(ManagedDnsSettings.ClientSubnetIpv4Override, settings.HasIpv4Override, !Equals(settings.Ipv4Override, _eDnsClientSubnetIpv4Override), "ipv4Override");
+            Check(ManagedDnsSettings.ClientSubnetIpv6Override, settings.HasIpv6Override, !Equals(settings.Ipv6Override, _eDnsClientSubnetIpv6Override), "ipv6Override");
+
+            return new ClientSubnetSettings(
+                _managedDnsSettings.HasFlag(ManagedDnsSettings.ClientSubnetEnabled) ? null : settings.Enabled,
+                _managedDnsSettings.HasFlag(ManagedDnsSettings.ClientSubnetIpv4Prefix) ? null : settings.Ipv4Prefix,
+                _managedDnsSettings.HasFlag(ManagedDnsSettings.ClientSubnetIpv6Prefix) ? null : settings.Ipv6Prefix,
+                !_managedDnsSettings.HasFlag(ManagedDnsSettings.ClientSubnetIpv4Override) && settings.HasIpv4Override, settings.Ipv4Override,
+                !_managedDnsSettings.HasFlag(ManagedDnsSettings.ClientSubnetIpv6Override) && settings.HasIpv6Override, settings.Ipv6Override);
+
+            void Check(ManagedDnsSettings flag, bool declared, bool different, string field)
+            {
+                if (declared && different && _managedDnsSettings.HasFlag(flag))
+                    throw new DnsWebServiceException($"/dns/clientSubnet/{field}: Setting is managed by the configuration manifest.");
+            }
+        }
+
+        internal ClientSubnetSettings NormalizeClientSubnetSettings(ClientSubnetSettings settings)
+        {
+            if (settings.Ipv4Prefix > 32)
+                throw new InvalidDataException("/dns/clientSubnet/ipv4PrefixLength: Maximum prefix length is 32.");
+            if (settings.Ipv6Prefix > 64)
+                throw new InvalidDataException("/dns/clientSubnet/ipv6PrefixLength: Maximum prefix length is 64.");
+
+            return settings with
+            {
+                Ipv4Override = NormalizeClientSubnetOverride(settings.Ipv4Override, settings.Ipv4Prefix ?? _eDnsClientSubnetIPv4PrefixLength),
+                Ipv6Override = NormalizeClientSubnetOverride(settings.Ipv6Override, settings.Ipv6Prefix ?? _eDnsClientSubnetIPv6PrefixLength)
+            };
+        }
+
+        internal void SetClientSubnetSettings(ClientSubnetSettings settings)
+        {
+            _eDnsClientSubnetIPv4PrefixLength = settings.Ipv4Prefix ?? _eDnsClientSubnetIPv4PrefixLength;
+            _eDnsClientSubnetIPv6PrefixLength = settings.Ipv6Prefix ?? _eDnsClientSubnetIPv6PrefixLength;
+            if (settings.HasIpv4Override)
+                _eDnsClientSubnetIpv4Override = settings.Ipv4Override;
+            if (settings.HasIpv6Override)
+                _eDnsClientSubnetIpv6Override = settings.Ipv6Override;
+            if (settings.Enabled.HasValue)
+                EDnsClientSubnet = settings.Enabled.Value;
+        }
+
+        internal static ClientSubnetSettings ReadClientSubnetSettings(BinaryReader reader, bool hasSettings = true, bool hasOverrides = true)
+        {
+            bool enabled = hasSettings && reader.ReadBoolean();
+            byte ipv4 = hasSettings ? reader.ReadByte() : (byte)24;
+            byte ipv6 = hasSettings ? reader.ReadByte() : (byte)56;
+            NetworkAddress ipv4Override = hasOverrides && reader.ReadBoolean() ? NetworkAddress.ReadFrom(reader) : null;
+            NetworkAddress ipv6Override = hasOverrides && reader.ReadBoolean() ? NetworkAddress.ReadFrom(reader) : null;
+            return new ClientSubnetSettings(enabled, ipv4, ipv6, true, ipv4Override, true, ipv6Override);
+        }
+
         internal static IPv6Mode ReadLegacyIpv6Mode(BinaryReader reader)
         {
             return reader.ReadBoolean() ? IPv6Mode.Preferred : IPv6Mode.Disabled;
@@ -1066,7 +1155,8 @@ namespace DnsServerCore.Dns
                 if (!HasManagedClusterDnsSettings && !checkOutbound)
                     return;
 
-                bool readOutbound = HasManagedResolverProtocol || checkOutbound;
+                bool readResolver = HasManagedResolverProtocol || HasManagedClientSubnet;
+                bool readOutbound = readResolver || checkOutbound;
                 bool readUpdateChecks = ManifestOwnsUpdateChecks || readOutbound || ManifestOwnsAppAutoUpdate;
                 bool readNetworks = HasManagedAuthoritativeNetworks || readUpdateChecks;
                 AuthoritativeDefaults defaults = ReadAuthoritativeTtls(reader, version);
@@ -1092,17 +1182,19 @@ namespace DnsServerCore.Dns
                     {
                         IPv6Mode mode = version >= 3 ? (IPv6Mode)reader.ReadByte() : ReadLegacyIpv6Mode(reader);
                         bool poolEnabled = reader.ReadBoolean();
-                        ushort[] ports = HasManagedResolverProtocol || (checkOutbound && ManifestOwnsSocketPoolExcludedPorts)
+                        ushort[] ports = readResolver || (checkOutbound && ManifestOwnsSocketPoolExcludedPorts)
                             ? ReadSocketPoolExcludedPorts(reader) : null;
                         if (checkOutbound)
                             CheckManifestOutboundSockets(new OutboundSocketSettings(mode, poolEnabled, ports));
-                        if (HasManagedResolverProtocol)
+                        if (readResolver)
                         {
                             payloadSize = reader.ReadUInt16();
                             dnssec = reader.ReadBoolean();
                         }
                     }
                     CheckManifestResolverSettings(new ResolverSettings(updateChecks, payloadSize, dnssec));
+                    if (HasManagedClientSubnet)
+                        CheckManifestClientSubnet(ReadClientSubnetSettings(reader));
                 }
             }
         }
@@ -1180,19 +1272,12 @@ namespace DnsServerCore.Dns
             _udpPayloadSize = bR.ReadUInt16();
             _dnssecValidation = bR.ReadBoolean();
 
-            _eDnsClientSubnet = bR.ReadBoolean();
-            _eDnsClientSubnetIPv4PrefixLength = bR.ReadByte();
-            _eDnsClientSubnetIPv6PrefixLength = bR.ReadByte();
-
-            if (bR.ReadBoolean())
-                _eDnsClientSubnetIpv4Override = NetworkAddress.ReadFrom(bR);
-            else
-                _eDnsClientSubnetIpv4Override = null;
-
-            if (bR.ReadBoolean())
-                _eDnsClientSubnetIpv6Override = NetworkAddress.ReadFrom(bR);
-            else
-                _eDnsClientSubnetIpv6Override = null;
+            ClientSubnetSettings subnet = ReadClientSubnetSettings(bR);
+            _eDnsClientSubnet = subnet.Enabled.Value;
+            _eDnsClientSubnetIPv4PrefixLength = subnet.Ipv4Prefix.Value;
+            _eDnsClientSubnetIPv6PrefixLength = subnet.Ipv6Prefix.Value;
+            _eDnsClientSubnetIpv4Override = subnet.Ipv4Override;
+            _eDnsClientSubnetIpv6Override = subnet.Ipv6Override;
 
             {
                 int count = bR.ReadByte();
@@ -1644,13 +1729,14 @@ namespace DnsServerCore.Dns
                 {
                     int extendedOwnership = s.ReadByte();
                     int extraOwnership = extendedOwnership < 0 ? -1 : s.ReadByte();
+                    int highOwnership = extraOwnership < 0 ? -1 : s.ReadByte();
                     _managedDnsSettings = (ManagedDnsSettings)(ownership | (Math.Max(0, extendedOwnership) << 8) |
-                        (Math.Max(0, extraOwnership) << 16));
+                        (Math.Max(0, extraOwnership) << 16) | (Math.Max(0, highOwnership) << 24));
                 }
             }
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -1708,29 +1794,15 @@ namespace DnsServerCore.Dns
             bW.Write(_udpPayloadSize);
             bW.Write(_dnssecValidation);
 
-            bW.Write(_eDnsClientSubnet);
-            bW.Write(_eDnsClientSubnetIPv4PrefixLength);
-            bW.Write(_eDnsClientSubnetIPv6PrefixLength);
-
-            if (_eDnsClientSubnetIpv4Override is null)
-            {
-                bW.Write(false);
-            }
-            else
-            {
-                bW.Write(true);
-                _eDnsClientSubnetIpv4Override.WriteTo(bW);
-            }
-
-            if (_eDnsClientSubnetIpv6Override is null)
-            {
-                bW.Write(false);
-            }
-            else
-            {
-                bW.Write(true);
-                _eDnsClientSubnetIpv6Override.WriteTo(bW);
-            }
+            bW.Write(subnet.Enabled ?? _eDnsClientSubnet);
+            bW.Write(subnet.Ipv4Prefix ?? _eDnsClientSubnetIPv4PrefixLength);
+            bW.Write(subnet.Ipv6Prefix ?? _eDnsClientSubnetIPv6PrefixLength);
+            NetworkAddress ipv4Override = subnet.HasIpv4Override ? subnet.Ipv4Override : _eDnsClientSubnetIpv4Override;
+            bW.Write(ipv4Override is not null);
+            ipv4Override?.WriteTo(bW);
+            NetworkAddress ipv6Override = subnet.HasIpv6Override ? subnet.Ipv6Override : _eDnsClientSubnetIpv6Override;
+            bW.Write(ipv6Override is not null);
+            ipv6Override?.WriteTo(bW);
 
             if (_qpmPrefixLimitsIPv4.Count == 0)
             {
@@ -1947,6 +2019,8 @@ namespace DnsServerCore.Dns
                     bW.Write((byte)((uint)_managedDnsSettings >> 8));
                 if ((uint)_managedDnsSettings > ushort.MaxValue)
                     bW.Write((byte)((uint)_managedDnsSettings >> 16));
+                if ((uint)_managedDnsSettings > 0xFFFFFF)
+                    bW.Write((byte)((uint)_managedDnsSettings >> 24));
             }
         }
 
@@ -7442,7 +7516,7 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, bool alreadyActive, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
@@ -7509,6 +7583,23 @@ namespace DnsServerCore.Dns
                     if (outbound.ExcludedPorts is not null)
                         ownership |= ManagedDnsSettings.UdpSocketPoolExcludedPorts;
 
+                    subnet = NormalizeClientSubnetSettings(subnet);
+                    if (subnet.Enabled.HasValue)
+                        ownership |= ManagedDnsSettings.ClientSubnetEnabled;
+                    if (subnet.Ipv4Prefix.HasValue)
+                        ownership |= ManagedDnsSettings.ClientSubnetIpv4Prefix;
+                    if (subnet.Ipv6Prefix.HasValue)
+                        ownership |= ManagedDnsSettings.ClientSubnetIpv6Prefix;
+                    if (subnet.HasIpv4Override)
+                        ownership |= ManagedDnsSettings.ClientSubnetIpv4Override;
+                    if (subnet.HasIpv6Override)
+                        ownership |= ManagedDnsSettings.ClientSubnetIpv6Override;
+
+                    bool subnetChanged = (subnet.Enabled.HasValue && subnet.Enabled != _eDnsClientSubnet) ||
+                        (subnet.Ipv4Prefix.HasValue && subnet.Ipv4Prefix != _eDnsClientSubnetIPv4PrefixLength) ||
+                        (subnet.Ipv6Prefix.HasValue && subnet.Ipv6Prefix != _eDnsClientSubnetIPv6PrefixLength) ||
+                        (subnet.HasIpv4Override && !Equals(subnet.Ipv4Override, _eDnsClientSubnetIpv4Override)) ||
+                        (subnet.HasIpv6Override && !Equals(subnet.Ipv6Override, _eDnsClientSubnetIpv6Override));
                     bool excludedPortsChanged = outbound.ExcludedPorts is not null && !HaveSameSocketPoolExcludedPorts(outbound.ExcludedPorts);
                     bool ipv6Changed = outbound.Ipv6Mode.HasValue && outbound.Ipv6Mode != _ipv6Mode;
                     bool poolChanged = outbound.PoolEnabled.HasValue && outbound.PoolEnabled != _enableUdpSocketPool;
@@ -7534,7 +7625,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -7548,7 +7639,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet));
                         _pendingSave = false;
                     }
                     catch
@@ -7562,6 +7653,7 @@ namespace DnsServerCore.Dns
                     }
 
                     SetOutboundSocketSettings(outbound);
+                    SetClientSubnetSettings(subnet);
 
                     if (appAutoUpdateChanged)
                         _dnsApplicationManager.EnableAutomaticUpdate = appAutoUpdate.Value;
@@ -7813,8 +7905,7 @@ namespace DnsServerCore.Dns
                     if (value.AddressFamily != AddressFamily.InterNetwork)
                         throw new ArgumentException("EDNS Client Subnet IPv4 Override must be an IPv4 network address.", nameof(EDnsClientSubnetIpv4Override));
 
-                    if (value.IsHostAddress)
-                        value = new NetworkAddress(value.Address, _eDnsClientSubnetIPv4PrefixLength);
+                    value = NormalizeClientSubnetOverride(value, _eDnsClientSubnetIPv4PrefixLength);
                 }
 
                 _eDnsClientSubnetIpv4Override = value;
@@ -7831,8 +7922,7 @@ namespace DnsServerCore.Dns
                     if (value.AddressFamily != AddressFamily.InterNetworkV6)
                         throw new ArgumentException("EDNS Client Subnet IPv6 Override must be an IPv6 network address.", nameof(EDnsClientSubnetIpv6Override));
 
-                    if (value.IsHostAddress)
-                        value = new NetworkAddress(value.Address, _eDnsClientSubnetIPv6PrefixLength);
+                    value = NormalizeClientSubnetOverride(value, _eDnsClientSubnetIPv6PrefixLength);
                 }
 
                 _eDnsClientSubnetIpv6Override = value;

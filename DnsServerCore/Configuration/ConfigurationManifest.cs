@@ -108,6 +108,13 @@ namespace DnsServerCore.Configuration
                     if (sourceNetworks.TryGetProperty("ipv6", out JsonElement ipv6))
                         ReadNetworks(ipv6, "/dns/sourceNetworks/ipv6", AddressFamily.InterNetworkV6);
                 }
+                if (dns.TryGetProperty("clientSubnet", out JsonElement clientSubnet))
+                {
+                    if (clientSubnet.TryGetProperty("ipv4Override", out JsonElement ipv4Override))
+                        ReadNetwork(ipv4Override.GetString(), "/dns/clientSubnet/ipv4Override", AddressFamily.InterNetwork);
+                    if (clientSubnet.TryGetProperty("ipv6Override", out JsonElement ipv6Override))
+                        ReadNetwork(ipv6Override.GetString(), "/dns/clientSubnet/ipv6Override", AddressFamily.InterNetworkV6);
+                }
                 if (dns.TryGetProperty("authoritative", out JsonElement authoritative))
                 {
                     if (authoritative.TryGetProperty("defaultResponsiblePerson", out JsonElement responsiblePerson))
@@ -273,16 +280,22 @@ namespace DnsServerCore.Configuration
 
             var networks = new NetworkAddress[value.GetArrayLength()];
             for (int i = 0; i < networks.Length; i++)
-            {
-                string entry = value[i].GetString();
-                int slash = entry.IndexOf('/');
-                if (!NetworkAddress.TryParse(entry, out networks[i]) ||
-                    (slash >= 0 && (!byte.TryParse(entry.AsSpan(slash + 1), out byte prefix) || prefix != networks[i].PrefixLength)))
-                    throw new InvalidDataException($"{path}/{i}: Invalid network address or prefix.");
-                if (family.HasValue && networks[i].AddressFamily != family.Value)
-                    throw new InvalidDataException($"{path}/{i}: Network address uses the wrong IP family.");
-            }
+                networks[i] = ReadNetwork(value[i].GetString(), $"{path}/{i}", family);
             return networks.Distinct().ToArray();
+        }
+
+        internal static NetworkAddress ReadNetwork(string entry, string path, AddressFamily? family = null)
+        {
+            if (entry is null)
+                return null;
+
+            int slash = entry.IndexOf('/');
+            if (!NetworkAddress.TryParse(entry, out NetworkAddress network) ||
+                (slash >= 0 && (!byte.TryParse(entry.AsSpan(slash + 1), out byte prefix) || prefix != network.PrefixLength)))
+                throw new InvalidDataException($"{path}: Invalid network address or prefix.");
+            if (family.HasValue && network.AddressFamily != family.Value)
+                throw new InvalidDataException($"{path}: Network address uses the wrong IP family.");
+            return network;
         }
 
         internal static string ReadDefaultResponsiblePerson(JsonElement value)
