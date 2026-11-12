@@ -123,6 +123,7 @@ def wait_for(check, description, timeout=45):
 def verify(current, previous, folder, propagation, graceful):
     ports = allocate_ports()
     password = secrets.token_hex(16)
+    os.environ["TECHNITIUM_TEST_CLUSTER_USER_PASSWORD"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_SSO_SECRET"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_SSO_ROTATED_SECRET"] = secrets.token_hex(16)
     os.environ["TECHNITIUM_TEST_CLUSTER_LDAP_SECRET"] = secrets.token_hex(16)
@@ -163,6 +164,8 @@ def verify(current, previous, folder, propagation, graceful):
         sso_revision = ok(primary.call("settings/config/plan", manifest=sso_policy))["revision"]
         group_policy = {"schemaVersion": 1, "auth": {"groups": {"Operators": {}}}}
         group_revision = ok(primary.call("settings/config/plan", manifest=group_policy))["revision"]
+        user_policy = {"schemaVersion": 1, "auth": {"users": {"cluster-operator": None}}}
+        user_revision = ok(primary.call("settings/config/plan", manifest=user_policy))["revision"]
         joined = ok(secondary.call("admin/cluster/initJoin", form={
             "secondaryNodeIpAddresses": "127.0.0.1", "primaryNodeUrl": initial["clusterNodes"][0]["url"],
             "primaryNodeIpAddress": "127.0.0.1", "primaryNodeUsername": "admin",
@@ -179,12 +182,24 @@ def verify(current, previous, folder, propagation, graceful):
             assert joined["supportsDeclarativeLdap"] is True
             assert joined["supportsDeclarativeSso"] is True
             assert joined["supportsDeclarativeGroups"] is True
+            assert joined["supportsDeclarativeUsers"] is True
             rejected = primary.call("settings/config/apply", manifest=dns_policy, revision=dns_policy_revision)
             assert rejected["status"] == "error" and "stale" in rejected["errorMessage"], rejected
             verify_propagation(primary, secondary, graceful)
             return
         assert any(node["type"] == "Secondary" and node["state"] == "Self" for node in joined["clusterNodes"])
-        assert not joined.get("supportsDeclarativeGroups"), joined
+        assert not joined.get("supportsDeclarativeUsers"), joined
+        for rejected in (
+            primary.call("settings/config/plan", manifest=user_policy),
+            primary.call("settings/config/apply", manifest=user_policy, revision=user_revision),
+        ):
+            assert rejected["status"] == "error" and "declarative users" in rejected["errorMessage"], rejected
+        if joined.get("supportsDeclarativeGroups"):
+            plan = ok(primary.call("settings/config/plan", manifest=group_policy))
+            ok(primary.call("settings/config/apply", manifest=group_policy, revision=plan["revision"]))
+            ok(primary.call("admin/groups/get?group=Operators"))
+            print("Mixed-build check passed. Existing group support allowed the update and rejected user ownership.")
+            return
         for rejected in (
             primary.call("settings/config/plan", manifest=group_policy),
             primary.call("settings/config/apply", manifest=group_policy, revision=group_revision),
@@ -564,6 +579,7 @@ def verify_propagation(primary, secondary, graceful):
     verify_ldap_policy(primary, secondary, release, local_web)
     verify_sso_policy(primary, secondary, release, local_web)
     verify_group_policy(primary, secondary, release, local_web)
+    verify_user_policy(primary, secondary, release, local_web)
 
     publication_failure = "DNS Server failed to update this Secondary node's details on the Primary node."
     previous_failures = log_message_count(secondary, publication_failure)
@@ -1100,6 +1116,79 @@ def verify_group_policy(primary, secondary, cluster_manifest, local_web):
     apply(primary, desired)
     wait_for(lambda: secondary.call("admin/groups/get?group=Operators")["status"] == "error",
              "the Secondary to remove the group")
+    apply(primary, cluster_manifest)
+
+
+def verify_user_policy(primary, secondary, cluster_manifest, local_web):
+    variable = "TECHNITIUM_TEST_CLUSTER_USER_PASSWORD"
+    name = "cluster-operator"
+    account = {"displayName": "Cluster operator", "disabled": False, "password": {"environment": variable}}
+    users = {name: account}
+    manifest = {**cluster_manifest, "auth": {"users": users}}
+    endpoint = f"admin/users/get?user={name}"
+    root = f"/auth/users/{name}"
+    denied = secondary.call("settings/config/plan", manifest={"schemaVersion": 1, "auth": {"users": users}})
+    assert denied["status"] == "error" and "Only the Primary" in denied["errorMessage"], denied
+
+    def apply(node, desired):
+        def preview():
+            result = node.call("settings/config/plan", manifest=desired)
+            if result["status"] == "error" and "has not advertised support for declarative users" in result["errorMessage"]:
+                return None
+            return ok(result)
+        plan = wait_for(preview, "the cluster to confirm declarative user support")
+        assert os.environ[variable] not in json.dumps(plan)
+        ok(node.call("settings/config/apply", manifest=desired, revision=plan["revision"]))
+        return plan
+
+    def matches(disabled, owned):
+        result = secondary.call(endpoint)
+        if result["status"] != "ok":
+            return False
+        state = ok(result)
+        managed = {path for path in state["managedSettings"] if path == root or path.startswith(root + "/")}
+        return state["displayName"] == account["displayName"] and state["disabled"] is disabled and managed == owned
+
+    owned = {root, *(f"{root}/{field}" for field in account)}
+    apply(primary, manifest)
+    wait_for(lambda: matches(False, owned), "the Secondary to inherit the user account")
+    secondary.stop()
+    secondary.start(release_seed=False)
+    assert matches(False, owned)
+    apply(secondary, local_web)
+    assert matches(False, owned)
+    denied = secondary.call(f"admin/users/set?user={name}&displayName=Changed")
+    assert denied["status"] == "error" and root in denied["errorMessage"], denied
+    user_session = ok(secondary.call("user/login", form={"user": name, "pass": os.environ[variable]}))["token"]
+    exported = ok(primary.call("settings/config/export"))
+    assert root + "/password" in exported["missingInputs"]
+    assert os.environ[variable] not in json.dumps(exported)
+
+    def check_session():
+        admin = secondary.token
+        try:
+            secondary.token = user_session
+            return secondary.call("user/profile/get")["status"]
+        finally:
+            secondary.token = admin
+
+    assert check_session() == "ok"
+    zone = "user-grant.fixture.test"
+    ok(secondary.call(f"zones/create?zone={zone}&type=Primary"))
+    grant_endpoint = f"zones/permissions/get?zone={zone}"
+    ok(secondary.call(f"zones/permissions/set?zone={zone}", form={"userPermissions": f"{name}|true|false|false"}))
+    assert any(grant["username"] == name for grant in ok(secondary.call(grant_endpoint))["userPermissions"])
+
+    account["disabled"] = True
+    apply(primary, manifest)
+    wait_for(lambda: matches(True, owned) and check_session() == "invalid-token",
+             "the Secondary to disable the account and revoke its existing session")
+    apply(primary, cluster_manifest)
+    wait_for(lambda: matches(True, set()), "the Secondary to release user ownership")
+    users[name] = None
+    apply(primary, manifest)
+    wait_for(lambda: secondary.call(endpoint)["status"] == "error", "the Secondary to remove the account")
+    assert all(grant["username"] != name for grant in ok(secondary.call(grant_endpoint))["userPermissions"])
     apply(primary, cluster_manifest)
 
 

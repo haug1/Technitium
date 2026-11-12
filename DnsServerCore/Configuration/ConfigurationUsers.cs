@@ -46,6 +46,8 @@ namespace DnsServerCore.Configuration
                     }
                 }
             }
+            if (paths.Count > ushort.MaxValue)
+                throw new InvalidDataException($"{Path}: Too many user ownership declarations.");
             return paths.ToArray();
         }
 

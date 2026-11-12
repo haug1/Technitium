@@ -5325,6 +5325,8 @@ The Primary can apply `auth.sso` when every peer advertises `supportsDeclarative
 
 The Primary can apply `auth.groups` when every peer advertises `supportsDeclarativeGroups`. Secondaries inherit definitions and ownership. The Primary's export includes the group definitions.
 
+The Primary can apply `auth.users` when every peer advertises `supportsDeclarativeUsers`. Secondaries inherit accounts and ownership. Disabled or deleted accounts lose active interactive sessions on those nodes.
+
 ### Export Declarative Configuration
 
 Send `GET /api/settings/config/export` with a bearer token that has Settings view permission. Add `includePreviewOnly=true` to include settings that support preview but cannot yet be applied.
@@ -7466,6 +7468,7 @@ WHERE:
 - `supportsDeclarativeLdap` (optional): Set to true when the Secondary can inherit manifest ownership of LDAP settings. Required when the Primary manages any LDAP fields.
 - `supportsDeclarativeSso` (optional): Set to true when the Secondary can inherit manifest ownership of SSO settings. Required when the Primary manages any SSO fields.
 - `supportsDeclarativeGroups` (optional): Set to true when the Secondary can inherit manifest ownership of authentication groups.
+- `supportsDeclarativeUsers` (optional): Set to true when the Secondary can inherit manifest ownership of user accounts.
 
 RESPONSE:
 ```
