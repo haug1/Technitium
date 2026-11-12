@@ -10,6 +10,8 @@ namespace DnsServerApp
 {
     internal static class ConfigurationCommand
     {
+        private static readonly JsonSerializerOptions _exportOptions = new() { WriteIndented = true };
+
         public static async Task<int> RunAsync(string[] args)
         {
             try
@@ -25,9 +27,16 @@ namespace DnsServerApp
                         await WritePlanAsync(LoadManifest(args[2]), ParseServerUrl(args[3]));
                         return 0;
 
+                    case "export" when args.Length == 3:
+                        JsonElement snapshot = await ReadCurrentSettingsAsync(ParseServerUrl(args[2]));
+                        Console.WriteLine(ConfigurationPlan.Export(snapshot).ToJsonString(_exportOptions));
+                        Console.Error.WriteLine("Partial export of supported settings. Supply blocklist sources separately if needed.");
+                        return 0;
+
                     default:
                         Console.Error.WriteLine("Usage: DnsServerApp config validate [manifest]");
                         Console.Error.WriteLine("       DnsServerApp config plan <manifest> <server-url>");
+                        Console.Error.WriteLine("       DnsServerApp config export <server-url>");
                         return 2;
                 }
             }
@@ -67,6 +76,20 @@ namespace DnsServerApp
 
         private static async Task WritePlanAsync(ConfigurationManifest manifest, Uri serverUrl)
         {
+            JsonElement current = await ReadCurrentSettingsAsync(serverUrl);
+            var changes = ConfigurationPlan.Create(manifest, current);
+            if (changes.Count == 0)
+                Console.WriteLine("No setting changes.");
+
+            foreach (ConfigurationChange change in changes)
+            {
+                string restart = change.RestartWebService ? " (web service restart)" : "";
+                Console.WriteLine($"{change.Kind} {change.Path}{restart}");
+            }
+        }
+
+        private static async Task<JsonElement> ReadCurrentSettingsAsync(Uri serverUrl)
+        {
             string? token = Environment.GetEnvironmentVariable("TECHNITIUM_CONFIG_API_TOKEN");
             if (string.IsNullOrWhiteSpace(token))
                 throw new InvalidDataException("Set TECHNITIUM_CONFIG_API_TOKEN to a token with Settings view permission.");
@@ -90,15 +113,7 @@ namespace DnsServerApp
                 || !status.ValueEquals("ok") || !root.TryGetProperty("response", out JsonElement current))
                 throw new InvalidDataException("The server rejected the request for current settings.");
 
-            var changes = ConfigurationPlan.Create(manifest, current);
-            if (changes.Count == 0)
-                Console.WriteLine("No setting changes.");
-
-            foreach (ConfigurationChange change in changes)
-            {
-                string restart = change.RestartWebService ? " (web service restart)" : "";
-                Console.WriteLine($"{change.Kind} {change.Path}{restart}");
-            }
+            return current.Clone();
         }
     }
 }

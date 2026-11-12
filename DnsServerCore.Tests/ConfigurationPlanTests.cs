@@ -2,6 +2,7 @@ using DnsServerCore.Configuration;
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -35,6 +36,22 @@ namespace DnsServerCore.Tests
             JsonElement after = await server.GetSettingsAsync();
             Assert.Equal(port, after.GetProperty("webServiceHttpPort").GetInt32());
             Assert.Equal(JsonValueKind.Null, after.GetProperty("defaultResponsiblePerson").ValueKind);
+        }
+
+        [Fact]
+        public async Task ExportIsStableAndRoundTripsThroughThePreview()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            JsonElement current = await server.GetSettingsAsync();
+            JsonObject snapshot = JsonNode.Parse(current.GetRawText())!.AsObject();
+            snapshot["blockListUrls"] = new JsonArray("https://example.test/list?token=fixture-secret");
+            snapshot["proxy"] = new JsonObject { ["password"] = "fixture-secret" };
+
+            string exported = ConfigurationPlan.Export(JsonSerializer.SerializeToElement(snapshot)).ToJsonString();
+            Assert.Equal(ConfigurationPlan.Export(current).ToJsonString(), exported);
+            Assert.DoesNotContain("fixture-secret", exported);
+            Assert.False(JsonNode.Parse(exported)!["blocklists"]!.AsObject().ContainsKey("sources"));
+            Assert.Empty(ConfigurationPlan.Create(Load(exported), current));
         }
 
         [Fact]

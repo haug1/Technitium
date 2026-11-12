@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Mail;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DnsServerCore.Dns.ZoneManagers;
 
 namespace DnsServerCore.Configuration
@@ -19,7 +20,8 @@ namespace DnsServerCore.Configuration
 
     public static class ConfigurationPlan
     {
-        private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService, Func<JsonElement, JsonElement> Normalize = null);
+        private sealed record Setting(string ApiField, JsonElement Default, bool RestartWebService,
+            Func<JsonElement, JsonElement> Normalize = null, bool OmitFromExport = false);
 
         private static readonly Dictionary<string, Setting> _settings = new(StringComparer.Ordinal)
         {
@@ -46,14 +48,13 @@ namespace DnsServerCore.Configuration
             ["/statistics/retentionDays"] = Field("maxStatFileDays", 365),
             ["/blocklists/updateIntervalHours"] = Field("blockListUpdateIntervalHours", 24),
             ["/blocklists/sources"] = new("blockListUrls", JsonSerializer.SerializeToElement(Array.Empty<string>()),
-                false, NormalizeBlockListSources),
+                false, NormalizeBlockListSources, OmitFromExport: true),
             ["/apps/autoUpdate"] = Field("dnsAppsEnableAutomaticUpdate", true)
         };
 
         public static IReadOnlyList<ConfigurationChange> Create(ConfigurationManifest manifest, JsonElement currentSettings)
         {
-            if (currentSettings.ValueKind != JsonValueKind.Object)
-                throw new InvalidDataException("The server did not return a settings object.");
+            RequireSettingsObject(currentSettings);
 
             var changes = new List<ConfigurationChange>();
             foreach (JsonProperty section in manifest.Settings.EnumerateObject())
@@ -67,12 +68,55 @@ namespace DnsServerCore.Configuration
             return changes.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
         }
 
+        public static JsonObject Export(JsonElement currentSettings)
+        {
+            RequireSettingsObject(currentSettings);
+            var manifest = new JsonObject { ["schemaVersion"] = ConfigurationManifest.CurrentSchemaVersion };
+
+            foreach (var (path, setting) in _settings.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+            {
+                if (setting.OmitFromExport)
+                    continue;
+
+                JsonElement value = GetCurrentSetting(currentSettings, path, setting);
+                string[] components = path[1..].Split('/');
+                JsonObject section = manifest;
+                for (int i = 0; i < components.Length - 1; i++)
+                {
+                    if (section[components[i]] is not JsonObject child)
+                    {
+                        child = new JsonObject();
+                        section.Add(components[i], child);
+                    }
+
+                    section = child;
+                }
+
+                section.Add(components[^1], JsonNode.Parse(value.GetRawText()));
+            }
+
+            return manifest;
+        }
+
+        private static void RequireSettingsObject(JsonElement currentSettings)
+        {
+            if (currentSettings.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("The server did not return a settings object.");
+        }
+
+        private static JsonElement GetCurrentSetting(JsonElement currentSettings, string path, Setting setting)
+        {
+            if (!currentSettings.TryGetProperty(setting.ApiField, out JsonElement value))
+                throw new InvalidDataException($"{path}: The server did not return the current setting.");
+
+            return value;
+        }
+
         private static void Compare(JsonElement desired, string path, JsonElement currentSettings, List<ConfigurationChange> changes)
         {
             if (_settings.TryGetValue(path, out Setting setting))
             {
-                if (!currentSettings.TryGetProperty(setting.ApiField, out JsonElement current))
-                    throw new InvalidDataException($"{path}: The server did not return the current setting.");
+                JsonElement current = GetCurrentSetting(currentSettings, path, setting);
 
                 JsonElement candidate;
                 try
