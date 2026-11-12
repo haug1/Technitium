@@ -252,3 +252,43 @@ Defaults below describe a scope created through the API. On initial creation of 
 | `ignoreClientIdentifierOption` | `ignoreClientIdentifierOption` | Boolean, true for API-created scopes | Uses the MAC address for allocation. Changing identity rules can affect renewal. |
 
 Active leases are persisted in the same scope files as settings. Reconciliation must preserve them unless an explicit scope operation requires otherwise. Offers, allocation cursors, interface bindings, and lease timestamps are runtime state. Lease conversion to or from a reservation is a runtime operation that also changes configured reservations. [Reservation setters](DnsServerCore/Dhcp/Scope.cs#L2152) · [Lease persistence](DnsServerCore/Dhcp/Scope.cs#L1796)
+
+## Authoritative zone definitions and options
+
+Use the normalized zone name as the resource key under `zones.<name>`. Zone settings are stored in `zones/<name>.zone` with record data. The zone file writer uses version 4, and the zone metadata writer uses version 14. Changes apply live through the zone manager and can trigger transfer or notification work. Clustering provisions catalog members through DNS. The configuration transfer ZIP carries selected DNSSEC keys for signed primary member zones, while catalog and zone transfer handle the replicated zone data. [Zone creation API](DnsServerCore/WebServiceZonesApi.cs#L1579) · [Options API](DnsServerCore/WebServiceZonesApi.cs#L3369) · [Zone file writer](DnsServerCore/Dns/ZoneManagers/AuthZoneManager.cs#L588) · [Zone metadata writer](DnsServerCore/Dns/Zones/AuthZoneInfo.cs#L1194) · [Cluster transfer](DnsServerCore/DnsWebService.cs#L713)
+
+| Proposed manifest path under `zones.<name>` | API field or operation | Type and default | Validation and dependencies |
+| --- | --- | --- | --- |
+| Resource key | `zone`, legacy `domain` | DNS name, required | Normalize name and IDN form. Represent the root explicitly. Reject duplicate canonical names. |
+| `type` | `type`, zone conversion | Enum, `Primary` on API creation | Supports Primary, Secondary, Stub, Forwarder, SecondaryForwarder, Catalog, and SecondaryCatalog. Validate type transitions against zone manager capabilities. |
+| `enabled` | `disabled`, enable and disable | Boolean, true for new zones | Inverse of the API flag. Special and catalog-managed zones have additional restrictions. |
+| `catalog.name` | `catalog` | Optional zone reference, unset | Must reference a compatible catalog. Membership changes can provision or remove secondary catalog members. |
+| `catalog.overrideQueryAccess` | `overrideCatalogQueryAccess` | Boolean, false | Applies to eligible catalog member types and controls inheritance. |
+| `catalog.overrideZoneTransfer` | `overrideCatalogZoneTransfer` | Boolean, false | Applies to primary, secondary, and forwarder zones with compatible membership. |
+| `catalog.overrideNotify` | `overrideCatalogNotify` | Boolean, false | Primary and forwarder zones can override inherited notification settings. |
+| Catalog-provisioned transfer override | `overrideCatalogPrimaryNameServers` in zone options response | Boolean, false | Persisted for secondary zones. Reconcile its catalog source and derived state before exposing a local override. |
+| `primary.servers` | `primaryNameServerAddresses` | Nameserver array, unset unless required by creation | Secondary-family and stub zones use nameserver parsing. Stub uses UDP. An unset list can permit discovery for eligible zones. |
+| `primary.transferProtocol` | `primaryZoneTransferProtocol`, creation alias `zoneTransferProtocol` | Enum, TCP at secondary creation | Validate supported transfer protocols and QUIC platform support. |
+| `primary.tsigKey` | `primaryZoneTransferTsigKeyName`, creation alias `tsigKeyName` | Optional TSIG key name, unset | Reference a configured key by normalized name. |
+| `primary.validateZone` | `validateZone` | Boolean, false | Applies to secondary zones. A catalog-provisioned value comes from the catalog. |
+| `query.mode` | `queryAccess` | Query access enum, Allow in the base zone | Supports deny, unrestricted, private networks, zone nameservers, ACL, and combined nameservers plus ACL. Inherited or zone-specific rules can change effective access. |
+| `query.networkAcl` | `queryAccessNetworkACL` | Ordered ACL, unset | Empty clears the local ACL. Applies when selected by the query policy. |
+| `transfer.mode` | `zoneTransfer` | Transfer policy enum, AllowOnlyZoneNameServers for new primary zones and Deny in the base zone | Supports deny, unrestricted, zone nameservers, ACL, and combined nameservers plus ACL. Catalog inheritance can supply the effective policy. |
+| `transfer.networkAcl` | `zoneTransferNetworkACL` | Ordered ACL, unset | Empty clears the local ACL. Used by the selected transfer policy. |
+| `transfer.tsigKeys` | `zoneTransferTsigKeyNames` | TSIG key name set, unset | Trim and normalize names. Empty clears the list. |
+| `notify.mode` | `notify` | Notify enum, ZoneNameServers for new primary zones and None in the base zone | Supports none, zone nameservers, specified nameservers, both, and separate catalog/member destinations for catalog zones. |
+| `notify.nameServers` | `notifyNameServers` | IP address array, unset | Used when the notify mode targets explicit servers. |
+| `notify.secondaryCatalogNameServers` | `notifySecondaryCatalogsNameServers` | IP address array, unset | Applies to catalog zones. |
+| `updates.mode` | `update` | Update policy enum, Deny | Supports deny, unrestricted, zone nameservers, ACL, and combined nameservers plus ACL. Applies to primary, secondary, forwarder, and secondary forwarder zones. |
+| `updates.networkAcl` | `updateNetworkACL` | Ordered ACL, unset | Empty clears the local list. |
+| `updates.securityPolicies` | `updateSecurityPolicies` | Map of TSIG key to DNS name and allowed record types, unset | Applies to primary and forwarder zones. Names and type lists use the dynamic update policy validators. |
+| `permissions` | `zones/permissions/get`, `zones/permissions/set` | User and group permission maps | Stored in `auth.config`. Reuse permission flags and administrative protections. |
+| SOA serial policy | `useSoaSerialDateScheme` | Boolean, inherited from the server when creating a primary zone | Persisted as SOA record metadata. Map to the operator-managed SOA record instead of a duplicate setting. |
+
+Creation-time `initializeForwarder` controls whether the API creates an initial FWD record. Its `forwarder`, `protocol`, `dnssecValidation`, and `proxyType`, `proxyAddress`, `proxyPort`, `proxyUsername`, and `proxyPassword` parameters belong to that record. A proxy password must use a secret reference.
+
+Transfer expiry, IXFR history, validation failures, last modification timestamps, and catalog-derived member data belong to runtime state. Use source zone and catalog settings to recreate the intended topology. Preserve the destination's replicated records during reconciliation.
+
+## Explicit allow and block entries
+
+`allowZones` and `blockZones` are sets of normalized DNS names, each initially empty. They map to the `allowed/*` and `blocked/*` APIs, including the bulk `allowedZones` and `blockedZones` inputs. Both apply live and transfer across the cluster. The blocked manager reads legacy `custom-blocked.config` when present. Downloaded blocklist contents belong to the blocklist cache. [Allow and block APIs](DnsServerCore/WebServiceOtherZonesApi.cs#L184) · [Allow persistence](DnsServerCore/Dns/ZoneManagers/AllowedZoneManager.cs#L123) · [Block persistence](DnsServerCore/Dns/ZoneManagers/BlockedZoneManager.cs#L123)
