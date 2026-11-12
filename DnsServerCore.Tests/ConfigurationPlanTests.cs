@@ -466,6 +466,65 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DnsTuningRestartsListenersAndPreservesSettingsAcrossReload()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string manifest = """
+                {"schemaVersion":1,"dns":{"tuning":{"clientTimeoutMs":2500,"tcpSendTimeoutMs":8000,
+                    "udpReceiveBufferKiB":1024,"maxConcurrentResolutionsPerCore":90}}}
+                """;
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Collection(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.False(change.GetProperty("restartDnsService").GetBoolean()),
+                change => Assert.False(change.GetProperty("restartDnsService").GetBoolean()),
+                change => Assert.True(change.GetProperty("restartDnsService").GetBoolean()),
+                change => Assert.True(change.GetProperty("restartDnsService").GetBoolean()));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
+            await server.RestartAsync();
+
+            JsonElement settings = await server.GetSettingsAsync();
+            Assert.Equal(8000, settings.GetProperty("tcpSendTimeout").GetInt32());
+            Assert.Equal(1024, settings.GetProperty("udpReceiveBufferSizeKB").GetInt32());
+            Assert.Equal(90, settings.GetProperty("maxConcurrentResolutionsPerCore").GetInt32());
+            Assert.Equal(4, settings.GetProperty("managedSettings").GetArrayLength());
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            JsonElement conflict = await server.CallAsync("settings/set?tcpSendTimeout=10000", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/tuning/tcpSendTimeoutMs", conflict.GetProperty("errorMessage").GetString());
+
+            using var occupied = new TcpListener(IPAddress.Loopback, 0);
+            occupied.Start();
+            JsonNode candidate = JsonNode.Parse(ListenerManifest((IPEndPoint)occupied.LocalEndpoint))!;
+            candidate["dns"]!["tuning"] = new JsonObject { ["tcpSendTimeoutMs"] = 7000 };
+            string changed = candidate.ToJsonString();
+            string revision = (await PreviewAsync(server, changed)).GetProperty("revision").GetString()!;
+            JsonElement rejected = await ApplyAsync(server, changed, revision);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
+            Assert.Equal(8000, (await server.GetSettingsAsync()).GetProperty("tcpSendTimeout").GetInt32());
+        }
+
+        [Fact]
+        public async Task StartupPersistsNewListenerTuningForAnAlreadyOwnedField()
+        {
+            const string initial = """{"schemaVersion":1,"dns":{"tuning":{"tcpReceiveTimeoutMs":8000}}}""";
+            await using var server = await LoopbackWebService.StartAsync(startupManifest: initial);
+            Assert.Equal(8000, (await server.GetSettingsAsync()).GetProperty("tcpReceiveTimeout").GetInt32());
+
+            string path = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            await File.WriteAllTextAsync(path, """{"schemaVersion":1,"dns":{"tuning":{"tcpReceiveTimeoutMs":7000}}}""");
+            await server.RestartAsync();
+            Assert.Equal(7000, (await server.GetSettingsAsync()).GetProperty("tcpReceiveTimeout").GetInt32());
+
+            File.Delete(path);
+            await server.RestartAsync();
+            Assert.Equal(7000, (await server.GetSettingsAsync()).GetProperty("tcpReceiveTimeout").GetInt32());
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
+        }
+
+        [Fact]
         public async Task RateLimitsPersistExtendedOwnershipAndRejectConflictingRestore()
         {
             await using var server = await LoopbackWebService.StartAsync();

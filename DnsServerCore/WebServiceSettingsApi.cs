@@ -1061,6 +1061,17 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("qpmLimitUdpTruncationPercentage", int.Parse, out int truncation) ? truncation : null,
                     request.TryQueryOrFormArray("qpmLimitBypassList", NetworkAddress.Parse, out NetworkAddress[] rateLimitBypass) ? rateLimitBypass : null));
 
+                DnsServer.DnsTuning dnsTuning = _dnsWebService._dnsServer.CheckManifestDnsTuning(new DnsServer.DnsTuning(
+                    request.TryGetQueryOrForm("clientTimeout", int.Parse, out int clientTimeout) ? clientTimeout : null,
+                    request.TryGetQueryOrForm("tcpSendTimeout", int.Parse, out int tcpSendTimeout) ? tcpSendTimeout : null,
+                    request.TryGetQueryOrForm("tcpReceiveTimeout", int.Parse, out int tcpReceiveTimeout) ? tcpReceiveTimeout : null,
+                    request.TryGetQueryOrForm("quicIdleTimeout", int.Parse, out int quicIdleTimeout) ? quicIdleTimeout : null,
+                    request.TryGetQueryOrForm("quicMaxInboundStreams", int.Parse, out int quicMaxInboundStreams) ? quicMaxInboundStreams : null,
+                    request.TryGetQueryOrForm("listenBacklog", int.Parse, out int listenBacklog) ? listenBacklog : null,
+                    request.TryGetQueryOrForm("udpSendBufferSizeKB", int.Parse, out int udpSendBufferSizeKB) ? udpSendBufferSizeKB : null,
+                    request.TryGetQueryOrForm("udpReceiveBufferSizeKB", int.Parse, out int udpReceiveBufferSizeKB) ? udpReceiveBufferSizeKB : null,
+                    request.TryGetQueryOrForm("maxConcurrentResolutionsPerCore", ushort.Parse, out ushort maxConcurrentResolutionsPerCore) ? maxConcurrentResolutionsPerCore : null));
+
                 bool hasIgnoreResolverLogs = request.TryGetQueryOrForm("ignoreResolverLogs", bool.Parse, out bool ignoreResolverLogs);
                 bool hasLogQueries = request.TryGetQueryOrForm("logQueries", bool.Parse, out bool logQueries);
                 _dnsWebService._dnsServer.CheckManifestDnsLogging(new DnsServer.DnsLoggingSettings(
@@ -1181,88 +1192,26 @@ namespace DnsServerCore
                         if (rateLimits.BypassNetworks is not null)
                             clusterParameters.Add("qpmLimitBypassList", rateLimits.BypassNetworks.Join());
 
-                        if (request.TryGetQueryOrForm("clientTimeout", int.Parse, out int clientTimeout))
-                        {
-                            _dnsWebService._dnsServer.ClientTimeout = clientTimeout;
-
-                            clusterParameters.Add("clientTimeout", clientTimeout.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("tcpSendTimeout", int.Parse, out int tcpSendTimeout))
-                        {
-                            if (_dnsWebService._dnsServer.TcpSendTimeout != tcpSendTimeout)
-                            {
-                                _dnsWebService._dnsServer.TcpSendTimeout = tcpSendTimeout;
-                                restartDnsService = true;
-                            }
-
-                            clusterParameters.Add("tcpSendTimeout", tcpSendTimeout.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("tcpReceiveTimeout", int.Parse, out int tcpReceiveTimeout))
-                        {
-                            if (_dnsWebService._dnsServer.TcpReceiveTimeout != tcpReceiveTimeout)
-                            {
-                                _dnsWebService._dnsServer.TcpReceiveTimeout = tcpReceiveTimeout;
-                                restartDnsService = true;
-                            }
-
-                            clusterParameters.Add("tcpReceiveTimeout", tcpReceiveTimeout.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("quicIdleTimeout", int.Parse, out int quicIdleTimeout))
-                        {
-                            _dnsWebService._dnsServer.QuicIdleTimeout = quicIdleTimeout;
-
-                            clusterParameters.Add("quicIdleTimeout", quicIdleTimeout.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("quicMaxInboundStreams", int.Parse, out int quicMaxInboundStreams))
-                        {
-                            _dnsWebService._dnsServer.QuicMaxInboundStreams = quicMaxInboundStreams;
-
-                            clusterParameters.Add("quicMaxInboundStreams", quicMaxInboundStreams.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("listenBacklog", int.Parse, out int listenBacklog))
-                        {
-                            if (_dnsWebService._dnsServer.ListenBacklog != listenBacklog)
-                            {
-                                _dnsWebService._dnsServer.ListenBacklog = listenBacklog;
-                                restartDnsService = true;
-                            }
-
-                            clusterParameters.Add("listenBacklog", listenBacklog.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("udpSendBufferSizeKB", int.Parse, out int udpSendBufferSizeKB))
-                        {
-                            if (_dnsWebService._dnsServer.UdpSendBufferSizeKB != udpSendBufferSizeKB)
-                            {
-                                _dnsWebService._dnsServer.UdpSendBufferSizeKB = udpSendBufferSizeKB;
-                                restartDnsService = true;
-                            }
-
-                            clusterParameters.Add("udpSendBufferSizeKB", udpSendBufferSizeKB.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("udpReceiveBufferSizeKB", int.Parse, out int udpReceiveBufferSizeKB))
-                        {
-                            if (_dnsWebService._dnsServer.UdpReceiveBufferSizeKB != udpReceiveBufferSizeKB)
-                            {
-                                _dnsWebService._dnsServer.UdpReceiveBufferSizeKB = udpReceiveBufferSizeKB;
-                                restartDnsService = true;
-                            }
-
-                            clusterParameters.Add("udpReceiveBufferSizeKB", udpReceiveBufferSizeKB.ToString());
-                        }
-
-                        if (request.TryGetQueryOrForm("maxConcurrentResolutionsPerCore", ushort.Parse, out ushort maxConcurrentResolutionsPerCore))
-                        {
-                            _dnsWebService._dnsServer.MaxConcurrentResolutionsPerCore = maxConcurrentResolutionsPerCore;
-
-                            clusterParameters.Add("maxConcurrentResolutionsPerCore", maxConcurrentResolutionsPerCore.ToString());
-                        }
+                        restartDnsService |= _dnsWebService._dnsServer.DnsTuningRequiresRestart(dnsTuning);
+                        _dnsWebService._dnsServer.SetDnsTuning(dnsTuning);
+                        if (dnsTuning.ClientTimeout.HasValue)
+                            clusterParameters.Add("clientTimeout", dnsTuning.ClientTimeout.Value.ToString());
+                        if (dnsTuning.TcpSendTimeout.HasValue)
+                            clusterParameters.Add("tcpSendTimeout", dnsTuning.TcpSendTimeout.Value.ToString());
+                        if (dnsTuning.TcpReceiveTimeout.HasValue)
+                            clusterParameters.Add("tcpReceiveTimeout", dnsTuning.TcpReceiveTimeout.Value.ToString());
+                        if (dnsTuning.QuicIdleTimeout.HasValue)
+                            clusterParameters.Add("quicIdleTimeout", dnsTuning.QuicIdleTimeout.Value.ToString());
+                        if (dnsTuning.QuicMaxInboundStreams.HasValue)
+                            clusterParameters.Add("quicMaxInboundStreams", dnsTuning.QuicMaxInboundStreams.Value.ToString());
+                        if (dnsTuning.ListenBacklog.HasValue)
+                            clusterParameters.Add("listenBacklog", dnsTuning.ListenBacklog.Value.ToString());
+                        if (dnsTuning.UdpSendBufferSizeKB.HasValue)
+                            clusterParameters.Add("udpSendBufferSizeKB", dnsTuning.UdpSendBufferSizeKB.Value.ToString());
+                        if (dnsTuning.UdpReceiveBufferSizeKB.HasValue)
+                            clusterParameters.Add("udpReceiveBufferSizeKB", dnsTuning.UdpReceiveBufferSizeKB.Value.ToString());
+                        if (dnsTuning.MaxConcurrentResolutionsPerCore.HasValue)
+                            clusterParameters.Add("maxConcurrentResolutionsPerCore", dnsTuning.MaxConcurrentResolutionsPerCore.Value.ToString());
 
                         #endregion
 

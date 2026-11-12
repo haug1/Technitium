@@ -102,6 +102,15 @@ namespace DnsServerCore.Configuration
             ["/dns/rateLimits/sampleMinutes"] = Field("qpmLimitSampleMinutes", 5, canApply: true),
             ["/dns/rateLimits/udpTruncationPercentage"] = Field("qpmLimitUdpTruncationPercentage", 50, canApply: true),
             ["/dns/rateLimits/bypassNetworks"] = Field("qpmLimitBypassList", Array.Empty<string>(), canApply: true),
+            ["/dns/tuning/clientTimeoutMs"] = Field("clientTimeout", 2000, canApply: true),
+            ["/dns/tuning/tcpSendTimeoutMs"] = Field("tcpSendTimeout", 10000, canApply: true),
+            ["/dns/tuning/tcpReceiveTimeoutMs"] = Field("tcpReceiveTimeout", 10000, canApply: true),
+            ["/dns/tuning/quicIdleTimeoutMs"] = Field("quicIdleTimeout", 60000, canApply: true),
+            ["/dns/tuning/quicMaxInboundStreams"] = Field("quicMaxInboundStreams", 100, canApply: true),
+            ["/dns/tuning/listenBacklog"] = Field("listenBacklog", 100, canApply: true),
+            ["/dns/tuning/udpSendBufferKiB"] = Field("udpSendBufferSizeKB", 2048, canApply: true),
+            ["/dns/tuning/udpReceiveBufferKiB"] = Field("udpReceiveBufferSizeKB", 2048, canApply: true),
+            ["/dns/tuning/maxConcurrentResolutionsPerCore"] = Field("maxConcurrentResolutionsPerCore", (ushort)100, canApply: true),
             ["/dns/dnssecValidation"] = Field("dnssecValidation", true, canApply: true),
             ["/dns/ipv6Mode"] = Field("ipv6Mode", nameof(IPv6Mode.Disabled), canApply: true),
             ["/dns/udpSocketPool/enabled"] = Field("enableUdpSocketPool", DnsServer.DefaultUdpSocketPoolEnabled, canApply: true),
@@ -197,7 +206,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged)
         {
             CheckApplySupport(manifest);
 
@@ -209,7 +218,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), alreadyActive, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), alreadyActive, listenerTuningStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -321,6 +330,23 @@ namespace DnsServerCore.Configuration
             int? retention = statistics.TryGetProperty("retentionDays", out JsonElement days)
                 ? days.ValueKind == JsonValueKind.Null ? 365 : decimal.ToInt32(days.GetDecimal()) : null;
             return new DnsServer.StatisticsSettings(inMemory, retention);
+        }
+
+        internal static DnsServer.DnsTuning GetDnsTuning(ConfigurationManifest manifest)
+        {
+            if (manifest is null || !manifest.Settings.TryGetProperty("dns", out JsonElement dns) || !dns.TryGetProperty("tuning", out JsonElement tuning))
+                return default;
+
+            return new DnsServer.DnsTuning(Read("clientTimeoutMs"), Read("tcpSendTimeoutMs"), Read("tcpReceiveTimeoutMs"),
+                Read("quicIdleTimeoutMs"), Read("quicMaxInboundStreams"), Read("listenBacklog"), Read("udpSendBufferKiB"),
+                Read("udpReceiveBufferKiB"), (ushort?)Read("maxConcurrentResolutionsPerCore"));
+
+            int? Read(string field)
+            {
+                if (!tuning.TryGetProperty(field, out JsonElement value))
+                    return null;
+                return value.ValueKind == JsonValueKind.Null ? _settings["/dns/tuning/" + field].Default.GetInt32() : decimal.ToInt32(value.GetDecimal());
+            }
         }
 
         private static DnsServer.RateLimitPolicy GetRateLimitPolicy(ConfigurationManifest manifest)
@@ -555,6 +581,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/blocklists/updateIntervalHours: Applying the update interval to a cluster is not implemented.");
             if (GetAppAutoUpdate(manifest).HasValue)
                 throw new InvalidDataException("/apps/autoUpdate: Applying app automatic updates to a cluster is not implemented.");
+            if (GetDnsTuning(manifest) != default)
+                throw new InvalidDataException("/dns/tuning: Applying DNS tuning to a cluster is not implemented.");
             if (GetRateLimitPolicy(manifest) != default)
                 throw new InvalidDataException("/dns/rateLimits: Applying query-rate limits to a cluster is not implemented.");
             if (GetForwardingPolicy(manifest) != default)
@@ -1025,7 +1053,10 @@ namespace DnsServerCore.Configuration
                     ConfigurationChangeKind kind = current.ValueKind == JsonValueKind.Null
                         ? ConfigurationChangeKind.Add
                         : candidate.ValueKind == JsonValueKind.Null ? ConfigurationChangeKind.Remove : ConfigurationChangeKind.Update;
-                    changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService, path == DnsEndpointsPath));
+                    bool restartDns = path == DnsEndpointsPath || path is
+                        "/dns/tuning/tcpSendTimeoutMs" or "/dns/tuning/tcpReceiveTimeoutMs" or "/dns/tuning/quicIdleTimeoutMs" or
+                        "/dns/tuning/quicMaxInboundStreams" or "/dns/tuning/listenBacklog" or "/dns/tuning/udpSendBufferKiB" or "/dns/tuning/udpReceiveBufferKiB";
+                    changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService, restartDns));
                 }
 
                 return;

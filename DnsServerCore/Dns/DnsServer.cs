@@ -202,8 +202,22 @@ namespace DnsServerCore.Dns
             RateLimitIpv6 = 2,
             RateLimitSampleMinutes = 4,
             RateLimitUdpTruncation = 8,
-            RateLimitBypass = 16
+            RateLimitBypass = 16,
+            TuningClientTimeout = 1UL << 5,
+            TuningTcpSendTimeout = 1UL << 6,
+            TuningTcpReceiveTimeout = 1UL << 7,
+            TuningQuicIdleTimeout = 1UL << 8,
+            TuningQuicMaxInboundStreams = 1UL << 9,
+            TuningListenBacklog = 1UL << 10,
+            TuningUdpSendBufferSizeKB = 1UL << 11,
+            TuningUdpReceiveBufferSizeKB = 1UL << 12,
+            TuningMaxConcurrentResolutionsPerCore = 1UL << 13
         }
+
+        internal readonly record struct DnsTuning(
+            int? ClientTimeout, int? TcpSendTimeout, int? TcpReceiveTimeout, int? QuicIdleTimeout,
+            int? QuicMaxInboundStreams, int? ListenBacklog, int? UdpSendBufferSizeKB, int? UdpReceiveBufferSizeKB,
+            ushort? MaxConcurrentResolutionsPerCore);
 
         internal readonly record struct RateLimitPolicy(IReadOnlyDictionary<int, (int Udp, int Tcp)> Ipv4,
             IReadOnlyDictionary<int, (int Udp, int Tcp)> Ipv6, int? SampleMinutes, int? UdpTruncationPercentage,
@@ -752,14 +766,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning);
                 fS.Flush(flushToDisk: true);
             }
 
@@ -888,9 +902,16 @@ namespace DnsServerCore.Dns
             ManagedDnsSettingsExtension.RateLimitUdpTruncation | ManagedDnsSettingsExtension.RateLimitBypass;
         internal bool HasManagedRateLimits => (_managedDnsSettingsExtension & RateLimitOwnership) != 0;
 
+        private const ManagedDnsSettingsExtension TuningOwnership = ManagedDnsSettingsExtension.TuningClientTimeout |
+            ManagedDnsSettingsExtension.TuningTcpSendTimeout | ManagedDnsSettingsExtension.TuningTcpReceiveTimeout |
+            ManagedDnsSettingsExtension.TuningQuicIdleTimeout | ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams |
+            ManagedDnsSettingsExtension.TuningListenBacklog | ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB |
+            ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB | ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore;
+        internal bool HasManagedDnsTuning => (_managedDnsSettingsExtension & TuningOwnership) != 0;
+
         internal bool HasManagedAuthoritativeDefaults =>
             (_managedDnsSettings & ~(ManagedDnsSettings.LocalEndPoints | ManagedDnsSettings.ServerDomain | SourceOwnership | ResolverOwnership | ManagedDnsSettings.StatsInMemory | ManagedDnsSettings.StatsRetention | ManagedDnsSettings.AppAutoUpdate | OutboundSocketOwnership | ClientSubnetOwnership | DnsLoggingOwnership | RecursionOwnership | CacheOwnership | BlockingOwnership | ForwardingOwnership)) != 0;
-        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits;
+        internal bool HasManagedClusterDnsSettings => HasManagedAuthoritativeDefaults || (_managedDnsSettings & ResolverOwnership) != 0 || ManifestOwnsAppAutoUpdate || HasManagedClientSubnet || HasManagedRecursionPolicy || HasManagedBlockingPolicy || HasManagedForwardingPolicy || HasManagedRateLimits || HasManagedDnsTuning;
 
         internal IEnumerable<string> GetManagedDnsPaths()
         {
@@ -970,6 +991,24 @@ namespace DnsServerCore.Dns
                 yield return "/dns/rateLimits/udpTruncationPercentage";
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitBypass))
                 yield return "/dns/rateLimits/bypassNetworks";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningClientTimeout))
+                yield return "/dns/tuning/clientTimeoutMs";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningTcpSendTimeout))
+                yield return "/dns/tuning/tcpSendTimeoutMs";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningTcpReceiveTimeout))
+                yield return "/dns/tuning/tcpReceiveTimeoutMs";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningQuicIdleTimeout))
+                yield return "/dns/tuning/quicIdleTimeoutMs";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams))
+                yield return "/dns/tuning/quicMaxInboundStreams";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningListenBacklog))
+                yield return "/dns/tuning/listenBacklog";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB))
+                yield return "/dns/tuning/udpSendBufferKiB";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB))
+                yield return "/dns/tuning/udpReceiveBufferKiB";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore))
+                yield return "/dns/tuning/maxConcurrentResolutionsPerCore";
             if (ManifestOwnsServerDomain)
                 yield return "/dns/serverDomain";
             if (ManifestOwnsLocalEndPoints)
@@ -1593,6 +1632,83 @@ namespace DnsServerCore.Dns
             }
         }
 
+        internal DnsTuning CheckManifestDnsTuning(DnsTuning tuning, bool validateRanges = true)
+        {
+            if (validateRanges)
+            {
+                Validate(tuning.ClientTimeout, 1000, 10000, "clientTimeoutMs");
+                Validate(tuning.TcpSendTimeout, 1000, 90000, "tcpSendTimeoutMs");
+                Validate(tuning.TcpReceiveTimeout, 1000, 90000, "tcpReceiveTimeoutMs");
+                Validate(tuning.QuicIdleTimeout, 1000, 90000, "quicIdleTimeoutMs");
+                Validate(tuning.QuicMaxInboundStreams, 0, 1000, "quicMaxInboundStreams");
+                Validate(tuning.UdpSendBufferSizeKB, 8, 65536, "udpSendBufferKiB");
+                Validate(tuning.UdpReceiveBufferSizeKB, 8, 65536, "udpReceiveBufferKiB");
+                Validate(tuning.MaxConcurrentResolutionsPerCore, 1, 65535, "maxConcurrentResolutionsPerCore");
+            }
+            return new DnsTuning(
+                Check(ManagedDnsSettingsExtension.TuningClientTimeout, tuning.ClientTimeout, _clientTimeout, "clientTimeoutMs"),
+                Check(ManagedDnsSettingsExtension.TuningTcpSendTimeout, tuning.TcpSendTimeout, _tcpSendTimeout, "tcpSendTimeoutMs"),
+                Check(ManagedDnsSettingsExtension.TuningTcpReceiveTimeout, tuning.TcpReceiveTimeout, _tcpReceiveTimeout, "tcpReceiveTimeoutMs"),
+                Check(ManagedDnsSettingsExtension.TuningQuicIdleTimeout, tuning.QuicIdleTimeout, _quicIdleTimeout, "quicIdleTimeoutMs"),
+                Check(ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams, tuning.QuicMaxInboundStreams, _quicMaxInboundStreams, "quicMaxInboundStreams"),
+                Check(ManagedDnsSettingsExtension.TuningListenBacklog, tuning.ListenBacklog, _listenBacklog, "listenBacklog"),
+                Check(ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB, tuning.UdpSendBufferSizeKB, _udpSendBufferSizeKB, "udpSendBufferKiB"),
+                Check(ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB, tuning.UdpReceiveBufferSizeKB, _udpReceiveBufferSizeKB, "udpReceiveBufferKiB"),
+                Check(ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore, tuning.MaxConcurrentResolutionsPerCore, MaxConcurrentResolutionsPerCore, "maxConcurrentResolutionsPerCore"));
+
+            T? Check<T>(ManagedDnsSettingsExtension flag, T? candidate, T current, string path) where T : struct
+            {
+                if (!_managedDnsSettingsExtension.HasFlag(flag))
+                    return candidate;
+                if (candidate.HasValue && !candidate.Value.Equals(current))
+                    throw new DnsWebServiceException($"/dns/tuning/{path}: Setting is managed by the configuration manifest.");
+                return null;
+            }
+
+            static void Validate(int? value, int minimum, int maximum, string path)
+            {
+                if (value < minimum || value > maximum)
+                    throw new DnsWebServiceException($"/dns/tuning/{path}: Valid range is from {minimum} to {maximum}.");
+            }
+        }
+
+        internal bool DnsTuningRequiresRestart(DnsTuning tuning)
+        {
+            return (tuning.TcpSendTimeout.HasValue && tuning.TcpSendTimeout != _tcpSendTimeout) ||
+                (tuning.TcpReceiveTimeout.HasValue && tuning.TcpReceiveTimeout != _tcpReceiveTimeout) ||
+                (tuning.QuicIdleTimeout.HasValue && tuning.QuicIdleTimeout != _quicIdleTimeout) ||
+                (tuning.QuicMaxInboundStreams.HasValue && tuning.QuicMaxInboundStreams != _quicMaxInboundStreams) ||
+                (tuning.ListenBacklog.HasValue && tuning.ListenBacklog != _listenBacklog) ||
+                (tuning.UdpSendBufferSizeKB.HasValue && tuning.UdpSendBufferSizeKB != _udpSendBufferSizeKB) ||
+                (tuning.UdpReceiveBufferSizeKB.HasValue && tuning.UdpReceiveBufferSizeKB != _udpReceiveBufferSizeKB);
+        }
+
+        internal void SetDnsTuning(DnsTuning tuning)
+        {
+            SetListenerTuning(tuning);
+            if (tuning.ClientTimeout.HasValue)
+                ClientTimeout = tuning.ClientTimeout.Value;
+            if (tuning.MaxConcurrentResolutionsPerCore.HasValue)
+                MaxConcurrentResolutionsPerCore = tuning.MaxConcurrentResolutionsPerCore.Value;
+        }
+
+        internal DnsTuning CaptureListenerTuning()
+        {
+            return new DnsTuning(null, _tcpSendTimeout, _tcpReceiveTimeout, _quicIdleTimeout,
+                _quicMaxInboundStreams, _listenBacklog, _udpSendBufferSizeKB, _udpReceiveBufferSizeKB, null);
+        }
+
+        internal void SetListenerTuning(DnsTuning tuning)
+        {
+            _tcpSendTimeout = tuning.TcpSendTimeout ?? _tcpSendTimeout;
+            _tcpReceiveTimeout = tuning.TcpReceiveTimeout ?? _tcpReceiveTimeout;
+            _quicIdleTimeout = tuning.QuicIdleTimeout ?? _quicIdleTimeout;
+            _quicMaxInboundStreams = tuning.QuicMaxInboundStreams ?? _quicMaxInboundStreams;
+            _listenBacklog = tuning.ListenBacklog ?? _listenBacklog;
+            _udpSendBufferSizeKB = tuning.UdpSendBufferSizeKB ?? _udpSendBufferSizeKB;
+            _udpReceiveBufferSizeKB = tuning.UdpReceiveBufferSizeKB ?? _udpReceiveBufferSizeKB;
+        }
+
         internal void CheckManifestDnsLogging(DnsLoggingSettings settings)
         {
             if (ManifestOwnsResolverLogging && settings.IgnoreResolverLogs.HasValue && settings.IgnoreResolverLogs != (_resolverLog is null))
@@ -1883,36 +1999,41 @@ namespace DnsServerCore.Dns
                     qpmTruncationPercentage, qpmBypassList ?? []), validateRanges: false);
             }
 
-            int clientTimeout = bR.ReadInt32();
-            if (apply)
-                _clientTimeout = clientTimeout;
-            int tcpSendTimeout = bR.ReadInt32();
-            if (apply)
-                _tcpSendTimeout = tcpSendTimeout;
-            int tcpReceiveTimeout = bR.ReadInt32();
-            if (apply)
-                _tcpReceiveTimeout = tcpReceiveTimeout;
-            int quicIdleTimeout = bR.ReadInt32();
-            if (apply)
-                _quicIdleTimeout = quicIdleTimeout;
-            int quicMaxInboundStreams = bR.ReadInt32();
-            if (apply)
-                _quicMaxInboundStreams = quicMaxInboundStreams;
-            int listenBacklog = bR.ReadInt32();
-            if (apply)
-                _listenBacklog = listenBacklog;
-
-            int udpSendBufferSize = version >= 3 ? bR.ReadInt32() : 2048;
-            int udpReceiveBufferSize = version >= 3 ? bR.ReadInt32() : 2048;
+            var dnsTuning = new DnsTuning(
+                bR.ReadInt32(),
+                bR.ReadInt32(),
+                bR.ReadInt32(),
+                bR.ReadInt32(),
+                bR.ReadInt32(),
+                bR.ReadInt32(),
+                version >= 3 ? bR.ReadInt32() : 2048,
+                version >= 3 ? bR.ReadInt32() : 2048,
+                bR.ReadUInt16());
             if (apply)
             {
-                _udpSendBufferSizeKB = udpSendBufferSize;
-                _udpReceiveBufferSizeKB = udpReceiveBufferSize;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningClientTimeout))
+                    _clientTimeout = dnsTuning.ClientTimeout.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningTcpSendTimeout))
+                    _tcpSendTimeout = dnsTuning.TcpSendTimeout.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningTcpReceiveTimeout))
+                    _tcpReceiveTimeout = dnsTuning.TcpReceiveTimeout.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningQuicIdleTimeout))
+                    _quicIdleTimeout = dnsTuning.QuicIdleTimeout.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams))
+                    _quicMaxInboundStreams = dnsTuning.QuicMaxInboundStreams.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningListenBacklog))
+                    _listenBacklog = dnsTuning.ListenBacklog.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB))
+                    _udpSendBufferSizeKB = dnsTuning.UdpSendBufferSizeKB.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB))
+                    _udpReceiveBufferSizeKB = dnsTuning.UdpReceiveBufferSizeKB.Value;
+                if (readOwnership || !_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore))
+                    MaxConcurrentResolutionsPerCore = dnsTuning.MaxConcurrentResolutionsPerCore.Value;
             }
-
-            ushort maxConcurrentResolutions = bR.ReadUInt16();
-            if (apply)
-                MaxConcurrentResolutionsPerCore = maxConcurrentResolutions;
+            else if (HasManagedDnsTuning)
+            {
+                CheckManifestDnsTuning(dnsTuning, validateRanges: false);
+            }
 
             //optional protocols
             if (version >= 3)
@@ -2350,7 +2471,7 @@ namespace DnsServerCore.Dns
             return ownership;
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2424,15 +2545,15 @@ namespace DnsServerCore.Dns
             bW.Write(rateLimits.UdpTruncationPercentage ?? _qpmLimitUdpTruncationPercentage);
             AuthZoneInfo.WriteNetworkAddressesTo(rateLimits.BypassNetworks ?? _qpmLimitBypassList, bW);
 
-            bW.Write(_clientTimeout);
-            bW.Write(_tcpSendTimeout);
-            bW.Write(_tcpReceiveTimeout);
-            bW.Write(_quicIdleTimeout);
-            bW.Write(_quicMaxInboundStreams);
-            bW.Write(_listenBacklog);
-            bW.Write(_udpSendBufferSizeKB);
-            bW.Write(_udpReceiveBufferSizeKB);
-            bW.Write(MaxConcurrentResolutionsPerCore);
+            bW.Write(tuning.ClientTimeout ?? _clientTimeout);
+            bW.Write(tuning.TcpSendTimeout ?? _tcpSendTimeout);
+            bW.Write(tuning.TcpReceiveTimeout ?? _tcpReceiveTimeout);
+            bW.Write(tuning.QuicIdleTimeout ?? _quicIdleTimeout);
+            bW.Write(tuning.QuicMaxInboundStreams ?? _quicMaxInboundStreams);
+            bW.Write(tuning.ListenBacklog ?? _listenBacklog);
+            bW.Write(tuning.UdpSendBufferSizeKB ?? _udpSendBufferSizeKB);
+            bW.Write(tuning.UdpReceiveBufferSizeKB ?? _udpReceiveBufferSizeKB);
+            bW.Write(tuning.MaxConcurrentResolutionsPerCore ?? MaxConcurrentResolutionsPerCore);
 
             //optional protocols
             bW.Write(_enableEDnsClientSubnetSourceAddress);
@@ -7322,7 +7443,7 @@ namespace DnsServerCore.Dns
             TaskPool previousResolverTaskPool = _resolverTaskPool;
 
             int maxConcurrentResolutions = Environment.ProcessorCount * maxConcurrentResolutionsPerCore;
-            int resolverQueueSize = maxConcurrentResolutions * 5 * 10; //assuming 5 qps average resolution rate for 10 sec
+            int resolverQueueSize = (int)Math.Min(int.MaxValue, maxConcurrentResolutions * 5L * 10); //assuming 5 qps average resolution rate for 10 sec
             _resolverTaskPool = new TaskPool(resolverQueueSize, maxConcurrentResolutions, _resolverTaskScheduler);
 
             previousResolverTaskPool?.Dispose(); //stop previous task pool from queuing new tasks and complete reading
@@ -8084,19 +8205,22 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, bool alreadyActive, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, bool alreadyActive, bool listenerTuningStaged, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
             bool changed = owned && !HaveSameLocalEndPoints(previous, endpoints);
             bool domainChanged = serverDomain is not null && !string.Equals(serverDomain, _serverDomain, StringComparison.OrdinalIgnoreCase);
-            bool restarted = changed && !alreadyActive;
+            bool tuningRestart = DnsTuningRequiresRestart(tuning);
+            bool restarted = tuningRestart || (changed && !alreadyActive);
+            DnsTuning previousListenerTuning = CaptureListenerTuning();
             try
             {
                 if (restarted)
                 {
                     await StopAsync();
-                    await StartAsync(true, endpoints);
+                    SetListenerTuning(tuning);
+                    await StartAsync(true, endpoints ?? previous);
                 }
 
                 lock (_saveLock)
@@ -8114,6 +8238,27 @@ namespace DnsServerCore.Dns
                     if (rateLimits.BypassNetworks is not null)
                         extendedOwnership |= ManagedDnsSettingsExtension.RateLimitBypass;
 
+                    if (tuning.ClientTimeout.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningClientTimeout;
+                    if (tuning.TcpSendTimeout.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningTcpSendTimeout;
+                    if (tuning.TcpReceiveTimeout.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningTcpReceiveTimeout;
+                    if (tuning.QuicIdleTimeout.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningQuicIdleTimeout;
+                    if (tuning.QuicMaxInboundStreams.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningQuicMaxInboundStreams;
+                    if (tuning.ListenBacklog.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningListenBacklog;
+                    if (tuning.UdpSendBufferSizeKB.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningUdpSendBufferSizeKB;
+                    if (tuning.UdpReceiveBufferSizeKB.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningUdpReceiveBufferSizeKB;
+                    if (tuning.MaxConcurrentResolutionsPerCore.HasValue)
+                        extendedOwnership |= ManagedDnsSettingsExtension.TuningMaxConcurrentResolutionsPerCore;
+
+                    bool tuningChanged = listenerTuningStaged || tuningRestart || (tuning.ClientTimeout.HasValue && tuning.ClientTimeout != _clientTimeout) ||
+                        (tuning.MaxConcurrentResolutionsPerCore.HasValue && tuning.MaxConcurrentResolutionsPerCore != MaxConcurrentResolutionsPerCore);
                     bool rateLimitsChanged = (rateLimits.Ipv4 is not null && !HaveSameRateLimits(rateLimits.Ipv4, _qpmPrefixLimitsIPv4)) ||
                         (rateLimits.Ipv6 is not null && !HaveSameRateLimits(rateLimits.Ipv6, _qpmPrefixLimitsIPv6)) ||
                         (rateLimits.SampleMinutes.HasValue && rateLimits.SampleMinutes != _qpmLimitSampleMinutes) ||
@@ -8328,7 +8473,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !forwardingChanged && !rateLimitsChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8343,7 +8488,7 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning));
                         _pendingSave = false;
                     }
                     catch
@@ -8364,6 +8509,7 @@ namespace DnsServerCore.Dns
                     SetBlockingPolicy(blocking, cancelPause: false);
                     SetForwardingPolicy(forwarding);
                     SetRateLimitPolicy(rateLimits);
+                    SetDnsTuning(tuning);
                     if (recursion.NetworkAcl is not null)
                         RecursionNetworkACL = recursion.NetworkAcl;
                     if (recursion.Mode.HasValue)
@@ -8395,6 +8541,7 @@ namespace DnsServerCore.Dns
                 if (restarted)
                 {
                     await StopAsync();
+                    SetListenerTuning(previousListenerTuning);
                     await StartAsync(true, previous);
                 }
 

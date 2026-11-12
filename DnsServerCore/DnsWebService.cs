@@ -3122,7 +3122,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate &&
@@ -3134,7 +3134,7 @@ namespace DnsServerCore
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive);
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive, listenerTuningStaged);
             }
             catch
             {
@@ -3344,6 +3344,9 @@ namespace DnsServerCore
                 }
 
                 WebListeners listeners = ConfigurationPlan.GetWebListeners(startupManifest);
+                DnsServer.DnsTuning tuning = ConfigurationPlan.GetDnsTuning(startupManifest);
+                DnsServer.DnsTuning previousListenerTuning = _dnsServer.CaptureListenerTuning();
+                bool listenerTuningStaged = _dnsServer.DnsTuningRequiresRestart(tuning);
                 WebListeners previousWebListeners = CaptureWebListeners();
                 SslServerAuthenticationOptions previousTlsOptions = _webServiceSslServerAuthenticationOptions;
                 try
@@ -3362,18 +3365,22 @@ namespace DnsServerCore
 
                         _isRunning = true;
                         IReadOnlyList<IPEndPoint> endpoints = startupManifest?.GetDnsLocalEndPoints();
+                        if (listenerTuningStaged)
+                            _dnsServer.SetListenerTuning(tuning);
                         await _dnsServer.StartAsync(throwIfBindFails || (endpoints is not null), endpoints ?? _dnsServer.LocalEndPoints);
                         _dhcpServer.Start();
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true, listeners, listenersChanged, webAddressesChanged);
+                            await ApplyManifestAsync(startupManifest, endpoints, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged);
                         }
                     });
                 }
                 catch
                 {
                     await StopAsync();
+                    if (listenerTuningStaged)
+                        _dnsServer.SetListenerTuning(previousListenerTuning);
                     if (listeners.HasValues)
                     {
                         StageWebListeners(previousWebListeners);

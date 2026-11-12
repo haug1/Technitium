@@ -212,7 +212,7 @@ namespace DnsServerCore
             if (format == "DC")
             {
                 _dnsServer.CheckRestoreManifestDnsSettings(reader, isConfigTransfer);
-                return _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || _dnsServer.HasManagedForwardingPolicy || _dnsServer.HasManagedRateLimits || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
+                return _dnsServer.HasManagedRecursionPolicy || _dnsServer.HasManagedBlockingPolicy || _dnsServer.HasManagedForwardingPolicy || _dnsServer.HasManagedRateLimits || _dnsServer.HasManagedDnsTuning || !isConfigTransfer && (_dnsServer.ManifestOwnsInMemoryStatistics || _dnsServer.ManifestOwnsStatisticsRetention ||
                     _dnsServer.ManifestOwnsResolverLogging || _dnsServer.ManifestOwnsQueryLogging || _dnsServer.HasManagedCachePolicy);
             }
 
@@ -220,6 +220,9 @@ namespace DnsServerCore
             {
                 if (!isConfigTransfer && _dnsServer.HasManagedCachePolicy)
                     throw new InvalidDataException("/dns/cache: Cannot verify cache policy in this combined backup format.");
+
+                if (_dnsServer.HasManagedDnsTuning)
+                    throw new InvalidDataException("/dns/tuning: Cannot verify DNS tuning in this combined backup format.");
 
                 if (_dnsServer.HasManagedRateLimits)
                     throw new InvalidDataException("/dns/rateLimits: Cannot verify query-rate limits in this combined backup format.");
