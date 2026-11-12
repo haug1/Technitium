@@ -326,6 +326,8 @@ namespace DnsServerCore.Configuration
                     users.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestPermissionOwnership", out JsonElement permissionOwnership))
                     permissionOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestApplications", out JsonElement applications))
+                    applications.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestStaticSessions", out JsonElement staticSessions))
                     staticSessions.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestPermissions", out JsonElement permissions))
@@ -843,6 +845,8 @@ namespace DnsServerCore.Configuration
                 throw new InvalidDataException("/auth/users: Applying user settings to a cluster is not implemented.");
             if (ConfigurationGroups.TryGetDeclaration(manifest, out _))
                 throw new InvalidDataException("/auth/groups: Applying group settings to a cluster is not implemented.");
+            if (ConfigurationApplications.IsDeclared(manifest))
+                throw new InvalidDataException("/apps/packages: Applying app packages to a cluster is not implemented.");
             if (ConfigurationSso.IsDeclared(manifest))
                 throw new InvalidDataException("/auth/sso: Applying SSO settings to a cluster is not implemented.");
             if (ConfigurationLdap.IsDeclared(manifest))
@@ -957,7 +961,7 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (path is ConfigurationSso.Path or ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or ConfigurationStaticSessions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
+            if (path is ConfigurationApplications.Path or ConfigurationSso.Path or ConfigurationLdap.Path or ConfigurationGroups.Path or ConfigurationUsers.Path or ConfigurationPermissions.Path or ConfigurationStaticSessions.Path or "/dhcp/scopes" or "/allowZones" or "/blockZones" or ConfigurationTsig.Path or "/web/rootPath" or "/dns/proxy" or ConfigurationDnsCertificate.Path or ConfigurationWebCertificate.Path || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
                 (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
@@ -1519,6 +1523,12 @@ namespace DnsServerCore.Configuration
                     changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService, restartDns));
                 }
 
+                return;
+            }
+
+            if (path == ConfigurationApplications.Path && currentSettings.TryGetProperty("manifestApplications", out JsonElement applications))
+            {
+                ConfigurationApplications.Compare(applications, changes);
                 return;
             }
 

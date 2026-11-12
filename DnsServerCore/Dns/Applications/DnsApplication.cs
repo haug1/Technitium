@@ -218,9 +218,44 @@ namespace DnsServerCore.Dns.Applications
 
         #region public
 
+        internal const string ConfigurationFileName = "dnsApp.config";
+
+        internal string ReadManifestConfig()
+        {
+            string path = Path.Combine(_dnsServer.ApplicationFolder, ConfigurationFileName);
+            return File.Exists(path) ? File.ReadAllText(path) : null;
+        }
+
+        internal async Task ActivateConfigAsync(string config)
+        {
+            foreach (KeyValuePair<string, IDnsApplication> app in _dnsApplications)
+                await app.Value.InitializeAsync(_dnsServer, config);
+        }
+
+        internal void NotifyManifestConfigUpdated() => ConfigUpdated?.Invoke(this, EventArgs.Empty);
+
+        internal void WriteManifestConfig(string config)
+        {
+            string path = Path.Combine(_dnsServer.ApplicationFolder, ConfigurationFileName);
+            if (config is null)
+            {
+                File.Delete(path);
+                return;
+            }
+
+            string temporary = Path.Combine(_dnsServer.ApplicationFolder, "dnsApp.tmp");
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+            {
+                using (var writer = new StreamWriter(stream, leaveOpen: true))
+                    writer.Write(config);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, true);
+        }
+
         public Task<string> GetConfigAsync()
         {
-            string configFile = Path.Combine(_dnsServer.ApplicationFolder, "dnsApp.config");
+            string configFile = Path.Combine(_dnsServer.ApplicationFolder, ConfigurationFileName);
 
             if (File.Exists(configFile))
                 return File.ReadAllTextAsync(configFile);
@@ -230,10 +265,9 @@ namespace DnsServerCore.Dns.Applications
 
         public async Task SetConfigAsync(string config)
         {
-            string configFile = Path.Combine(_dnsServer.ApplicationFolder, "dnsApp.config");
+            string configFile = Path.Combine(_dnsServer.ApplicationFolder, ConfigurationFileName);
 
-            foreach (KeyValuePair<string, IDnsApplication> app in _dnsApplications)
-                await app.Value.InitializeAsync(_dnsServer, config);
+            await ActivateConfigAsync(config);
 
             if (string.IsNullOrEmpty(config))
             {

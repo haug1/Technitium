@@ -1727,7 +1727,7 @@ namespace DnsServerCore
             return GetCleanVersion(_currentVersion);
         }
 
-        private static string GetCleanVersion(Version version)
+        internal static string GetCleanVersion(Version version)
         {
             string strVersion = version.Major + "." + version.Minor;
 
@@ -2289,13 +2289,13 @@ namespace DnsServerCore
             //apps
             _webService.MapGetAndPost("/api/apps/list", _appsApi.ListInstalledAppsAsync);
             _webService.MapGetAndPost("/api/apps/listStoreApps", _appsApi.ListStoreApps);
-            _webService.MapGetAndPost("/api/apps/downloadAndInstall", _appsApi.DownloadAndInstallAppAsync);
-            _webService.MapGetAndPost("/api/apps/downloadAndUpdate", _appsApi.DownloadAndUpdateAppAsync);
-            _webService.MapPost("/api/apps/install", _appsApi.InstallAppAsync);
-            _webService.MapPost("/api/apps/update", _appsApi.UpdateAppAsync);
-            _webService.MapGetAndPost("/api/apps/uninstall", _appsApi.UninstallAppAsync);
+            _webService.MapGetAndPost("/api/apps/downloadAndInstall", context => _settingsApi.WithConfigurationLockAsync(context, _appsApi.DownloadAndInstallAppAsync));
+            _webService.MapGetAndPost("/api/apps/downloadAndUpdate", context => _settingsApi.WithConfigurationLockAsync(context, _appsApi.DownloadAndUpdateAppAsync));
+            _webService.MapPost("/api/apps/install", context => _settingsApi.WithConfigurationLockAsync(context, _appsApi.InstallAppAsync));
+            _webService.MapPost("/api/apps/update", context => _settingsApi.WithConfigurationLockAsync(context, _appsApi.UpdateAppAsync));
+            _webService.MapGetAndPost("/api/apps/uninstall", context => _settingsApi.WithConfigurationLockAsync(context, _appsApi.UninstallAppAsync));
             _webService.MapGetAndPost("/api/apps/config/get", _appsApi.GetAppConfigAsync);
-            _webService.MapGetAndPost("/api/apps/config/set", _appsApi.SetAppConfigAsync);
+            _webService.MapGetAndPost("/api/apps/config/set", context => _settingsApi.WithConfigurationLockAsync(context, _appsApi.SetAppConfigAsync));
 
             //dns client
             _webService.MapGetAndPost("/api/dnsClient/resolve", _api.ResolveQueryAsync);
@@ -3081,7 +3081,7 @@ namespace DnsServerCore
             return candidate;
         }
 
-        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig, User creator, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> users, ConfigurationStaticSessions.Candidate staticSessions, ConfigurationSso.Settings sso)
+        private async Task ApplyManifestWithWebRestartAsync(ConfigurationManifest manifest, WebListeners listeners, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationWebCertificate.Candidate? webCertificate, ConfigurationTsig.Candidate tsig, User creator, ConfigurationLdap.Settings ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> users, ConfigurationStaticSessions.Candidate staticSessions, ConfigurationSso.Settings sso, ConfigurationApplications.Entry[] apps)
         {
             WebListeners previous = CaptureWebListeners();
             SslServerAuthenticationOptions previousTlsOptions;
@@ -3105,7 +3105,7 @@ namespace DnsServerCore
                 await StartWebServiceAsync(false, listeners, sso);
                 bool addressesChanged = !previous.Addresses.HasSameItems(_webServiceLocalAddresses);
                 await ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners,
-                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso);
+                    listenersChanged: true, webAddressesChanged: addressesChanged, webCertificate: webCertificate, generatedWebCertificate: generated, zoneCreator: creator, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso, apps: apps);
             }
             catch
             {
@@ -3237,7 +3237,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null, ConfigurationSso.Settings sso = null)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, ConfigurationDnsCertificate.Candidate dnsCertificate, ConfigurationTsig.Candidate tsig, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false, ConfigurationWebCertificate.Candidate? webCertificate = null, byte[] generatedWebCertificate = null, bool webRootChanged = false, User zoneCreator = null, ConfigurationLdap.Settings ldap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> users = null, ConfigurationStaticSessions.Candidate staticSessions = null, ConfigurationSso.Settings sso = null, ConfigurationApplications.Entry[] apps = null)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = generatedWebCertificate is null && _webServiceUseSelfSignedTlsCertificate &&
@@ -3261,10 +3261,13 @@ namespace DnsServerCore
                 var zones = _dnsServer.AuthZoneManager.PrepareManifestZoneAndAuthChanges(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys,
                     ldap ?? ConfigurationLdap.Prepare(manifest, _authManager), users, staticSessions,
                     sso is not null && ConfigurationSso.Same(_authManager.GetManifestSsoSettings(), sso) ? null : sso);
-                await _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
+                DnsApplicationManager manager = _dnsServer.DnsApplicationManager;
+                apps ??= ConfigurationApplications.Prepare(manifest, manager);
+                await ConfigurationApplications.ApplyAsync(manager, apps, (writeApps, appFiles) =>
+                    _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),
-                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeScopes + zones.Write, [.. scopeFiles, .. zones.Files], zones.Commit));
+                        alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy, dnsCertificate, tsig, writeApps + writeScopes + zones.Write, [.. appFiles, .. scopeFiles, .. zones.Files], zones.Commit)));
             }
             catch
             {

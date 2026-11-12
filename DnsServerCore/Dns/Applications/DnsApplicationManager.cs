@@ -394,6 +394,12 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
+        internal string ConfigurationFolder => _dnsServer.ConfigFolder;
+
+        internal Task EnterManifestGateAsync() => _opsLock.WaitAsync();
+
+        internal void ExitManifestGate() => _opsLock.Release();
+
         public async Task<DnsApplication> InstallApplicationAsync(string applicationName, Stream appZipStream)
         {
             await _opsLock.WaitAsync();

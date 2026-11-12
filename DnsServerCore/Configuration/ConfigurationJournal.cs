@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 
 namespace DnsServerCore.Configuration
 {
@@ -9,6 +10,8 @@ namespace DnsServerCore.Configuration
     {
         private const string PendingName = ".manifest-pending";
         private const string StagingName = ".manifest-staging";
+        private const string AppActivationPendingName = ".manifest-app-activation-pending";
+        private const string AppActivationStagingName = ".manifest-app-activation-staging";
 
         private static readonly HashSet<string> _configurationFiles = new(StringComparer.Ordinal)
         {
@@ -17,8 +20,14 @@ namespace DnsServerCore.Configuration
 
         internal static void Recover(string configFolder)
         {
-            string pending = Path.Combine(configFolder, PendingName);
-            string staging = Path.Combine(configFolder, StagingName);
+            Recover(configFolder, PendingName, StagingName);
+            Recover(configFolder, AppActivationPendingName, AppActivationStagingName);
+        }
+
+        private static void Recover(string configFolder, string pendingName, string stagingName)
+        {
+            string pending = Path.Combine(configFolder, pendingName);
+            string staging = Path.Combine(configFolder, stagingName);
             if (Directory.Exists(staging))
                 Directory.Delete(staging, true);
 
@@ -30,6 +39,12 @@ namespace DnsServerCore.Configuration
 
             RestoreResourceFiles("zones");
             RestoreResourceFiles("scopes");
+            string apps = Path.Combine(pending, "apps");
+            if (Directory.Exists(apps))
+            {
+                foreach (string directory in Directory.EnumerateDirectories(apps))
+                    RestoreResourceFiles(Path.Combine("apps", Path.GetFileName(directory)));
+            }
 
             Directory.Move(pending, staging);
 
@@ -52,6 +67,41 @@ namespace DnsServerCore.Configuration
         {
             string pending = Path.Combine(configFolder, PendingName);
             string staging = Path.Combine(configFolder, StagingName);
+            Begin(configFolder, pending, staging, fileNames);
+            try
+            {
+                write();
+                // Rename before cleanup so a partially deleted journal is never replayed.
+                Directory.Move(pending, staging);
+            }
+            catch
+            {
+                Recover(configFolder);
+                throw;
+            }
+        }
+
+        internal static async Task ActivateAppsAsync(string configFolder, string[] fileNames, Func<Task> activate)
+        {
+            if (fileNames.Length == 0)
+                return;
+
+            Begin(configFolder, Path.Combine(configFolder, AppActivationPendingName),
+                Path.Combine(configFolder, AppActivationStagingName), fileNames);
+            try
+            {
+                await activate();
+            }
+            finally
+            {
+                // Apps may write their config while initializing. Preserve the original until
+                // the main manifest transaction commits the declared values.
+                Recover(configFolder, AppActivationPendingName, AppActivationStagingName);
+            }
+        }
+
+        private static void Begin(string configFolder, string pending, string staging, string[] fileNames)
+        {
             if (Directory.Exists(pending))
                 throw new IOException("An interrupted manifest write must be recovered before applying again.");
 
@@ -75,17 +125,6 @@ namespace DnsServerCore.Configuration
             }
 
             Directory.Move(staging, pending);
-            try
-            {
-                write();
-                // Rename before cleanup so a partially deleted journal is never replayed.
-                Directory.Move(pending, staging);
-            }
-            catch
-            {
-                Recover(configFolder);
-                throw;
-            }
         }
 
         private static void Restore(string configFolder, string pending, string fileName)
@@ -115,6 +154,9 @@ namespace DnsServerCore.Configuration
             string name = Path.GetFileName(path);
             if (name.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
                 return false;
+
+            if (directory is not null && Path.GetDirectoryName(directory) == "apps")
+                return ConfigurationApplications.IsSafeName(Path.GetFileName(directory)) && name == Dns.Applications.DnsApplication.ConfigurationFileName;
 
             return directory switch
             {

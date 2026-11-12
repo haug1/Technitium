@@ -1,0 +1,189 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+using DnsServerCore.Dns.Applications;
+
+namespace DnsServerCore.Configuration
+{
+    internal static class ConfigurationApplications
+    {
+        internal const string Path = "/apps/packages";
+
+        internal sealed record Entry(DnsApplication Application, string Before, string After)
+        {
+            internal string SettingPath => ConfigurationPlan.AppendPath(Path, Application.Name) + "/configuration";
+            internal string FileName => System.IO.Path.Combine("apps", Application.Name, DnsApplication.ConfigurationFileName);
+        }
+
+        internal static bool IsDeclared(ConfigurationManifest manifest) => manifest is not null &&
+            manifest.Settings.TryGetProperty("apps", out JsonElement apps) && apps.TryGetProperty("packages", out _);
+
+        internal static Entry[] Prepare(ConfigurationManifest manifest, DnsApplicationManager manager)
+        {
+            if (!IsDeclared(manifest))
+                return null;
+            JsonElement packages = manifest.Settings.GetProperty("apps").GetProperty("packages");
+            if (packages.ValueKind == JsonValueKind.Null)
+                throw new InvalidDataException($"{Path}: Removing app packages is not implemented.");
+
+            var entries = new List<Entry>();
+            foreach (JsonProperty item in packages.EnumerateObject().OrderBy(entry => entry.Name, StringComparer.Ordinal))
+            {
+                string path = ConfigurationPlan.AppendPath(Path, item.Name);
+                if (!IsSafeName(item.Name))
+                    throw new InvalidDataException($"{path}: Invalid app name.");
+                if (item.Value.ValueKind == JsonValueKind.Null)
+                    throw new InvalidDataException($"{path}: Removing app packages is not implemented.");
+                if (item.Value.TryGetProperty("source", out JsonElement source) && source.ValueKind != JsonValueKind.Null)
+                    throw new InvalidDataException($"{path}/source: Installing packages from a manifest is not implemented.");
+                if (!manager.Applications.TryGetValue(item.Name, out DnsApplication app))
+                    throw new InvalidDataException($"{path}: The DNS app is not installed.");
+                if (item.Value.TryGetProperty("version", out JsonElement version) && version.ValueKind != JsonValueKind.Null &&
+                    version.GetString() != DnsWebService.GetCleanVersion(app.Version) &&
+                    (!Version.TryParse(version.GetString(), out Version desired) || app.Version != desired))
+                    throw new InvalidDataException($"{path}/version: The installed version does not match.");
+
+                string before = app.ReadManifestConfig();
+                string after = before;
+                if (item.Value.TryGetProperty("configuration", out JsonElement config))
+                {
+                    after = config.ValueKind == JsonValueKind.Null ? null :
+                        config.TryGetProperty("text", out JsonElement text) ? text.GetString() :
+                        config.TryGetProperty("secret", out JsonElement secret) ? manifest.ResolveReference(secret, path + "/configuration") :
+                        manifest.ResolveReference(config, path + "/configuration");
+                    if (after?.Length == 0)
+                        after = null;
+                }
+                entries.Add(new Entry(app, before, after));
+            }
+            return entries.ToArray();
+        }
+
+        internal static bool IsSafeName(string name) => !string.IsNullOrWhiteSpace(name) && name is not ("." or "..") &&
+            name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) < 0 && !name.Contains('/') && !name.Contains('\\');
+
+        internal static void WriteSnapshot(Utf8JsonWriter writer, Entry[] entries, byte[] key)
+        {
+            writer.WriteStartObject("manifestApplications");
+            foreach (Entry entry in entries)
+            {
+                writer.WriteStartObject(entry.SettingPath);
+                writer.WriteString("version", entry.Application.Version.ToString());
+                writer.WriteString("before", Fingerprint(entry.Before));
+                writer.WriteString("after", Fingerprint(entry.After));
+                writer.WriteEndObject();
+            }
+            writer.WriteEndObject();
+
+            string Fingerprint(string value) => value is null ? null :
+                Convert.ToHexString(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(value)));
+        }
+
+        internal static void Compare(JsonElement snapshot, List<ConfigurationChange> changes)
+        {
+            foreach (JsonProperty entry in snapshot.EnumerateObject())
+            {
+                JsonElement before = entry.Value.GetProperty("before");
+                JsonElement after = entry.Value.GetProperty("after");
+                if (!JsonElement.DeepEquals(before, after))
+                    changes.Add(new ConfigurationChange(entry.Name, before.ValueKind == JsonValueKind.Null ? ConfigurationChangeKind.Add :
+                        after.ValueKind == JsonValueKind.Null ? ConfigurationChangeKind.Remove : ConfigurationChangeKind.Update, false));
+            }
+        }
+
+        internal static JsonObject Export(DnsApplicationManager manager, ISet<string> missingInputs)
+        {
+            var result = new JsonObject();
+            foreach (DnsApplication app in manager.Applications.Values.OrderBy(app => app.Name, StringComparer.Ordinal))
+            {
+                string path = ConfigurationPlan.AppendPath(Path, app.Name);
+                result[app.Name] = new JsonObject { ["version"] = app.Version.ToString() };
+                missingInputs.Add(path + "/source");
+                if (app.ReadManifestConfig() is not null)
+                    missingInputs.Add(path + "/configuration");
+            }
+            return result;
+        }
+
+        internal static async Task ApplyAsync(DnsApplicationManager manager, Entry[] entries, Func<Action, string[], Task> commit)
+        {
+            if (entries is null || entries.Length == 0)
+            {
+                await commit(null, []);
+                return;
+            }
+
+            await manager.EnterManifestGateAsync();
+            var activated = new List<Entry>();
+            try
+            {
+                foreach (Entry entry in entries)
+                {
+                    if (!manager.Applications.TryGetValue(entry.Application.Name, out DnsApplication current) ||
+                        !ReferenceEquals(current, entry.Application) || current.ReadManifestConfig() != entry.Before)
+                        throw new InvalidDataException($"{entry.SettingPath}: The app changed during apply. Create a new preview.");
+                }
+                Entry[] changed = entries.Where(entry => entry.Before != entry.After).ToArray();
+                string[] files = changed.Select(entry => entry.FileName).ToArray();
+                await ConfigurationJournal.ActivateAppsAsync(manager.ConfigurationFolder, files, async () =>
+                {
+                    foreach (Entry entry in changed)
+                    {
+                        activated.Add(entry);
+                        try
+                        {
+                            await entry.Application.ActivateConfigAsync(entry.After);
+                            entry.Application.NotifyManifestConfigUpdated();
+                        }
+                        catch (Exception)
+                        {
+                            throw new InvalidDataException($"{entry.SettingPath}: The app rejected its configuration.");
+                        }
+                    }
+                });
+
+                await commit(changed.Length > 0 ? Write : null, files);
+            }
+            catch
+            {
+                string failedRollbackPath = null;
+                await ConfigurationJournal.ActivateAppsAsync(manager.ConfigurationFolder,
+                    activated.Select(entry => entry.FileName).ToArray(), async () =>
+                    {
+                        for (int i = activated.Count - 1; i >= 0; i--)
+                        {
+                            Entry entry = activated[i];
+                            try
+                            {
+                                await entry.Application.ActivateConfigAsync(entry.Before);
+                                entry.Application.NotifyManifestConfigUpdated();
+                            }
+                            catch (Exception)
+                            {
+                                failedRollbackPath ??= entry.SettingPath;
+                            }
+                        }
+                    });
+                if (failedRollbackPath is not null)
+                    throw new InvalidDataException($"{failedRollbackPath}: The app could not reactivate its previous configuration.");
+                throw;
+            }
+            finally
+            {
+                manager.ExitManifestGate();
+            }
+
+            void Write()
+            {
+                foreach (Entry entry in activated)
+                    entry.Application.WriteManifestConfig(entry.After);
+            }
+        }
+    }
+}

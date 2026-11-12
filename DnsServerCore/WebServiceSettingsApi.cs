@@ -575,6 +575,14 @@ namespace DnsServerCore
                         manifest.Add("dhcp", new System.Text.Json.Nodes.JsonObject { ["scopes"] = scopes });
                 }
 
+                if (!_dnsWebService._clusterManager.ClusterInitialized &&
+                    _dnsWebService._authManager.IsPermitted(PermissionSection.Apps, sessionUser, PermissionFlag.View))
+                {
+                    var apps = ConfigurationApplications.Export(dns.DnsApplicationManager, missingInputs);
+                    if (apps.Count > 0)
+                        manifest["apps"]["packages"] = apps;
+                }
+
                 if (_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
                 {
                     var zones = ConfigurationZoneExport.Export(dns, _dnsWebService._clusterManager.ClusterInitialized,
@@ -736,7 +744,7 @@ namespace DnsServerCore
                         await _dnsWebService._dhcpServer.EnterManifestGateAsync(context.RequestAborted);
                         dhcpGate = true;
                     }
-                    var (proxy, dnsCertificate, webCertificate, tsig, ldap, users, staticSessions, sso) = CheckApplyRevision(manifest, expected, sessionUser);
+                    var (proxy, dnsCertificate, webCertificate, tsig, ldap, users, staticSessions, sso, apps) = CheckApplyRevision(manifest, expected, sessionUser);
                     WebListeners listeners = ConfigurationPlan.GetWebListeners(manifest);
                     _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
 
@@ -755,7 +763,7 @@ namespace DnsServerCore
                     }
                     else
                     {
-                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate, zoneCreator: sessionUser, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso);
+                        await _dnsWebService.ApplyManifestAsync(manifest, manifest.GetDnsLocalEndPoints(), proxy, dnsCertificate, tsig, listeners: listeners, webCertificate: webCertificate, zoneCreator: sessionUser, ldap: ldap, users: users, staticSessions: staticSessions, sso: sso, apps: apps);
                     }
                 }
                 catch (InvalidDataException ex)
@@ -777,7 +785,7 @@ namespace DnsServerCore
                 }
             }
 
-            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig, ConfigurationLdap.Settings Ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> Users, ConfigurationStaticSessions.Candidate StaticSessions, ConfigurationSso.Settings Sso) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
+            private (ConfigurationProxy.Candidate Proxy, ConfigurationDnsCertificate.Candidate Certificate, ConfigurationWebCertificate.Candidate? WebCertificate, ConfigurationTsig.Candidate Tsig, ConfigurationLdap.Settings Ldap, IReadOnlyDictionary<string, ConfigurationUsers.Change> Users, ConfigurationStaticSessions.Candidate StaticSessions, ConfigurationSso.Settings Sso, ConfigurationApplications.Entry[] Apps) CheckApplyRevision(ConfigurationManifest manifest, string expected, User sessionUser)
             {
                 if ((_dnsWebService._dnsServer.AllowedZoneManager.ManifestOwnsList &&
                      !manifest.Settings.TryGetProperty("allowZones", out _) &&
@@ -803,7 +811,8 @@ namespace DnsServerCore
                 var sso = PrepareSsoForSession(manifest, sessionUser);
                 var users = PrepareUsersForSession(manifest, sessionUser, ldap, sso);
                 var staticSessions = PrepareStaticSessionsForSession(manifest, sessionUser, users);
-                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot, preparedLdap: ldap, preparedUsers: users, preparedStaticSessions: staticSessions, preparedSso: sso);
+                var apps = PrepareAppsForSession(manifest, sessionUser);
+                using JsonDocument current = CaptureConfigurationSnapshot(manifest, sessionUser, proxy, dnsCertificate, webCertificate, tsig, dhcpSnapshot: dhcpSnapshot, preparedLdap: ldap, preparedUsers: users, preparedStaticSessions: staticSessions, preparedSso: sso, preparedApps: apps);
                 if (dhcpSnapshot is not null)
                 {
                     var changes = new List<ConfigurationChange>();
@@ -852,7 +861,7 @@ namespace DnsServerCore
                 ConfigurationPlan.ValidateDnsCertificateAndBindings(dnsCertificate, ConfigurationPlan.GetDnsBindings(manifest),
                     _dnsWebService._dnsServer.CaptureDnsBindings(), _dnsWebService._dnsServer.HasDnsListenerCertificate);
                 return (proxy, dnsCertificate, webCertificate, tsig, ldap,
-                    users?.Where(entry => entry.Value.Remove || entry.Value.Current is null || entry.Value.Fields.Length > 0).ToDictionary(), staticSessions, sso);
+                    users?.Where(entry => entry.Value.Remove || entry.Value.Current is null || entry.Value.Fields.Length > 0).ToDictionary(), staticSessions, sso, apps);
             }
 
             private async Task CompleteWebApplyAsync(ConfigurationManifest manifest, WebListeners listeners, string expected, WebApplyOperation operation, User sessionUser)
@@ -867,9 +876,9 @@ namespace DnsServerCore
                             await _dnsWebService._dhcpServer.EnterManifestGateAsync();
                         try
                         {
-                            var (proxy, dnsCertificate, webCertificate, tsig, ldap, users, staticSessions, sso) = CheckApplyRevision(manifest, expected, sessionUser);
+                            var (proxy, dnsCertificate, webCertificate, tsig, ldap, users, staticSessions, sso, apps) = CheckApplyRevision(manifest, expected, sessionUser);
                             _dnsWebService.ValidateManifestWebListeners(listeners, webCertificate?.HasCertificate);
-                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig, sessionUser, ldap, users, staticSessions, sso);
+                            await _dnsWebService.ApplyManifestWithWebRestartAsync(manifest, listeners, proxy, dnsCertificate, webCertificate, tsig, sessionUser, ldap, users, staticSessions, sso, apps);
                         }
                         finally
                         {
@@ -1019,13 +1028,25 @@ namespace DnsServerCore
                 return ConfigurationStaticSessions.Prepare(manifest, auth, users);
             }
 
-            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers = null, ConfigurationStaticSessions.Candidate preparedStaticSessions = null, ConfigurationSso.Settings preparedSso = null)
+            private ConfigurationApplications.Entry[] PrepareAppsForSession(ConfigurationManifest manifest, User user)
+            {
+                if (!ConfigurationApplications.IsDeclared(manifest))
+                    return null;
+                if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Apps, user, PermissionFlag.Modify))
+                    throw new DnsWebServiceException("Access was denied.");
+                return ConfigurationApplications.Prepare(manifest, _dnsWebService._dnsServer.DnsApplicationManager);
+            }
+
+            private JsonDocument CaptureConfigurationSnapshot(ConfigurationManifest manifest = null, User sessionUser = null, ConfigurationProxy.Candidate? preparedProxy = null, ConfigurationDnsCertificate.Candidate dnsCertificate = default, ConfigurationWebCertificate.Candidate? webCertificate = null, ConfigurationTsig.Candidate? preparedTsig = null, bool exportDomainLists = false, ConfigurationDhcp.ScopeSnapshot dhcpSnapshot = null, ConfigurationLdap.Settings preparedLdap = null, IReadOnlyDictionary<string, ConfigurationUsers.Change> preparedUsers = null, ConfigurationStaticSessions.Candidate preparedStaticSessions = null, ConfigurationSso.Settings preparedSso = null, ConfigurationApplications.Entry[] preparedApps = null)
             {
                 using var snapshot = new MemoryStream();
                 using (var writer = new Utf8JsonWriter(snapshot))
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    var apps = preparedApps ?? PrepareAppsForSession(manifest, sessionUser);
+                    if (apps is not null)
+                        ConfigurationApplications.WriteSnapshot(writer, apps, _configurationRevisionKey);
                     writer.WritePropertyName("manifestPermissionOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedPermissionPaths);
                     writer.WritePropertyName("manifestUserOwnership");
