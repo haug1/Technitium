@@ -7,6 +7,8 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DnsServerCore.Dns;
 using TechnitiumLibrary.Net;
+using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 using Xunit;
 
 namespace DnsServerCore.Tests
@@ -16,27 +18,35 @@ namespace DnsServerCore.Tests
         public const string LegacyRealIpHeader = "X-Fixture-Real-IP";
 
         private readonly DirectoryInfo _configuration = Directory.CreateTempSubdirectory("technitium-web-test-");
-        private readonly string _adminPassword = Guid.NewGuid().ToString("N");
         private DnsWebService? _service;
 
         public HttpClient Client { get; private set; } = null!;
+        public string AdminPassword { get; } = Guid.NewGuid().ToString("N");
         public string AdminToken { get; private set; } = null!;
+        private IPEndPoint DnsEndPoint { get; set; } = null!;
 
-        public static async Task<LoopbackWebService> StartAsync()
+        public static async Task<LoopbackWebService> StartAsync(string serverDomain = "server.test", bool enableTls = false)
         {
             var server = new LoopbackWebService();
             try
             {
-                IPEndPoint dnsEndPoint = LoopbackDnsServer.GetLoopbackEndPoint();
+                server.DnsEndPoint = LoopbackDnsServer.GetLoopbackEndPoint();
                 int httpPort;
                 do
                 {
                     httpPort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
                 }
-                while (httpPort == dnsEndPoint.Port);
+                while (httpPort == server.DnsEndPoint.Port);
 
-                await server.SeedDnsConfigurationAsync(dnsEndPoint);
-                server.WriteLegacyWebConfiguration(httpPort);
+                int tlsPort;
+                do
+                {
+                    tlsPort = LoopbackDnsServer.GetLoopbackEndPoint().Port;
+                }
+                while (tlsPort == server.DnsEndPoint.Port || tlsPort == httpPort);
+
+                await server.SeedDnsConfigurationAsync(serverDomain);
+                server.WriteLegacyWebConfiguration(httpPort, tlsPort, enableTls);
                 server.Client = new HttpClient(new SocketsHttpHandler { UseProxy = false })
                 {
                     BaseAddress = new Uri($"http://127.0.0.1:{httpPort}"),
@@ -89,6 +99,12 @@ namespace DnsServerCore.Tests
             return result.GetProperty("response");
         }
 
+        public Task<DnsDatagram> QueryAsync(string name, DnsResourceRecordType type)
+        {
+            var client = new DnsClient(DnsEndPoint) { Timeout = 2000, Retries = 2 };
+            return client.ResolveAsync(name, type);
+        }
+
         public static void AssertOk(JsonElement result)
         {
             Assert.True(result.GetProperty("status").GetString() == "ok", result.GetRawText());
@@ -102,30 +118,30 @@ namespace DnsServerCore.Tests
             _configuration.Delete(recursive: true);
         }
 
-        private async Task SeedDnsConfigurationAsync(IPEndPoint endPoint)
+        private async Task SeedDnsConfigurationAsync(string serverDomain)
         {
             await using var log = new LogManager(true, _configuration.FullName);
-            await using var dns = new DnsServer(_configuration.FullName, _configuration.FullName, endPoint, log, "server.test");
+            await using var dns = new DnsServer(_configuration.FullName, _configuration.FullName, DnsEndPoint, log, serverDomain);
             dns.EnableCheckForUpdate = false;
             dns.DnsApplicationManager.EnableAutomaticUpdate = false;
             dns.Recursion = DnsServerRecursion.Deny;
             dns.SaveConfigFile(immediately: true);
         }
 
-        private void WriteLegacyWebConfiguration(int httpPort)
+        private void WriteLegacyWebConfiguration(int httpPort, int tlsPort, bool enableTls)
         {
             // Version 1 predates the reverse proxy ACL and Unix socket settings.
             using var writer = new BinaryWriter(File.Create(Path.Combine(_configuration.FullName, "webservice.config")));
             writer.Write("WC"u8);
             writer.Write((byte)1);
             writer.Write(httpPort);
-            writer.Write(53443);
+            writer.Write(tlsPort);
             writer.Write((byte)1); // address count
             IPAddress.Loopback.WriteTo(writer);
-            writer.Write(false); // TLS
+            writer.Write(enableTls);
             writer.Write(false); // HTTP/3
             writer.Write(false); // HTTP-to-TLS redirect
-            writer.Write(false); // self-signed certificate
+            writer.Write(enableTls); // self-signed certificate
             writer.Write(string.Empty); // certificate path
             writer.Write(string.Empty); // certificate password
             writer.Write(LegacyRealIpHeader);
@@ -136,7 +152,7 @@ namespace DnsServerCore.Tests
             // Only the constructor reads the bootstrap password.
             const string variable = "DNS_SERVER_ADMIN_PASSWORD";
             string? previous = Environment.GetEnvironmentVariable(variable);
-            Environment.SetEnvironmentVariable(variable, _adminPassword);
+            Environment.SetEnvironmentVariable(variable, AdminPassword);
             try
             {
                 _service = new DnsWebService(true, _configuration.FullName);
@@ -147,7 +163,7 @@ namespace DnsServerCore.Tests
             }
 
             await _service.StartAsync(throwIfBindFails: true).WaitAsync(TimeSpan.FromSeconds(15));
-            AdminToken = await LoginAsync("admin", _adminPassword);
+            AdminToken = await LoginAsync("admin", AdminPassword);
         }
     }
 }

@@ -7,7 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../Apps/FilterAaaaApp/FilterAaaaApp.csproj" />
     <ProjectReference Include="../DnsServerCore/DnsServerCore.csproj" />
+    <None Include="../Apps/FilterAaaaApp/bin/$(Configuration)/FilterAaaaApp.deps.json"
+          Link="FilterAaaaApp.deps.json" CopyToOutputDirectory="PreserveNewest" />
     <Reference Include="TechnitiumLibrary.Net">
       <HintPath>../../TechnitiumLibrary/bin/TechnitiumLibrary.Net.dll</HintPath>
     </Reference>
