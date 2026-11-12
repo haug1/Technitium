@@ -976,11 +976,11 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                if (isConfigTransfer && authConfig && _authManager.ManagedLdapFields.Count > 0 &&
+                if (isConfigTransfer && authConfig && _authManager.HasManagedAuthSettings &&
                     backupZip.GetEntry("auth.config") is ZipArchiveEntry managedAuth)
                 {
                     using Stream authConfiguration = managedAuth.Open();
-                    _authManager.CheckLdapRestoreOwnership(authConfiguration);
+                    _authManager.CheckManifestRestoreOwnership(authConfiguration);
                 }
 
                 if (isConfigTransfer)

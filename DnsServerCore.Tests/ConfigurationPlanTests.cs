@@ -3344,6 +3344,12 @@ namespace DnsServerCore.Tests
         public async Task GroupManifestResolvesLdapMappingsAndPreservesExistingMembership()
         {
             await using var server = await LoopbackWebService.StartAsync();
+            using var backupRequest = new HttpRequestMessage(HttpMethod.Get, "/api/settings/backup?authConfig=true");
+            backupRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.AdminToken);
+            using HttpResponseMessage backup = await server.Client.SendAsync(backupRequest);
+            backup.EnsureSuccessStatusCode();
+            byte[] priorAuth = await backup.Content.ReadAsByteArrayAsync();
+
             const string create = """
                 {"schemaVersion":1,"auth":{
                     "groups":{"Operations":{"description":"Operations group"}},
@@ -3377,6 +3383,27 @@ namespace DnsServerCore.Tests
             JsonElement group = await server.CallAsync("admin/groups/get?group=operations", server.AdminToken);
             LoopbackWebService.AssertOk(group);
             Assert.Contains(group.GetProperty("response").GetProperty("members").EnumerateArray(), member => member.ValueEquals("operator"));
+            Assert.Contains(group.GetProperty("response").GetProperty("managedSettings").EnumerateArray(),
+                path => path.ValueEquals("/auth/groups/operations/description"));
+
+            JsonElement rejectedEdit = await server.CallAsync(
+                "admin/groups/set?group=Operations&description=changed&members=", server.AdminToken);
+            Assert.Equal("error", rejectedEdit.GetProperty("status").GetString());
+            Assert.Contains("/auth/groups/operations/description", rejectedEdit.GetProperty("errorMessage").GetString());
+            group = await server.CallAsync("admin/groups/get?group=Operations", server.AdminToken);
+            Assert.Contains(group.GetProperty("response").GetProperty("members").EnumerateArray(), member => member.ValueEquals("operator"));
+
+            JsonElement rejectedRename = await server.CallAsync(
+                "admin/groups/set?group=Operations&newGroup=renamed", server.AdminToken);
+            Assert.Equal("error", rejectedRename.GetProperty("status").GetString());
+            Assert.Contains("/auth/groups/operations", rejectedRename.GetProperty("errorMessage").GetString());
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(priorAuth), "file", "backup.zip");
+            JsonElement rejectedRestore = await server.CallAsync("settings/restore?authConfig=true", server.AdminToken, form);
+            Assert.Equal("error", rejectedRestore.GetProperty("status").GetString());
+            Assert.Contains("/auth/groups/operations", rejectedRestore.GetProperty("errorMessage").GetString());
+
             JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
             LoopbackWebService.AssertOk(export);
             JsonElement groups = export.GetProperty("response").GetProperty("manifest").GetProperty("auth").GetProperty("groups");
@@ -3397,6 +3424,15 @@ namespace DnsServerCore.Tests
             await server.RestartAsync();
             Assert.Equal("error", (await server.CallAsync("admin/groups/get?group=operations", server.AdminToken)).GetProperty("status").GetString());
             Assert.Empty((await PreviewAsync(server, removeWithMapping)).GetProperty("changes").EnumerateArray());
+            JsonElement rejectedCreate = await server.CallAsync("admin/groups/create?group=Operations", server.AdminToken);
+            Assert.Equal("error", rejectedCreate.GetProperty("status").GetString());
+            Assert.Contains("/auth/groups/operations", rejectedCreate.GetProperty("errorMessage").GetString());
+
+            const string release = """{"schemaVersion":1}""";
+            revision = (await PreviewAsync(server, release)).GetProperty("revision").GetString()!;
+            LoopbackWebService.AssertOk(await ApplyAsync(server, release, revision));
+            await server.RestartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync("admin/groups/create?group=Operations", server.AdminToken));
         }
 
         [Fact]

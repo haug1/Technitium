@@ -296,6 +296,8 @@ namespace DnsServerCore.Configuration
                     ldap.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestLdapOwnership", out JsonElement ldapOwnership))
                     ldapOwnership.WriteTo(writer);
+                if (currentSettings.TryGetProperty("manifestGroupOwnership", out JsonElement groupOwnership))
+                    groupOwnership.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestGroups", out JsonElement groups))
                     groups.WriteTo(writer);
                 writer.WriteEndArray();

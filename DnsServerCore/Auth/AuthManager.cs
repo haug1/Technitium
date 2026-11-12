@@ -84,6 +84,11 @@ namespace DnsServerCore.Auth
         private string[] _managedLdapFields = [];
         internal IReadOnlyList<string> ManagedLdapFields => _managedLdapFields;
 
+        internal const string GroupOwnershipFile = "group-ownership.config";
+        private string[] _managedGroupPaths = [];
+        internal IReadOnlyList<string> ManagedGroupPaths => _managedGroupPaths;
+        internal bool HasManagedAuthSettings => _managedLdapFields.Length > 0 || _managedGroupPaths.Length > 0;
+
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
         bool _pendingLazySave;
@@ -100,10 +105,8 @@ namespace DnsServerCore.Auth
             _configFolder = configFolder;
             _log = log;
 
-            string ownershipFile = Path.Combine(configFolder, LdapOwnershipFile);
-            if (File.Exists(ownershipFile))
-                _managedLdapFields = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(ownershipFile))
-                    ?? throw new InvalidDataException("Invalid LDAP manifest ownership file.");
+            _managedLdapFields = ReadOwnership(LdapOwnershipFile);
+            _managedGroupPaths = ReadOwnership(GroupOwnershipFile);
 
             _saveTimer = new Timer(delegate (object state)
             {
@@ -498,9 +501,9 @@ namespace DnsServerCore.Auth
             _log.Write("DNS Server auth config file was saved: " + configFile);
         }
 
-        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, Action<Action> persist)
+        internal void ApplyManifestAuth(IReadOnlyDictionary<string, bool> membership, User creator, ConfigurationLdap.Settings ldap, string[] ldapOwnership, IReadOnlyDictionary<string, Group> groupChanges, string[] groupOwnership, Action<Action> persist)
         {
-            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0)
+            if (membership.Count == 0 && ldap is null && ldapOwnership is null && groupChanges.Count == 0 && groupOwnership is null)
             {
                 persist(null);
                 return;
@@ -533,7 +536,9 @@ namespace DnsServerCore.Auth
                     if (permissions is not null || ldap is not null || groupChanges.Count > 0)
                         SaveConfigFileInternal(permissions, ldap, groupChanges.Count > 0 ? groupChanges : null);
                     if (ldapOwnership is not null)
-                        WriteLdapOwnership(ldapOwnership);
+                        WriteOwnership(LdapOwnershipFile, ldapOwnership);
+                    if (groupOwnership is not null)
+                        WriteOwnership(GroupOwnershipFile, groupOwnership);
                 });
                 foreach (var (name, group) in groupChanges)
                 {
@@ -547,6 +552,8 @@ namespace DnsServerCore.Auth
 
                 if (ldapOwnership is not null)
                     _managedLdapFields = ldapOwnership;
+                if (groupOwnership is not null)
+                    _managedGroupPaths = groupOwnership;
                 if (permissions is not null)
                     _permissions[PermissionSection.Zones] = permissions;
                 if (ldap is not null)
@@ -554,9 +561,18 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void WriteLdapOwnership(string[] fields)
+        private string[] ReadOwnership(string fileName)
         {
-            string file = Path.Combine(_configFolder, LdapOwnershipFile);
+            string file = Path.Combine(_configFolder, fileName);
+            return File.Exists(file)
+                ? JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(file))
+                    ?? throw new InvalidDataException($"Invalid manifest ownership file: {fileName}.")
+                : [];
+        }
+
+        private void WriteOwnership(string fileName, string[] fields)
+        {
+            string file = Path.Combine(_configFolder, fileName);
             if (fields.Length == 0)
             {
                 File.Delete(file);
@@ -572,9 +588,13 @@ namespace DnsServerCore.Auth
             File.Move(temporary, file, true);
         }
 
-        internal void CheckLdapRestoreOwnership(Stream stream) =>
-            ReadConfigFrom(stream, false, out _, candidate => ConfigurationLdap.CheckOwnership(
-                GetManifestLdapSettings(), candidate, _managedLdapFields));
+        internal void CheckManifestRestoreOwnership(Stream stream) =>
+            ReadConfigFrom(stream, false, out _, (ldap, groups) =>
+            {
+                ConfigurationLdap.CheckOwnership(GetManifestLdapSettings(), ldap, _managedLdapFields);
+                if (_managedGroupPaths.Length > 0)
+                    ConfigurationGroups.CheckRestore(this, groups);
+            });
 
         internal ConfigurationLdap.Settings GetManifestLdapSettings() => new(
             _ldapEnabled, _ldapServer, _ldapPort, _ldapSslOption, _ldapIgnoreSslErrors, _ldapBindUsername, _ldapBindPassword,
@@ -608,7 +628,7 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings> inspectLdap = null)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService, Action<ConfigurationLdap.Settings, IReadOnlyDictionary<string, Group>> inspect = null)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
@@ -679,7 +699,7 @@ namespace DnsServerCore.Auth
                         {
                             ssoIsStillDisabled = !ssoEnabled;
                         }
-                        else if (inspectLdap is null)
+                        else if (inspect is null)
                         {
                             _ssoEnabled = ssoEnabled;
                             restartWebService = true;
@@ -692,7 +712,7 @@ namespace DnsServerCore.Auth
                         else
                             ssoAuthority = new Uri(strSsoAuthority);
 
-                        if (inspectLdap is null && _ssoAuthority != ssoAuthority)
+                        if (inspect is null && _ssoAuthority != ssoAuthority)
                         {
                             _ssoAuthority = ssoAuthority;
                             restartWebService = true;
@@ -702,7 +722,7 @@ namespace DnsServerCore.Auth
                         if (ssoClientId.Length == 0)
                             ssoClientId = null;
 
-                        if (inspectLdap is null && _ssoClientId != ssoClientId)
+                        if (inspect is null && _ssoClientId != ssoClientId)
                         {
                             _ssoClientId = ssoClientId;
                             restartWebService = true;
@@ -712,7 +732,7 @@ namespace DnsServerCore.Auth
                         if (ssoClientSecret.Length == 0)
                             ssoClientSecret = null;
 
-                        if (inspectLdap is null && _ssoClientSecret != ssoClientSecret)
+                        if (inspect is null && _ssoClientSecret != ssoClientSecret)
                         {
                             _ssoClientSecret = ssoClientSecret;
                             restartWebService = true;
@@ -725,7 +745,7 @@ namespace DnsServerCore.Auth
                         else
                             ssoMetadataAddress = new Uri(strSsoMetadataAddress);
 
-                        if (inspectLdap is null && _ssoMetadataAddress != ssoMetadataAddress)
+                        if (inspect is null && _ssoMetadataAddress != ssoMetadataAddress)
                         {
                             _ssoMetadataAddress = ssoMetadataAddress;
                             restartWebService = true;
@@ -739,7 +759,7 @@ namespace DnsServerCore.Auth
                             for (int i = 0; i < count; i++)
                                 ssoScopes.Add(s.ReadShortString());
 
-                            if (inspectLdap is null && !_ssoScopes.HasSameItems(ssoScopes))
+                            if (inspect is null && !_ssoScopes.HasSameItems(ssoScopes))
                             {
                                 _ssoScopes = ssoScopes;
                                 restartWebService = true;
@@ -748,7 +768,7 @@ namespace DnsServerCore.Auth
 
                         bool allowSignup = bR.ReadBoolean();
                         bool mappedSignupOnly = bR.ReadBoolean();
-                        if (inspectLdap is null)
+                        if (inspect is null)
                         {
                             _ssoAllowSignup = allowSignup;
                             _ssoAllowSignupOnlyForMappedUsers = mappedSignupOnly;
@@ -768,12 +788,12 @@ namespace DnsServerCore.Auth
                                     ssoGroupMap.TryAdd(key, value);
                                 }
 
-                                if (inspectLdap is null)
+                                if (inspect is null)
                                     _ssoGroupMap = ssoGroupMap;
                             }
                             else
                             {
-                                if (inspectLdap is null)
+                                if (inspect is null)
                                     _ssoGroupMap = null;
                             }
                         }
@@ -784,16 +804,16 @@ namespace DnsServerCore.Auth
                     if (version >= 4)
                     {
                         ConfigurationLdap.Settings ldap = ReadLdapSettings(bR);
-                        if (inspectLdap is not null)
+                        if (inspect is not null)
                         {
-                            inspectLdap(ldap);
+                            inspect(ldap, groups);
                             return;
                         }
                         SetLdapSettings(ldap);
                     }
-                    else if (inspectLdap is not null)
+                    else if (inspect is not null)
                     {
-                        inspectLdap(GetManifestLdapSettings());
+                        inspect(GetManifestLdapSettings(), groups);
                         return;
                     }
 

@@ -773,7 +773,7 @@ namespace DnsServerCore
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.DhcpServer, sessionUser, PermissionFlag.Modify))
                     throw new DnsWebServiceException("Access was denied.");
 
-                if (_dnsWebService._authManager.ManagedLdapFields.Count > 0 &&
+                if (_dnsWebService._authManager.HasManagedAuthSettings &&
                     !_dnsWebService._authManager.IsPermitted(PermissionSection.Administration, sessionUser, PermissionFlag.Delete))
                     throw new DnsWebServiceException("Access was denied.");
                 ConfigurationLdap.Settings ldap = PrepareLdapForSession(manifest, sessionUser);
@@ -967,6 +967,8 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WritePropertyName("manifestGroupOwnership");
+                    JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedGroupPaths);
                     writer.WritePropertyName("manifestLdapOwnership");
                     JsonSerializer.Serialize(writer, _dnsWebService._authManager.ManagedLdapFields);
                     writer.WritePropertyName("manifestZoneOwnership");
@@ -2291,7 +2293,7 @@ namespace DnsServerCore
                                 blockedZones && _dnsWebService._dnsServer.BlockedZoneManager.ManifestOwnsList;
                             bool checkScopes = scopes && _dnsWebService._dhcpServer.ManagedPaths.Count > 0;
                             bool checkZones = zones && _dnsWebService._dnsServer.AuthZoneManager.ManifestOwnedZones.Count > 0;
-                            bool checkAuth = authConfig && _dnsWebService._authManager.ManagedLdapFields.Count > 0;
+                            bool checkAuth = authConfig && _dnsWebService._authManager.HasManagedAuthSettings;
                             if (checkLog || checkDns || checkBlockList || checkWeb || checkDomainLists || checkScopes || checkZones || checkAuth)
                             {
                                 using (var archive = new ZipArchive(fS, ZipArchiveMode.Read, leaveOpen: true))
@@ -2299,7 +2301,7 @@ namespace DnsServerCore
                                     if (checkAuth && archive.GetEntry("auth.config") is ZipArchiveEntry authEntry)
                                     {
                                         using Stream authConfiguration = authEntry.Open();
-                                        _dnsWebService._authManager.CheckLdapRestoreOwnership(authConfiguration);
+                                        _dnsWebService._authManager.CheckManifestRestoreOwnership(authConfiguration);
                                     }
                                     if (checkZones)
                                         _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneRestore(archive, deleteExistingFiles);

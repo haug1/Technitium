@@ -1878,8 +1878,12 @@ function showGroupDetailsModal(objMenuItem) {
         url: "api/admin/groups/get?group=" + encodeURIComponent(group) + "&includeUsers=true",
         token: sessionData.token,
         success: function (responseJSON) {
-            $("#txtGroupDetailsName").val(responseJSON.response.name);
-            $("#txtGroupDetailsDescription").val(responseJSON.response.description);
+            var managedSettings = responseJSON.response.managedSettings || [];
+            var managedDescription = managedSettings.some(function (path) {
+                return path.split("/").length === 5;
+            });
+            $("#txtGroupDetailsName").val(responseJSON.response.name).prop("readOnly", managedSettings.length > 0);
+            $("#txtGroupDetailsDescription").val(responseJSON.response.description).prop("readOnly", managedDescription);
 
             var members = "";
 

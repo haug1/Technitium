@@ -23,6 +23,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Security.Claims;
 using System.Text.Json;
@@ -241,6 +242,15 @@ namespace DnsServerCore
             {
                 jsonWriter.WriteString("name", group.Name);
                 jsonWriter.WriteString("description", group.Description);
+
+                var managedPaths = _dnsWebService._authManager.ManagedGroupPaths;
+                string groupPath = ConfigurationGroups.GroupPath(group.Name);
+                jsonWriter.WriteStartArray("managedSettings");
+                if (ConfigurationGroups.OwnsMembership(managedPaths, group.Name))
+                    jsonWriter.WriteStringValue(groupPath);
+                if (managedPaths.Contains(groupPath + "/description"))
+                    jsonWriter.WriteStringValue(groupPath + "/description");
+                jsonWriter.WriteEndArray();
 
                 if (includeMembers)
                 {
@@ -1434,6 +1444,7 @@ namespace DnsServerCore
                 string groupName = request.GetQueryOrForm("group");
                 string description = request.GetQueryOrForm("description", "");
 
+                ConfigurationGroups.CheckMembership(_dnsWebService._authManager.ManagedGroupPaths, groupName);
                 Group group = _dnsWebService._authManager.CreateGroup(groupName, description);
 
                 _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), "[" + sessionUser.Username + "] Group was created successfully with name: " + group.Name);
@@ -1483,16 +1494,31 @@ namespace DnsServerCore
                 if (group is null)
                     throw new DnsWebServiceException("No such group exists: " + groupName);
 
+                var managedPaths = _dnsWebService._authManager.ManagedGroupPaths;
+                bool rename = request.TryGetQueryOrForm("newGroup", out string newGroup) && newGroup != group.Name;
+                if (rename)
+                {
+                    ConfigurationGroups.CheckMembership(managedPaths, group.Name);
+                    ConfigurationGroups.CheckMembership(managedPaths, newGroup);
+                }
+
+                bool updateDescription = request.TryQueryOrForm("description", out string description);
+                if (updateDescription && string.IsNullOrWhiteSpace(description))
+                    description = "";
+                string descriptionPath = ConfigurationGroups.GroupPath(group.Name) + "/description";
+                if (updateDescription && managedPaths.Contains(descriptionPath) && group.Description != description)
+                    throw ConfigurationGroups.Conflict(descriptionPath);
+
                 try
                 {
-                    if (request.TryGetQueryOrForm("newGroup", out string newGroup))
+                    if (rename)
                     {
                         _dnsWebService._authManager.RenameGroup(group, newGroup);
 
                         _dnsWebService._log.Write(_dnsWebService.GetRemoteEndPoint(context), $"Group name was changed from '{groupName}' to '{group.Name}'.");
                     }
 
-                    if (request.TryQueryOrForm("description", out string description))
+                    if (updateDescription && group.Description != description)
                         group.Description = description;
 
                     string members = request.QueryOrForm("members");
@@ -1557,6 +1583,8 @@ namespace DnsServerCore
                     throw new DnsWebServiceException("Access was denied.");
 
                 string groupName = context.Request.GetQueryOrForm("group");
+
+                ConfigurationGroups.CheckMembership(_dnsWebService._authManager.ManagedGroupPaths, groupName);
 
                 if (!_dnsWebService._authManager.DeleteGroup(groupName))
                     throw new DnsWebServiceException("Failed to delete group: " + groupName);

@@ -20,6 +20,54 @@ namespace DnsServerCore.Configuration
                 auth.TryGetProperty("groups", out groups);
         }
 
+        internal static string GroupPath(string name) => ConfigurationPlan.AppendPath(Path, name.ToLowerInvariant());
+
+        internal static string[] GetOwnedPaths(ConfigurationManifest manifest)
+        {
+            if (!TryGetDeclaration(manifest, out JsonElement groups))
+                return [];
+            if (groups.ValueKind == JsonValueKind.Null)
+                return [Path];
+
+            var paths = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (JsonProperty entry in groups.EnumerateObject())
+            {
+                string path = GroupPath(entry.Name);
+                paths.Add(path);
+                if (entry.Value.ValueKind == JsonValueKind.Object && entry.Value.TryGetProperty("description", out _))
+                    paths.Add(path + "/description");
+            }
+            return paths.ToArray();
+        }
+
+        internal static bool OwnsMembership(IReadOnlyList<string> paths, string name) =>
+            paths.Contains(GroupPath(name)) || (!IsReserved(name) && paths.Contains(Path));
+
+        internal static void CheckMembership(IReadOnlyList<string> paths, string name)
+        {
+            if (OwnsMembership(paths, name))
+                throw Conflict(GroupPath(name));
+        }
+
+        internal static InvalidDataException Conflict(string path) => new($"{path}: This group setting is managed by the manifest.");
+
+        internal static void CheckRestore(AuthManager auth, IReadOnlyDictionary<string, Group> candidate)
+        {
+            var paths = auth.ManagedGroupPaths;
+            var names = new SortedSet<string>(candidate.Keys, StringComparer.Ordinal);
+            names.UnionWith(auth.Groups.Select(group => group.Name.ToLowerInvariant()));
+            foreach (string name in names)
+            {
+                Group current = auth.GetGroup(name);
+                candidate.TryGetValue(name, out Group restored);
+                if (current?.Name != restored?.Name)
+                    CheckMembership(paths, name);
+                string description = GroupPath(name) + "/description";
+                if (paths.Contains(description) && current?.Description != restored?.Description)
+                    throw Conflict(description);
+            }
+        }
+
         internal static SortedDictionary<string, Group> Prepare(ConfigurationManifest manifest, AuthManager auth,
             ConfigurationLdap.Settings ldap)
         {
@@ -34,13 +82,13 @@ namespace DnsServerCore.Configuration
                 return changes;
             }
 
-            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (JsonProperty declaration in groups.EnumerateObject())
             {
                 string path = ConfigurationPlan.AppendPath(Path, declaration.Name);
                 if (string.IsNullOrWhiteSpace(declaration.Name) || Encoding.UTF8.GetByteCount(declaration.Name) > byte.MaxValue)
                     throw new InvalidDataException($"{path}: Group names must fit in 255 UTF-8 bytes and contain a non-whitespace character.");
-                if (!names.Add(declaration.Name))
+                if (!names.Add(declaration.Name.ToLowerInvariant()))
                     throw new InvalidDataException($"{path}: Duplicate group name.");
 
                 string name = declaration.Name.ToLowerInvariant();
