@@ -966,6 +966,7 @@ namespace DnsServerCore
                         if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Settings, sessionUser, PermissionFlag.Modify))
                             throw new DnsWebServiceException("Access was denied.");
                         var candidate = preparedTsig ?? _dnsWebService.PrepareTsigKeys(manifest);
+                        preparedTsig = candidate;
                         ConfigurationTsig.WriteSnapshot(writer, _dnsWebService._dnsServer.TsigKeys, candidate.Keys, _configurationRevisionKey);
                     }
                     WriteDomainListSnapshot(writer, manifest, sessionUser, "allowZones", PermissionSection.Allowed,
@@ -973,7 +974,7 @@ namespace DnsServerCore
                     WriteDomainListSnapshot(writer, manifest, sessionUser, "blockZones", PermissionSection.Blocked,
                         _dnsWebService._dnsServer.BlockedZoneManager.GetManifestNames, exportDomainLists);
                     if (manifest is not null && manifest.Settings.TryGetProperty("zones", out JsonElement zones))
-                        WriteManifestZoneSnapshot(writer, zones, sessionUser);
+                        WriteManifestZoneSnapshot(writer, zones, sessionUser, preparedTsig?.Keys ?? _dnsWebService._dnsServer.TsigKeys);
                     if (dhcpSnapshot is not null)
                         ConfigurationDhcp.WriteSnapshot(writer, manifest.Settings.GetProperty("dhcp").GetProperty("scopes"), dhcpSnapshot.Scopes);
                     writer.WriteEndObject();
@@ -1012,7 +1013,7 @@ namespace DnsServerCore
                 writer.WriteEndArray();
             }
 
-            private void WriteManifestZoneSnapshot(Utf8JsonWriter writer, JsonElement zones, User sessionUser)
+            private void WriteManifestZoneSnapshot(Utf8JsonWriter writer, JsonElement zones, User sessionUser, IReadOnlyDictionary<string, TsigKey> keys)
             {
                 if (!_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, sessionUser, PermissionFlag.View))
                     throw new DnsWebServiceException("Access was denied.");
@@ -1025,6 +1026,8 @@ namespace DnsServerCore
                     if (zone is not null && !_dnsWebService._authManager.IsPermitted(PermissionSection.Zones, zone.Name, sessionUser, PermissionFlag.View))
                         throw new DnsWebServiceException("Access was denied.");
 
+                    if (declaration.Value.ValueKind == JsonValueKind.Object)
+                        ConfigurationZonePolicies.ValidateTransferKeys(declaration.Value, ConfigurationPlan.AppendPath("/zones", declaration.Name), keys);
                     writer.WriteStartObject(name);
                     bool clusterProtected = _dnsWebService._clusterManager.ClusterInitialized &&
                         (_dnsWebService._clusterManager.IsClusterPrimaryZone(name) || _dnsWebService._clusterManager.IsClusterCatalogZone(name));

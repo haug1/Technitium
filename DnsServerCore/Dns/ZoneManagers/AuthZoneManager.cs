@@ -789,7 +789,7 @@ namespace DnsServerCore.Dns.ZoneManagers
         internal bool OwnsManifestZoneField(string name, string field) =>
             _manifestOwnedZones.TryGetValue(name, out string[] fields) && fields.Contains(field, StringComparer.Ordinal);
 
-        internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZones(ConfigurationManifest manifest, AuthManager auth, User creator)
+        internal (Action<Action> Commit, Action Write, string[] Files) PrepareManifestZones(ConfigurationManifest manifest, AuthManager auth, User creator, IReadOnlyDictionary<string, TsigKey> tsigKeys)
         {
             var changed = new List<(string Name, AuthZoneInfo Current, bool Remove, bool? Disabled, ConfigurationZonePolicies.Changes Policies, JsonElement Records)>();
             var membership = new Dictionary<string, bool>(StringComparer.Ordinal);
@@ -819,6 +819,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                     bool? disabled = declaration.Value.TryGetProperty("enabled", out JsonElement enabled)
                         ? enabled.ValueKind == JsonValueKind.False : null;
+                    ConfigurationZonePolicies.ValidateTransferKeys(declaration.Value, path, tsigKeys);
                     ConfigurationZonePolicies.Changes policies = ConfigurationZonePolicies.Prepare(declaration.Value, path, zone);
                     bool editRecords = declaration.Value.TryGetProperty("records", out JsonElement records);
                     if (editRecords && zone is not null)

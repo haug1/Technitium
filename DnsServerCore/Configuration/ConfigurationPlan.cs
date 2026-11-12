@@ -878,7 +878,8 @@ namespace DnsServerCore.Configuration
                         {
                             foreach (JsonProperty option in field.Value.EnumerateObject())
                             {
-                                if (option.Name != "mode" && option.Name != (field.Name == "notify" ? "nameServers" : "networkAcl"))
+                                if (option.Name != "mode" && option.Name != (field.Name == "notify" ? "nameServers" : "networkAcl") &&
+                                    !(field.Name == "transfer" && option.Name == "tsigKeys"))
                                     throw new InvalidDataException($"{AppendPath(AppendPath(zonePath, field.Name), option.Name)}: Applying this zone setting is not implemented.");
                             }
                             continue;

@@ -35,13 +35,21 @@ namespace DnsServerCore.Configuration
                     type = nameof(AuthZoneType.Primary),
                     enabled = !zone.Disabled,
                     query = new { mode = zone.QueryAccess.ToString(), networkAcl = zone.QueryAccessNetworkACL?.Select(rule => rule.ToString()) ?? [] },
-                    transfer = new { mode = zone.ZoneTransfer.ToString(), networkAcl = zone.ZoneTransferNetworkACL?.Select(rule => rule.ToString()) ?? [] },
+                    transfer = new
+                    {
+                        mode = zone.ZoneTransfer.ToString(),
+                        networkAcl = zone.ZoneTransferNetworkACL?.Select(rule => rule.ToString()) ?? [],
+                        tsigKeys = (zone.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>()).OrderBy(key => key, StringComparer.Ordinal)
+                    },
                     notify = new { mode = zone.Notify.ToString(), nameServers = zone.NotifyNameServers?.Select(address => address.ToString()) ?? [] },
                     updates = new { mode = zone.Update.ToString(), networkAcl = zone.UpdateNetworkACL?.Select(rule => rule.ToString()) ?? [] }
                 }).AsObject();
 
-                if (zone.ZoneTransferTsigKeyNames?.Count > 0)
+                if (zone.ZoneTransferTsigKeyNames?.Any(key => dns.TsigKeys?.ContainsKey(key) != true) == true)
+                {
+                    declaration["transfer"].AsObject().Remove("tsigKeys");
                     missingInputs.Add(path + "/transfer/tsigKeys");
+                }
                 if (zone.UpdateSecurityPolicies?.Count > 0)
                     missingInputs.Add(path + "/updates/securityPolicies");
 

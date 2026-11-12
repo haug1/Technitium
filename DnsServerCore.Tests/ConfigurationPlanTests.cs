@@ -3261,6 +3261,52 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task ZoneTransferKeysResolveAgainstCandidateAndRemainManaged()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            const string missing = """
+                {"schemaVersion":1,"zones":{"transfer.test":{"type":"Primary","transfer":{"tsigKeys":["transfer-key.test"]}}}}
+                """;
+            using (var content = new StringContent(missing, Encoding.UTF8, "application/json"))
+            {
+                JsonElement rejected = await server.CallAsync("settings/config/plan", server.AdminToken, content);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/zones/transfer.test/transfer/tsigKeys", rejected.GetProperty("errorMessage").GetString());
+            }
+
+            const string variable = "TECHNITIUM_TEST_ZONE_TRANSFER_SECRET";
+            string? previous = Environment.GetEnvironmentVariable(variable);
+            Environment.SetEnvironmentVariable(variable, Convert.ToBase64String(new byte[32]));
+            try
+            {
+                const string manifest = """
+                    {"schemaVersion":1,
+                     "dns":{"tsigKeys":{"transfer-key.test":{"algorithm":"hmac-sha256","secret":{"environment":"TECHNITIUM_TEST_ZONE_TRANSFER_SECRET"}}}},
+                     "zones":{"transfer.test":{"type":"Primary","transfer":{"tsigKeys":["TRANSFER-KEY.TEST."]}}}}
+                    """;
+                string revision = (await PreviewAsync(server, manifest)).GetProperty("revision").GetString()!;
+                LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, revision));
+                await server.RestartAsync();
+                Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+                JsonElement rejected = await server.CallAsync(
+                    "zones/options/set?zone=transfer.test&zoneTransferTsigKeyNames=false", server.AdminToken);
+                Assert.Equal("error", rejected.GetProperty("status").GetString());
+                Assert.Contains("/zones/transfer.test/transfer/tsigKeys", rejected.GetProperty("errorMessage").GetString());
+
+                JsonElement export = await server.CallAsync("settings/config/export", server.AdminToken);
+                LoopbackWebService.AssertOk(export);
+                JsonElement keys = export.GetProperty("response").GetProperty("manifest").GetProperty("zones")
+                    .GetProperty("transfer.test").GetProperty("transfer").GetProperty("tsigKeys");
+                Assert.Equal("transfer-key.test", Assert.Single(keys.EnumerateArray()).GetString());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(variable, previous);
+            }
+        }
+
+        [Fact]
         public async Task ZonePolicyOwnershipRejectsMixedEditsAndAllowsUnmanagedFields()
         {
             await using var server = await LoopbackWebService.StartAsync();

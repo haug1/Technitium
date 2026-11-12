@@ -3454,6 +3454,23 @@ namespace DnsServerCore
                 void Reject(string field) => throw new DnsWebServiceException(
                     $"{AuthZoneManager.GetManifestZonePath(zoneInfo.Name)}/{field}: Zone policy is managed by the configuration manifest.");
 
+                string transferKeyInput = request.QueryOrForm("zoneTransferTsigKeyNames");
+                if (Owns("transfer/tsigKeys") && transferKeyInput is not null)
+                {
+                    var current = new HashSet<string>(zoneInfo.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+                    if (!current.SetEquals(ParseTransferKeys(transferKeyInput) ?? Enumerable.Empty<string>()))
+                        Reject("transfer/tsigKeys");
+                }
+
+                static HashSet<string> ParseTransferKeys(string value)
+                {
+                    if (value.Length == 0 || value.Equals("false", StringComparison.OrdinalIgnoreCase))
+                        return null;
+
+                    return value.Split(_commaSeparator, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(name => name.Trim('.').ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+                }
+
                 bool setDisabled = request.TryGetQueryOrForm("disabled", bool.Parse, out bool disabled);
                 if (setDisabled)
                     _dnsWebService._dnsServer.AuthZoneManager.CheckManifestZoneEnabled(zoneInfo, disabled);
@@ -3643,24 +3660,8 @@ namespace DnsServerCore
                         if (!Owns("transfer/mode") && request.TryGetQueryOrFormEnum("zoneTransfer", out AuthZoneTransfer zoneTransfer))
                             zoneInfo.ZoneTransfer = zoneTransfer;
 
-                        string strZoneTransferTsigKeyNames = request.QueryOrForm("zoneTransferTsigKeyNames");
-                        if (strZoneTransferTsigKeyNames is not null)
-                        {
-                            if ((strZoneTransferTsigKeyNames.Length == 0) || strZoneTransferTsigKeyNames.Equals("false", StringComparison.OrdinalIgnoreCase))
-                            {
-                                zoneInfo.ZoneTransferTsigKeyNames = null;
-                            }
-                            else
-                            {
-                                string[] strZoneTransferTsigKeyNamesParts = strZoneTransferTsigKeyNames.Split(_commaSeparator, StringSplitOptions.RemoveEmptyEntries);
-                                HashSet<string> zoneTransferTsigKeyNames = new HashSet<string>(strZoneTransferTsigKeyNamesParts.Length);
-
-                                for (int i = 0; i < strZoneTransferTsigKeyNamesParts.Length; i++)
-                                    zoneTransferTsigKeyNames.Add(strZoneTransferTsigKeyNamesParts[i].Trim('.').ToLowerInvariant());
-
-                                zoneInfo.ZoneTransferTsigKeyNames = zoneTransferTsigKeyNames;
-                            }
-                        }
+                        if (!Owns("transfer/tsigKeys") && transferKeyInput is not null)
+                            zoneInfo.ZoneTransferTsigKeyNames = ParseTransferKeys(transferKeyInput);
 
                         break;
                 }

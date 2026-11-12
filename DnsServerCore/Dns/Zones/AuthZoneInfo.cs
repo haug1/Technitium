@@ -1214,7 +1214,7 @@ namespace DnsServerCore.Dns.Zones
 
                     bW.Write((byte)(policies.Transfer ?? _zoneTransfer));
                     WriteNetworkACLTo(policies.TransferAcl ?? _zoneTransferNetworkACL, bW);
-                    WriteZoneTransferTsigKeyNamesTo(_zoneTransferTsigKeyNames, bW);
+                    WriteZoneTransferTsigKeyNamesTo(policies.TransferKeys ?? _zoneTransferTsigKeyNames, bW);
                     WriteZoneHistoryTo(_zoneHistory, bW);
 
                     bW.Write((byte)(policies.Notify ?? _notify));

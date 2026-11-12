@@ -3250,7 +3250,7 @@ namespace DnsServerCore
             string previousCertificateFileHash = _webServiceCertificateFileHash;
             try
             {
-                var zones = _dnsServer.AuthZoneManager.PrepareManifestZones(manifest, _authManager, zoneCreator);
+                var zones = _dnsServer.AuthZoneManager.PrepareManifestZones(manifest, _authManager, zoneCreator, tsig.Keys ?? _dnsServer.TsigKeys);
                 await _dhcpServer.ApplyManifestScopesAsync(manifest, (writeScopes, scopeFiles) =>
                     ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
                         (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, webCertificate, webRootChanged, persist),

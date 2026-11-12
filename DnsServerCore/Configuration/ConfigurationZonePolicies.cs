@@ -13,7 +13,7 @@ namespace DnsServerCore.Configuration
     {
         internal readonly record struct Changes(
             AuthZoneQueryAccess? QueryAccess, NetworkAccessControl[] QueryAcl,
-            AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl,
+            AuthZoneTransfer? Transfer, NetworkAccessControl[] TransferAcl, IReadOnlySet<string> TransferKeys,
             AuthZoneNotify? Notify, IPAddress[] NotifyServers,
             AuthZoneUpdate? Update, NetworkAccessControl[] UpdateAcl)
         {
@@ -27,6 +27,8 @@ namespace DnsServerCore.Configuration
                     zone.ZoneTransferNetworkACL = TransferAcl;
                 if (Transfer.HasValue)
                     zone.ZoneTransfer = Transfer.Value;
+                if (TransferKeys is not null)
+                    zone.ZoneTransferTsigKeyNames = TransferKeys;
                 if (NotifyServers is not null)
                     zone.NotifyNameServers = NotifyServers;
                 if (Notify.HasValue)
@@ -57,9 +59,13 @@ namespace DnsServerCore.Configuration
                     notifyServers = addresses;
             }
 
+            IReadOnlySet<string> transferKeys = ReadTransferKeys(declaration, path);
+            if (transferKeys is not null && transferKeys.SetEquals(current?.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>()))
+                transferKeys = null;
+
             return new Changes(
                 ReadMode(query, "query", current?.QueryAccess), ReadAcl(query, "query", current?.QueryAccessNetworkACL),
-                ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL),
+                ReadMode(transfer, "transfer", current?.ZoneTransfer), ReadAcl(transfer, "transfer", current?.ZoneTransferNetworkACL), transferKeys,
                 notifyMode, notifyServers,
                 ReadMode(updates, "updates", current?.Update), ReadAcl(updates, "updates", current?.UpdateNetworkACL));
 
@@ -93,6 +99,8 @@ namespace DnsServerCore.Configuration
                     "query/networkAcl" => !Equal(current.QueryAccessNetworkACL, candidate.QueryAccessNetworkACL),
                     "transfer/mode" => current.ZoneTransfer != candidate.ZoneTransfer,
                     "transfer/networkAcl" => !Equal(current.ZoneTransferNetworkACL, candidate.ZoneTransferNetworkACL),
+                    "transfer/tsigKeys" => !new HashSet<string>(current.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase)
+                        .SetEquals(candidate.ZoneTransferTsigKeyNames ?? Enumerable.Empty<string>()),
                     "notify/mode" => current.Notify != candidate.Notify,
                     "notify/nameServers" => !Equal(current.NotifyNameServers, candidate.NotifyNameServers),
                     "updates/mode" => current.Update != candidate.Update,
@@ -105,6 +113,26 @@ namespace DnsServerCore.Configuration
 
             static bool Equal<T>(IReadOnlyCollection<T> before, IReadOnlyCollection<T> after) =>
                 (before ?? []).Select(value => value.ToString()).SequenceEqual((after ?? []).Select(value => value.ToString()), StringComparer.Ordinal);
+        }
+
+        internal static IReadOnlySet<string> ReadTransferKeys(JsonElement declaration, string path)
+        {
+            if (!declaration.TryGetProperty("transfer", out JsonElement transfer) || !transfer.TryGetProperty("tsigKeys", out JsonElement value))
+                return null;
+
+            var names = new SortedSet<string>(StringComparer.Ordinal);
+            if (value.ValueKind != JsonValueKind.Null)
+            {
+                foreach (JsonElement name in value.EnumerateArray())
+                    names.Add(ConfigurationManifest.CanonicalDnsName(name.GetString(), path + "/transfer/tsigKeys", allowRoot: false));
+            }
+            return names;
+        }
+
+        internal static void ValidateTransferKeys(JsonElement declaration, string path, IReadOnlyDictionary<string, TechnitiumLibrary.Net.Dns.TsigKey> keys)
+        {
+            if (ReadTransferKeys(declaration, path)?.Any(name => keys?.ContainsKey(name) != true) == true)
+                throw new InvalidDataException($"{path}/transfer/tsigKeys: A referenced TSIG key is missing from the effective DNS configuration.");
         }
 
         internal static bool IsPolicy(string name)
@@ -123,6 +151,7 @@ namespace DnsServerCore.Configuration
                     continue;
 
                 string path = ConfigurationPlan.AppendPath("/zones", zone.Name);
+                ReadTransferKeys(zone.Value, path);
                 foreach (JsonProperty policy in zone.Value.EnumerateObject())
                 {
                     if (IsPolicy(policy.Name) && policy.Value.TryGetProperty("networkAcl", out JsonElement acl))
@@ -143,7 +172,7 @@ namespace DnsServerCore.Configuration
                         WritePolicy("query", zone.QueryAccess.ToString(), zone.QueryAccessNetworkACL);
                         break;
                     case "transfer":
-                        WritePolicy("transfer", zone.ZoneTransfer.ToString(), zone.ZoneTransferNetworkACL);
+                        WritePolicy("transfer", zone.ZoneTransfer.ToString(), zone.ZoneTransferNetworkACL, zone.ZoneTransferTsigKeyNames);
                         break;
                     case "updates":
                         WritePolicy("updates", zone.Update.ToString(), zone.UpdateNetworkACL);
@@ -161,7 +190,7 @@ namespace DnsServerCore.Configuration
             }
             writer.WriteEndObject();
 
-            void WritePolicy(string name, string mode, IReadOnlyCollection<NetworkAccessControl> acl)
+            void WritePolicy(string name, string mode, IReadOnlyCollection<NetworkAccessControl> acl, IReadOnlySet<string> keys = null)
             {
                 writer.WriteStartObject(name);
                 writer.WriteString("mode", mode);
@@ -169,6 +198,13 @@ namespace DnsServerCore.Configuration
                 foreach (NetworkAccessControl entry in acl ?? [])
                     writer.WriteStringValue(entry.ToString());
                 writer.WriteEndArray();
+                if (name == "transfer")
+                {
+                    writer.WriteStartArray("tsigKeys");
+                    foreach (string key in (keys ?? Enumerable.Empty<string>()).OrderBy(key => key, StringComparer.Ordinal))
+                        writer.WriteStringValue(key);
+                    writer.WriteEndArray();
+                }
                 writer.WriteEndObject();
             }
         }
@@ -207,6 +243,10 @@ namespace DnsServerCore.Configuration
                     {
                         NetworkAccessControl[] acl = ConfigurationManifest.ReadNetworkAcl(field.Value, fieldPath);
                         changed = exists && !EqualList(currentPolicy, field.Name, acl.Select(entry => entry.ToString()));
+                    }
+                    else if (field.Name == "tsigKeys" && policy.Name == "transfer")
+                    {
+                        changed = exists && !EqualList(currentPolicy, field.Name, ReadTransferKeys(declared, zonePath));
                     }
                     else if (field.Name == "nameServers" && policy.Name == "notify")
                     {
