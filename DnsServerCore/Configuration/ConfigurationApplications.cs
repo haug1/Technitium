@@ -87,10 +87,7 @@ namespace DnsServerCore.Configuration
                 {
                     if (source.TryGetProperty("url", out JsonElement url))
                     {
-                        if (!Uri.TryCreate(url.GetString(), UriKind.Absolute, out remoteSource) ||
-                            remoteSource.Scheme != Uri.UriSchemeHttps || remoteSource.Host.Length == 0 ||
-                            remoteSource.UserInfo.Length != 0 || remoteSource.Fragment.Length != 0)
-                            throw new InvalidDataException($"{path}/source: Expected an HTTPS URL without credentials or a fragment.");
+                        remoteSource = ReadRemoteSource(url, path);
                     }
                     else if (manifest.FilePath is null)
                     {
@@ -171,8 +168,23 @@ namespace DnsServerCore.Configuration
         {
             declaration.TryGetProperty("source", out JsonElement source);
             var (packageDigest, sourceDigest) = ReadPackagePins(declaration, source, path);
-            if (source.ValueKind == JsonValueKind.Object && source.TryGetProperty("file", out _))
+            if (source.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (source.TryGetProperty("url", out JsonElement url))
+                ReadRemoteSource(url, path);
+            else if (source.TryGetProperty("file", out _))
                 ValidateLocalSource(manifest, source, path, packageDigest, sourceDigest);
+        }
+
+        private static Uri ReadRemoteSource(JsonElement url, string path)
+        {
+            if (!Uri.TryCreate(url.GetString(), UriKind.Absolute, out Uri remoteSource) ||
+                remoteSource.Scheme != Uri.UriSchemeHttps || remoteSource.Host.Length == 0 ||
+                remoteSource.UserInfo.Length != 0 || remoteSource.Fragment.Length != 0)
+                throw new InvalidDataException($"{path}/source/url: Expected an HTTPS URL without credentials or a fragment.");
+
+            return remoteSource;
         }
 
         private static void ValidateLocalSource(ConfigurationManifest manifest, JsonElement source, string path, string packageDigest, string sourceDigest)

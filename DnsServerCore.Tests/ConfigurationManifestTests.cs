@@ -180,6 +180,21 @@ namespace DnsServerCore.Tests
             manifest.ValidateReferences();
         }
 
+        [Theory]
+        [InlineData("https://user:fixture-secret@example.test/app.zip")]
+        [InlineData("https://example.test/app.zip#fixture-secret")]
+        [InlineData("https://[fixture-secret]/app.zip")]
+        public void OfflineValidationRejectsInvalidRemotePackageUrlsWithoutEchoingThem(string url)
+        {
+            string path = WriteManifest($$"""
+                {"schemaVersion":1,"apps":{"packages":{"Fixture":{"source":{"url":"{{url}}"} } } } }
+                """);
+
+            var error = Assert.Throws<InvalidDataException>(ConfigurationManifest.Load(path).ValidateReferences);
+            Assert.Contains("/apps/packages/Fixture/source/url", error.Message);
+            Assert.DoesNotContain("fixture-secret", error.Message);
+        }
+
         [Fact]
         public void FileReferenceValidationRejectsEmptyAndInvalidTextWithoutLeakingThePath()
         {
