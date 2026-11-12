@@ -3,10 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using DnsServerCore.Dhcp.Options;
 using DnsServerCore.Dhcp;
+using DnsServerCore.Dhcp.Options;
 using TechnitiumLibrary.Net;
 
 namespace DnsServerCore.Configuration
@@ -14,6 +15,10 @@ namespace DnsServerCore.Configuration
     internal static class ConfigurationDhcp
     {
         private const string ScopesPath = "/dhcp/scopes";
+
+        private static readonly JsonObject _defaultOptions = WriteScopeOptions(new Scope("defaults", true,
+            IPAddress.Parse("192.0.2.1"), IPAddress.Parse("192.0.2.2"), IPAddress.Parse("255.255.255.0"), null, null)
+            { IgnoreClientIdentifierOption = true });
 
         private sealed record Reservation(IPAddress Address, string HostName, string Comments);
 
@@ -44,6 +49,7 @@ namespace DnsServerCore.Configuration
                 if (scope.ValueKind == JsonValueKind.Null)
                     continue;
 
+                ReadDeclaredOptions(scope, path);
                 IPAddress start = ReadAddress(scope, "startingAddress");
                 IPAddress end = ReadAddress(scope, "endingAddress");
                 IPAddress mask = ReadAddress(scope, "subnetMask");
@@ -116,6 +122,8 @@ namespace DnsServerCore.Configuration
                 }
                 writer.WriteEndObject();
 
+                writer.WritePropertyName("options");
+                WriteScopeOptions(scope).WriteTo(writer);
                 writer.WritePropertyName("exclusions");
                 WriteExclusions(scope.Exclusions).WriteTo(writer);
                 writer.WriteEndObject();
@@ -154,12 +162,6 @@ namespace DnsServerCore.Configuration
                 }
 
                 JsonElement scope = entry.Value;
-                foreach (JsonProperty field in scope.EnumerateObject())
-                {
-                    if (field.Name is not ("startingAddress" or "endingAddress" or "subnetMask" or "enabled" or "reservations" or "exclusions"))
-                        throw new InvalidDataException($"{ConfigurationPlan.AppendPath(path, field.Name)}: Planning for this scope setting is not implemented.");
-                }
-
                 candidates.TryGetValue(entry.Name, out ScopeState previous);
                 IPAddress start = ReadAddress(scope, "startingAddress") ?? previous?.Start;
                 IPAddress end = ReadAddress(scope, "endingAddress") ?? previous?.End;
@@ -204,6 +206,9 @@ namespace DnsServerCore.Configuration
                 {
                     ReadExclusions(currentScope.GetProperty("exclusions"), path + "/exclusions", start, end);
                 }
+
+                if (previous is not null)
+                    CompareOptions(scope, currentScope, path, changes);
 
                 candidates[entry.Name] = candidate;
                 if (previous is null)
@@ -273,52 +278,234 @@ namespace DnsServerCore.Configuration
                     continue;
                 }
 
-                var vendorInfo = new JsonObject();
-                if (scope.VendorInfo is not null)
-                {
-                    foreach (var (identifier, option) in scope.VendorInfo.OrderBy(entry => entry.Key, StringComparer.Ordinal))
-                        vendorInfo.Add(identifier, BitConverter.ToString(option.Information).Replace('-', ':'));
-                }
-
-                JsonNode settings = JsonSerializer.SerializeToNode(new
-                {
-                    enabled = scope.Enabled,
-                    startingAddress = scope.StartingAddress.ToString(),
-                    endingAddress = scope.EndingAddress.ToString(),
-                    subnetMask = scope.SubnetMask.ToString(),
-                    leaseTime = new { days = scope.LeaseTimeDays, hours = scope.LeaseTimeHours, minutes = scope.LeaseTimeMinutes },
-                    offerDelayMs = scope.OfferDelayTime,
-                    pingCheck = new { enabled = scope.PingCheckEnabled, timeoutMs = scope.PingCheckTimeout, retries = scope.PingCheckRetries },
-                    domainName = scope.DomainName,
-                    domainSearchList = scope.DomainSearchList ?? [],
-                    dnsUpdates = new { enabled = scope.DnsUpdates, overwriteDynamicRecords = scope.DnsOverwriteForDynamicLease, ttl = scope.DnsTtl },
-                    boot = new { serverAddress = scope.ServerAddress?.ToString(), serverHostName = scope.ServerHostName, fileName = scope.BootFileName },
-                    routerAddress = scope.RouterAddress?.ToString(),
-                    dns = new { useThisServer = scope.UseThisDnsServer, servers = WriteAddresses(scope.UseThisDnsServer ? null : scope.DnsServers) },
-                    winsServers = WriteAddresses(scope.WinsServers),
-                    ntp = new { servers = WriteAddresses(scope.NtpServers), serverDomainNames = scope.NtpServerDomainNames ?? [] },
-                    staticRoutes = scope.StaticRoutes?.Select(route => new
-                    {
-                        destination = route.Destination.ToString(),
-                        subnetMask = route.SubnetMask.ToString(),
-                        router = route.Router.ToString()
-                    }),
-                    vendorInfo,
-                    capwapAcIpAddresses = WriteAddresses(scope.CAPWAPAcIpAddresses),
-                    tftpServerAddresses = WriteAddresses(scope.TftpServerAddresses),
-                    genericOptions = scope.GenericOptions?.Select(option => new { code = (byte)option.Code, value = Convert.ToHexString(option.RawValue) }),
-                    exclusions = WriteExclusions(scope.Exclusions),
-                    reservations,
-                    allowOnlyReservedLeases = scope.AllowOnlyReservedLeases,
-                    blockLocallyAdministeredMacAddresses = scope.BlockLocallyAdministeredMacAddresses,
-                    ignoreClientIdentifierOption = scope.IgnoreClientIdentifierOption
-                });
+                JsonObject settings = WriteScopeOptions(scope);
+                settings["enabled"] = scope.Enabled;
+                settings["startingAddress"] = scope.StartingAddress.ToString();
+                settings["endingAddress"] = scope.EndingAddress.ToString();
+                settings["subnetMask"] = scope.SubnetMask.ToString();
+                settings["exclusions"] = WriteExclusions(scope.Exclusions);
+                settings["reservations"] = reservations;
                 exported.Add(name, settings);
             }
             return exported;
+        }
+
+        private static JsonObject WriteScopeOptions(Scope scope)
+        {
+            var vendorInfo = new JsonObject();
+            if (scope.VendorInfo is not null)
+            {
+                foreach (var (identifier, option) in scope.VendorInfo.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+                    vendorInfo.Add(identifier, BitConverter.ToString(option.Information).Replace('-', ':'));
+            }
+
+            return JsonSerializer.SerializeToNode(new
+            {
+                leaseTime = new { days = scope.LeaseTimeDays, hours = scope.LeaseTimeHours, minutes = scope.LeaseTimeMinutes },
+                offerDelayMs = scope.OfferDelayTime,
+                pingCheck = new { enabled = scope.PingCheckEnabled, timeoutMs = scope.PingCheckTimeout, retries = scope.PingCheckRetries },
+                domainName = string.IsNullOrEmpty(scope.DomainName) ? null : NormalizeStoredName(scope.DomainName),
+                domainSearchList = scope.DomainSearchList?.Select(NormalizeStoredName) ?? [],
+                dnsUpdates = new { enabled = scope.DnsUpdates, overwriteDynamicRecords = scope.DnsOverwriteForDynamicLease, ttl = scope.DnsTtl },
+                boot = new { serverAddress = scope.ServerAddress?.ToString(), serverHostName = scope.ServerHostName, fileName = scope.BootFileName },
+                routerAddress = scope.RouterAddress?.ToString(),
+                dns = new { useThisServer = scope.UseThisDnsServer, servers = WriteAddresses(scope.UseThisDnsServer ? null : scope.DnsServers) },
+                winsServers = WriteAddresses(scope.WinsServers),
+                ntp = new { servers = WriteAddresses(scope.NtpServers), serverDomainNames = scope.NtpServerDomainNames?.Select(NormalizeStoredName) ?? [] },
+                staticRoutes = scope.StaticRoutes?.Select(route => new
+                {
+                    destination = route.Destination.ToString(),
+                    subnetMask = route.SubnetMask.ToString(),
+                    router = route.Router.ToString()
+                }) ?? [],
+                vendorInfo,
+                capwapAcIpAddresses = WriteAddresses(scope.CAPWAPAcIpAddresses),
+                tftpServerAddresses = WriteAddresses(scope.TftpServerAddresses),
+                genericOptions = scope.GenericOptions?.Select(option => new { code = (byte)option.Code, value = Convert.ToHexString(option.RawValue) }) ?? [],
+                allowOnlyReservedLeases = scope.AllowOnlyReservedLeases,
+                blockLocallyAdministeredMacAddresses = scope.BlockLocallyAdministeredMacAddresses,
+                ignoreClientIdentifierOption = scope.IgnoreClientIdentifierOption
+            }).AsObject();
+
+            static string NormalizeStoredName(string name) => name.TrimEnd('.').ToLowerInvariant();
 
             static IEnumerable<string> WriteAddresses(IEnumerable<IPAddress> addresses) =>
                 addresses?.Select(address => address.ToString()) ?? [];
+        }
+
+        private static JsonObject ReadDeclaredOptions(JsonElement scope, string path)
+        {
+            var options = new JsonObject();
+            foreach (JsonProperty field in scope.EnumerateObject())
+            {
+                if (!_defaultOptions.ContainsKey(field.Name))
+                    continue;
+                string fieldPath = ConfigurationPlan.AppendPath(path, field.Name);
+                if (field.Name == "vendorInfo")
+                {
+                    options.Add(field.Name, ReadVendorInformation(field.Value, fieldPath));
+                    continue;
+                }
+
+                JsonNode defaults = _defaultOptions[field.Name];
+                if (defaults is JsonObject group)
+                {
+                    var normalized = new JsonObject();
+                    foreach (JsonProperty option in field.Value.EnumerateObject())
+                        normalized.Add(option.Name, NormalizeOption(option.Value, group[option.Name], field.Name + "/" + option.Name,
+                            ConfigurationPlan.AppendPath(fieldPath, option.Name)));
+                    options.Add(field.Name, normalized);
+                }
+                else
+                {
+                    options.Add(field.Name, NormalizeOption(field.Value, defaults, field.Name, fieldPath));
+                }
+            }
+            return options;
+        }
+
+        private static JsonNode NormalizeOption(JsonElement value, JsonNode defaultValue, string name, string path)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return defaultValue?.DeepClone();
+
+            switch (name)
+            {
+                case "domainName":
+                    return JsonValue.Create(ConfigurationManifest.CanonicalDnsName(value.GetString(), path, allowRoot: false));
+                case "domainSearchList":
+                case "ntp/serverDomainNames":
+                    return JsonSerializer.SerializeToNode(value.EnumerateArray().Select((item, index) =>
+                        ConfigurationManifest.CanonicalDnsName(item.GetString(), $"{path}/{index}", allowRoot: false)));
+                case "boot/serverAddress":
+                case "routerAddress":
+                    return JsonValue.Create(IPAddress.Parse(value.GetString()).ToString());
+                case "dns/servers":
+                case "winsServers":
+                case "ntp/servers":
+                case "capwapAcIpAddresses":
+                case "tftpServerAddresses":
+                    return JsonSerializer.SerializeToNode(value.EnumerateArray().Select(item => IPAddress.Parse(item.GetString()).ToString()));
+                case "boot/serverHostName":
+                case "boot/fileName":
+                    string text = value.GetString();
+                    if (text.Length > (name == "boot/fileName" ? 127 : 63) || Encoding.UTF8.GetByteCount(text) > byte.MaxValue)
+                        throw new InvalidDataException($"{path}: The value exceeds the DHCP field size.");
+                    break;
+                case "genericOptions":
+                    var generic = new JsonArray();
+                    foreach (JsonElement option in value.EnumerateArray())
+                    {
+                        byte code = decimal.ToByte(option.GetProperty("code").GetDecimal());
+                        string payload = option.GetProperty("value").GetString();
+                        if (payload.Length > short.MaxValue * 2)
+                            throw new InvalidDataException($"{path}/{generic.Count}/value: The encoded DHCP option exceeds 32767 bytes.");
+                        generic.Add(new JsonObject { ["code"] = code, ["value"] = payload.ToUpperInvariant() });
+                    }
+                    return generic;
+                case "staticRoutes":
+                    var routes = new JsonArray();
+                    foreach (JsonElement route in value.EnumerateArray())
+                    {
+                        IPAddress mask = ReadAddress(route, "subnetMask");
+                        ValidateNetwork($"{path}/{routes.Count}", null, null, mask);
+                        routes.Add(new JsonObject
+                        {
+                            ["destination"] = ReadAddress(route, "destination").ToString(),
+                            ["subnetMask"] = mask.ToString(),
+                            ["router"] = ReadAddress(route, "router").ToString()
+                        });
+                    }
+                    return routes;
+            }
+            return JsonNode.Parse(value.GetRawText());
+        }
+
+        private static JsonObject ReadVendorInformation(JsonElement value, string path)
+        {
+            if (value.ValueKind == JsonValueKind.Null)
+                return null;
+
+            var result = new JsonObject();
+            foreach (JsonProperty entry in value.EnumerateObject())
+            {
+                string entryPath = ConfigurationPlan.AppendPath(path, entry.Name);
+                if (Encoding.UTF8.GetByteCount(entry.Name) > byte.MaxValue)
+                    throw new InvalidDataException($"{entryPath}: The vendor identifier exceeds 255 UTF-8 bytes.");
+
+                if (entry.Value.ValueKind == JsonValueKind.Null)
+                {
+                    result.Add(entry.Name, null);
+                    continue;
+                }
+                try
+                {
+                    var option = new VendorSpecificInformationOption(entry.Value.GetString());
+                    result.Add(entry.Name, BitConverter.ToString(option.Information).Replace('-', ':'));
+                }
+                catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
+                {
+                    throw new InvalidDataException($"{entryPath}: Invalid hexadecimal vendor information.");
+                }
+            }
+            if (result.Count(entry => entry.Value is not null) > byte.MaxValue)
+                throw new InvalidDataException($"{path}: At most 255 vendor identifiers are supported.");
+            return result;
+        }
+
+        private static void CompareOptions(JsonElement scope, JsonElement current, string path, List<ConfigurationChange> changes)
+        {
+            JsonObject desired = ReadDeclaredOptions(scope, path);
+            if (desired.Count == 0)
+                return;
+
+            JsonNode previous = JsonNode.Parse(current.GetProperty("options").GetRawText());
+            foreach (var (name, candidate) in desired)
+            {
+                string optionPath = ConfigurationPlan.AppendPath(path, name);
+                if (name == "vendorInfo")
+                {
+                    JsonObject existing = previous[name].AsObject();
+                    if (candidate is null)
+                    {
+                        foreach (var (identifier, _) in existing)
+                            changes.Add(new ConfigurationChange(ConfigurationPlan.AppendPath(optionPath, identifier), ConfigurationChangeKind.Remove, false));
+                        continue;
+                    }
+                    JsonObject entries = candidate.AsObject();
+                    int retained = existing.Count(entry => !entries.ContainsKey(entry.Key));
+                    if (retained + entries.Count(entry => entry.Value is not null) > byte.MaxValue)
+                        throw new InvalidDataException($"{optionPath}: At most 255 vendor identifiers are supported.");
+                    foreach (var (identifier, value) in entries)
+                    {
+                        bool exists = existing.TryGetPropertyValue(identifier, out JsonNode oldValue);
+                        if (!JsonNode.DeepEquals(oldValue, value))
+                            changes.Add(new ConfigurationChange(ConfigurationPlan.AppendPath(optionPath, identifier),
+                                !exists ? ConfigurationChangeKind.Add : value is null ? ConfigurationChangeKind.Remove : ConfigurationChangeKind.Update, false));
+                    }
+                    continue;
+                }
+                if (candidate is JsonObject group)
+                {
+                    foreach (var (field, value) in group)
+                    {
+                        if (name == "dns" && field == "servers" &&
+                            (group["useThisServer"]?.GetValue<bool>() ?? previous[name]["useThisServer"].GetValue<bool>()))
+                            continue;
+                        AddUpdate(ConfigurationPlan.AppendPath(optionPath, field), previous[name][field], value);
+                    }
+                }
+                else
+                {
+                    AddUpdate(optionPath, previous[name], candidate);
+                }
+            }
+
+            void AddUpdate(string optionPath, JsonNode oldValue, JsonNode value)
+            {
+                if (!JsonNode.DeepEquals(oldValue, value))
+                    changes.Add(new ConfigurationChange(optionPath, ConfigurationChangeKind.Update, false));
+            }
         }
 
         private static JsonArray WriteExclusions(IReadOnlyCollection<Exclusion> exclusions)

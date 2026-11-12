@@ -2494,6 +2494,44 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task DhcpOptionPreviewRoundTripsInspectionExportAndReportsLeafChanges()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            LoopbackWebService.AssertOk(await server.CallAsync(
+                "dhcp/scopes/set?name=Options&startingAddress=192.0.2.10&endingAddress=192.0.2.60&subnetMask=255.255.255.0" +
+                "&leaseTimeDays=3&genericOptions=224%7CAA%3ABB&vendorInfo=fixture%7CAA%3ABB", server.AdminToken));
+
+            JsonElement inspection = await server.CallAsync("settings/config/export?includePreviewOnly=true", server.AdminToken);
+            LoopbackWebService.AssertOk(inspection);
+            string dhcp = inspection.GetProperty("response").GetProperty("manifest").GetProperty("dhcp").GetRawText();
+            string exported = $$"""{"schemaVersion":1,"dhcp":{{dhcp}} }""";
+            Assert.Empty((await PreviewAsync(server, exported)).GetProperty("changes").EnumerateArray());
+
+            const string manifest = """
+                {"schemaVersion":1,"dhcp":{"scopes":{"Options":{
+                    "leaseTime":{"days":null,"hours":2},
+                    "domainSearchList":["EXAMPLE.test."],
+                    "dns":{"useThisServer":true,"servers":["192.0.2.53"]},
+                    "vendorInfo":{"fixture":"aabb","new":"cc"},
+                    "genericOptions":[{"code":224,"value":"aabb"}]
+                }}}}
+                """;
+            JsonElement changes = (await PreviewAsync(server, manifest)).GetProperty("changes");
+            Assert.Collection(changes.EnumerateArray(),
+                change => Assert.Equal("/dhcp/scopes/Options/dns/useThisServer", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dhcp/scopes/Options/domainSearchList", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dhcp/scopes/Options/leaseTime/days", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dhcp/scopes/Options/leaseTime/hours", change.GetProperty("path").GetString()),
+                change => Assert.Equal("/dhcp/scopes/Options/vendorInfo/new", change.GetProperty("path").GetString()));
+            Assert.DoesNotContain("192.0.2.53", changes.GetRawText());
+
+            const string invalid = """{"schemaVersion":1,"dhcp":{"scopes":{"Options":{"vendorInfo":{"fixture":"broken"}}}}}""";
+            InvalidDataException rejected = Assert.Throws<InvalidDataException>(() => Load(invalid));
+            Assert.Contains("/dhcp/scopes/Options/vendorInfo/fixture", rejected.Message);
+            Assert.DoesNotContain("broken", rejected.Message);
+        }
+
+        [Fact]
         public async Task DhcpReservationPreviewComparesNormalizedEntriesAndEffectiveRange()
         {
             await using var server = await LoopbackWebService.StartAsync();
