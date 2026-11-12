@@ -53,6 +53,7 @@ jobs:
           dotnet test DnsServerCore.Tests/DnsServerCore.Tests.csproj \
             --settings DnsServerCore.Tests/coverage.runsettings \
             --collect "XPlat Code Coverage" --logger trx \
+            --blame-hang --blame-hang-timeout 90s --blame-hang-dump-type none \
             --results-directory "${{ runner.temp }}/technitium-test-results"
       - name: Validate the minimal manifest through the console host
         working-directory: DnsServer

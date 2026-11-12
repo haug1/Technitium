@@ -810,10 +810,10 @@ namespace DnsServerCore.Dns
         const int QPM_LIMIT_SAMPLING_TIMER_INTERVAL = 10000;
         IReadOnlyDictionary<NetworkAddress, ValueTuple<long, long>> _qpmLimitClientSubnetStats;
 
-        readonly IndependentTaskScheduler _queryTaskScheduler = new IndependentTaskScheduler(threadName: "QueryThreadPool");
+        readonly DnsTaskScheduler _queryTaskScheduler = new DnsTaskScheduler("QueryThreadPool");
 
         TaskPool _resolverTaskPool;
-        readonly IndependentTaskScheduler _resolverTaskScheduler = new IndependentTaskScheduler(priority: ThreadPriority.AboveNormal, threadName: "ResolverThreadPool");
+        readonly DnsTaskScheduler _resolverTaskScheduler = new DnsTaskScheduler("ResolverThreadPool", ThreadPriority.AboveNormal);
         readonly ConcurrentDictionary<string, Task<RecursiveResolveResponse>> _resolverTasks = new ConcurrentDictionary<string, Task<RecursiveResolveResponse>>(-1, 1000);
 
         volatile ServiceState _state = ServiceState.Stopped;
