@@ -686,6 +686,8 @@ namespace DnsServerCore
                 string revision = ConfigurationPlan.GetRevision(manifest, current.RootElement, _configurationRevisionKey);
                 if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes("\"" + revision + "\"")))
                     throw new DnsWebServiceException("The configuration preview is stale. Create a new preview before applying.");
+                ConfigurationPlan.ValidateDnsBindings(ConfigurationPlan.GetDnsBindings(manifest),
+                    _dnsWebService._dnsServer.CaptureDnsBindings(), _dnsWebService._dnsServer.HasDnsListenerCertificate);
                 return proxy;
             }
 
@@ -776,6 +778,7 @@ namespace DnsServerCore
                 {
                     writer.WriteStartObject();
                     WriteDnsSettings(writer, includeSecrets: false);
+                    writer.WriteBoolean("dnsListenerCertificateLoaded", _dnsWebService._dnsServer.HasDnsListenerCertificate);
                     if (ConfigurationProxy.TryGetDeclaration(manifest, out JsonElement proxy))
                     {
                         string password = null;
@@ -1098,6 +1101,28 @@ namespace DnsServerCore
                     request.TryGetQueryOrForm("enableDnsOverHttpHelpRedirect", bool.Parse, out bool helpRedirect) ? helpRedirect : null,
                     request.TryGetQueryOrForm("dnsOverHttpRealIpHeader", out string dnsRealIpHeader) ? DnsServer.NormalizeDnsRealIpHeader(dnsRealIpHeader) : null,
                     dnsProxyAcl));
+
+                var dnsBindings = new DnsServer.DnsBindings(
+                    request.TryGetQueryOrForm("enableDnsOverUdpProxy", bool.Parse, out bool udpProxyEnabled) ? udpProxyEnabled : null,
+                    request.TryGetQueryOrForm("dnsOverUdpProxyPort", int.Parse, out int udpProxyPort) ? udpProxyPort : null,
+                    request.TryGetQueryOrForm("enableDnsOverTcpProxy", bool.Parse, out bool tcpProxyEnabled) ? tcpProxyEnabled : null,
+                    request.TryGetQueryOrForm("dnsOverTcpProxyPort", int.Parse, out int tcpProxyPort) ? tcpProxyPort : null,
+                    request.TryGetQueryOrForm("enableDnsOverHttp", bool.Parse, out bool httpEnabled) ? httpEnabled : null,
+                    request.TryGetQueryOrForm("dnsOverHttpPort", int.Parse, out int httpPort) ? httpPort : null,
+                    request.TryGetQueryOrForm("enableDnsOverTls", bool.Parse, out bool tlsEnabled) ? tlsEnabled : null,
+                    request.TryGetQueryOrForm("dnsOverTlsPort", int.Parse, out int tlsPort) ? tlsPort : null,
+                    request.TryGetQueryOrForm("enableDnsOverHttps", bool.Parse, out bool httpsEnabled) ? httpsEnabled : null,
+                    request.TryGetQueryOrForm("dnsOverHttpsPort", int.Parse, out int httpsPort) ? httpsPort : null,
+                    request.TryGetQueryOrForm("enableDnsOverQuic", bool.Parse, out bool quicEnabled) ? quicEnabled : null,
+                    request.TryGetQueryOrForm("dnsOverQuicPort", int.Parse, out int quicPort) ? quicPort : null,
+                    request.TryGetQueryOrForm("enableDnsOverHttp3", bool.Parse, out bool http3Enabled) ? http3Enabled : null,
+                    request.TryGetQueryOrForm("enableDnsOverHttpUnixSocket", bool.Parse, out bool httpSocketEnabled) ? httpSocketEnabled : null,
+                    request.TryQueryOrForm("dnsOverHttpUnixSocket", out string httpSocketPath) ? string.IsNullOrWhiteSpace(httpSocketPath) ? "" : httpSocketPath : null,
+                    request.TryGetQueryOrForm("enableDnsOverHttpsUnixSocket", bool.Parse, out bool httpsSocketEnabled) ? httpsSocketEnabled : null,
+                    request.TryQueryOrForm("dnsOverHttpsUnixSocket", out string httpsSocketPath) ? string.IsNullOrWhiteSpace(httpsSocketPath) ? "" : httpsSocketPath : null);
+                _dnsWebService._dnsServer.CheckManagedDnsBindings(dnsBindings);
+                string dnsTlsCertificatePath = request.QueryOrForm("dnsTlsCertificatePath");
+                _dnsWebService._dnsServer.CheckManagedDnsBindingDependencies(dnsBindings, removingCertificate: dnsTlsCertificatePath == "");
 
                 bool hasProxyType = request.TryGetQueryOrFormEnum("proxyType", out NetProxyType proxyType);
                 NetProxy requestedProxy = null;
@@ -1447,167 +1472,125 @@ namespace DnsServerCore
 
                         _dnsWebService._dnsServer.SetDnsListenerPolicy(dnsListenerPolicy);
 
-                        if (request.TryGetQueryOrForm("enableDnsOverUdpProxy", bool.Parse, out bool enableDnsOverUdpProxy))
+                        if (dnsBindings.UdpProxyEnabled is bool requestedUdpProxyEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverUdpProxy != requestedUdpProxyEnabled)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverUdpProxy != enableDnsOverUdpProxy)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverUdpProxy = enableDnsOverUdpProxy;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverUdpProxy = requestedUdpProxyEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverTcpProxy", bool.Parse, out bool enableDnsOverTcpProxy))
+                        if (dnsBindings.UdpProxyPort is int requestedUdpProxyPort &&
+                            _dnsWebService._dnsServer.DnsOverUdpProxyPort != requestedUdpProxyPort)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverTcpProxy != enableDnsOverTcpProxy)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverTcpProxy = enableDnsOverTcpProxy;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverUdpProxyPort = requestedUdpProxyPort;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverHttp", bool.Parse, out bool enableDnsOverHttp))
+                        if (dnsBindings.TcpProxyEnabled is bool requestedTcpProxyEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverTcpProxy != requestedTcpProxyEnabled)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverHttp != enableDnsOverHttp)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverHttp = enableDnsOverHttp;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverTcpProxy = requestedTcpProxyEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverHttpUnixSocket", bool.Parse, out bool enableDnsOverHttpUnixSocket))
+                        if (dnsBindings.TcpProxyPort is int requestedTcpProxyPort &&
+                            _dnsWebService._dnsServer.DnsOverTcpProxyPort != requestedTcpProxyPort)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverHttpUnixSocket != enableDnsOverHttpUnixSocket)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverHttpUnixSocket = enableDnsOverHttpUnixSocket;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverTcpProxyPort = requestedTcpProxyPort;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverHttpsUnixSocket", bool.Parse, out bool enableDnsOverHttpsUnixSocket))
+                        if (dnsBindings.HttpEnabled is bool requestedHttpEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverHttp != requestedHttpEnabled)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverHttpsUnixSocket != enableDnsOverHttpsUnixSocket)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverHttpsUnixSocket = enableDnsOverHttpsUnixSocket;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverHttp = requestedHttpEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverTls", bool.Parse, out bool enableDnsOverTls))
+                        if (dnsBindings.HttpPort is int requestedHttpPort &&
+                            _dnsWebService._dnsServer.DnsOverHttpPort != requestedHttpPort)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverTls != enableDnsOverTls)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverTls = enableDnsOverTls;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverHttpPort = requestedHttpPort;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverHttps", bool.Parse, out bool enableDnsOverHttps))
+                        if (dnsBindings.TlsEnabled is bool requestedTlsEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverTls != requestedTlsEnabled)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverHttps != enableDnsOverHttps)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverHttps = enableDnsOverHttps;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverTls = requestedTlsEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverHttp3", bool.Parse, out bool enableDnsOverHttp3))
+                        if (dnsBindings.TlsPort is int requestedTlsPort &&
+                            _dnsWebService._dnsServer.DnsOverTlsPort != requestedTlsPort)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverHttp3 != enableDnsOverHttp3)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverHttp3 = enableDnsOverHttp3;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverTlsPort = requestedTlsPort;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("enableDnsOverQuic", bool.Parse, out bool enableDnsOverQuic))
+                        if (dnsBindings.HttpsEnabled is bool requestedHttpsEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverHttps != requestedHttpsEnabled)
                         {
-                            if (_dnsWebService._dnsServer.EnableDnsOverQuic != enableDnsOverQuic)
-                            {
-                                _dnsWebService._dnsServer.EnableDnsOverQuic = enableDnsOverQuic;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverHttps = requestedHttpsEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("dnsOverUdpProxyPort", int.Parse, out int dnsOverUdpProxyPort))
+                        if (dnsBindings.HttpsPort is int requestedHttpsPort &&
+                            _dnsWebService._dnsServer.DnsOverHttpsPort != requestedHttpsPort)
                         {
-                            if (_dnsWebService._dnsServer.DnsOverUdpProxyPort != dnsOverUdpProxyPort)
-                            {
-                                _dnsWebService._dnsServer.DnsOverUdpProxyPort = dnsOverUdpProxyPort;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverHttpsPort = requestedHttpsPort;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("dnsOverTcpProxyPort", int.Parse, out int dnsOverTcpProxyPort))
+                        if (dnsBindings.QuicEnabled is bool requestedQuicEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverQuic != requestedQuicEnabled)
                         {
-                            if (_dnsWebService._dnsServer.DnsOverTcpProxyPort != dnsOverTcpProxyPort)
-                            {
-                                _dnsWebService._dnsServer.DnsOverTcpProxyPort = dnsOverTcpProxyPort;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverQuic = requestedQuicEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("dnsOverHttpPort", int.Parse, out int dnsOverHttpPort))
+                        if (dnsBindings.QuicPort is int requestedQuicPort &&
+                            _dnsWebService._dnsServer.DnsOverQuicPort != requestedQuicPort)
                         {
-                            if (_dnsWebService._dnsServer.DnsOverHttpPort != dnsOverHttpPort)
-                            {
-                                _dnsWebService._dnsServer.DnsOverHttpPort = dnsOverHttpPort;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverQuicPort = requestedQuicPort;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryQueryOrForm("dnsOverHttpUnixSocket", out string dnsOverHttpUnixSocket))
+                        if (dnsBindings.Http3Enabled is bool requestedHttp3Enabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverHttp3 != requestedHttp3Enabled)
                         {
-                            if (string.IsNullOrWhiteSpace(dnsOverHttpUnixSocket))
-                                dnsOverHttpUnixSocket = null;
-
-                            if (_dnsWebService._dnsServer.DnsOverHttpUnixSocket != dnsOverHttpUnixSocket)
-                            {
-                                _dnsWebService._dnsServer.DnsOverHttpUnixSocket = dnsOverHttpUnixSocket;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverHttp3 = requestedHttp3Enabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryQueryOrForm("dnsOverHttpsUnixSocket", out string dnsOverHttpsUnixSocket))
+                        if (dnsBindings.HttpSocketEnabled is bool requestedHttpSocketEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverHttpUnixSocket != requestedHttpSocketEnabled)
                         {
-                            if (string.IsNullOrWhiteSpace(dnsOverHttpsUnixSocket))
-                                dnsOverHttpsUnixSocket = null;
-
-                            if (_dnsWebService._dnsServer.DnsOverHttpsUnixSocket != dnsOverHttpsUnixSocket)
-                            {
-                                _dnsWebService._dnsServer.DnsOverHttpsUnixSocket = dnsOverHttpsUnixSocket;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverHttpUnixSocket = requestedHttpSocketEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("dnsOverTlsPort", int.Parse, out int dnsOverTlsPort))
+                        if (dnsBindings.HttpSocketPath is string requestedHttpSocketPath &&
+                            _dnsWebService._dnsServer.DnsOverHttpUnixSocket != (requestedHttpSocketPath.Length == 0 ? null : requestedHttpSocketPath))
                         {
-                            if (_dnsWebService._dnsServer.DnsOverTlsPort != dnsOverTlsPort)
-                            {
-                                _dnsWebService._dnsServer.DnsOverTlsPort = dnsOverTlsPort;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverHttpUnixSocket = requestedHttpSocketPath;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("dnsOverHttpsPort", int.Parse, out int dnsOverHttpsPort))
+                        if (dnsBindings.HttpsSocketEnabled is bool requestedHttpsSocketEnabled &&
+                            _dnsWebService._dnsServer.EnableDnsOverHttpsUnixSocket != requestedHttpsSocketEnabled)
                         {
-                            if (_dnsWebService._dnsServer.DnsOverHttpsPort != dnsOverHttpsPort)
-                            {
-                                _dnsWebService._dnsServer.DnsOverHttpsPort = dnsOverHttpsPort;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.EnableDnsOverHttpsUnixSocket = requestedHttpsSocketEnabled;
+                            restartDnsService = true;
                         }
 
-                        if (request.TryGetQueryOrForm("dnsOverQuicPort", int.Parse, out int dnsOverQuicPort))
+                        if (dnsBindings.HttpsSocketPath is string requestedHttpsSocketPath &&
+                            _dnsWebService._dnsServer.DnsOverHttpsUnixSocket != (requestedHttpsSocketPath.Length == 0 ? null : requestedHttpsSocketPath))
                         {
-                            if (_dnsWebService._dnsServer.DnsOverQuicPort != dnsOverQuicPort)
-                            {
-                                _dnsWebService._dnsServer.DnsOverQuicPort = dnsOverQuicPort;
-                                restartDnsService = true;
-                            }
+                            _dnsWebService._dnsServer.DnsOverHttpsUnixSocket = requestedHttpsSocketPath;
+                            restartDnsService = true;
                         }
 
-
-                        string dnsTlsCertificatePath = request.QueryOrForm("dnsTlsCertificatePath");
                         if (dnsTlsCertificatePath is not null)
                         {
                             if (dnsTlsCertificatePath.Length == 0)

@@ -217,7 +217,194 @@ namespace DnsServerCore.Dns
             ListenerClientSubnetSource = 1UL << 20,
             ListenerHelpRedirect = 1UL << 21,
             ListenerRealIpHeader = 1UL << 22,
-            ListenerReverseProxyAcl = 1UL << 23
+            ListenerReverseProxyAcl = 1UL << 23,
+            BindingUdpProxyEnabled = 1UL << 24,
+            BindingUdpProxyPort = 1UL << 25,
+            BindingTcpProxyEnabled = 1UL << 26,
+            BindingTcpProxyPort = 1UL << 27,
+            BindingHttpEnabled = 1UL << 28,
+            BindingHttpPort = 1UL << 29,
+            BindingTlsEnabled = 1UL << 30,
+            BindingTlsPort = 1UL << 31,
+            BindingHttpsEnabled = 1UL << 32,
+            BindingHttpsPort = 1UL << 33,
+            BindingQuicEnabled = 1UL << 34,
+            BindingQuicPort = 1UL << 35,
+            BindingHttp3Enabled = 1UL << 36,
+            BindingHttpSocketEnabled = 1UL << 37,
+            BindingHttpSocketPath = 1UL << 38,
+            BindingHttpsSocketEnabled = 1UL << 39,
+            BindingHttpsSocketPath = 1UL << 40
+        }
+
+        internal readonly record struct DnsBindings(
+            bool? UdpProxyEnabled,
+            int? UdpProxyPort,
+            bool? TcpProxyEnabled,
+            int? TcpProxyPort,
+            bool? HttpEnabled,
+            int? HttpPort,
+            bool? TlsEnabled,
+            int? TlsPort,
+            bool? HttpsEnabled,
+            int? HttpsPort,
+            bool? QuicEnabled,
+            int? QuicPort,
+            bool? Http3Enabled,
+            bool? HttpSocketEnabled,
+            string HttpSocketPath,
+            bool? HttpsSocketEnabled,
+            string HttpsSocketPath);
+
+        private const ManagedDnsSettingsExtension DnsBindingOwnership =
+            ManagedDnsSettingsExtension.BindingUdpProxyEnabled |
+            ManagedDnsSettingsExtension.BindingUdpProxyPort |
+            ManagedDnsSettingsExtension.BindingTcpProxyEnabled |
+            ManagedDnsSettingsExtension.BindingTcpProxyPort |
+            ManagedDnsSettingsExtension.BindingHttpEnabled |
+            ManagedDnsSettingsExtension.BindingHttpPort |
+            ManagedDnsSettingsExtension.BindingTlsEnabled |
+            ManagedDnsSettingsExtension.BindingTlsPort |
+            ManagedDnsSettingsExtension.BindingHttpsEnabled |
+            ManagedDnsSettingsExtension.BindingHttpsPort |
+            ManagedDnsSettingsExtension.BindingQuicEnabled |
+            ManagedDnsSettingsExtension.BindingQuicPort |
+            ManagedDnsSettingsExtension.BindingHttp3Enabled |
+            ManagedDnsSettingsExtension.BindingHttpSocketEnabled |
+            ManagedDnsSettingsExtension.BindingHttpSocketPath |
+            ManagedDnsSettingsExtension.BindingHttpsSocketEnabled |
+            ManagedDnsSettingsExtension.BindingHttpsSocketPath;
+
+        internal bool HasManagedDnsBindings => (_managedDnsSettingsExtension & DnsBindingOwnership) != 0;
+        internal bool HasDnsListenerCertificate => _dotSslServerAuthenticationOptions is not null;
+
+        internal DnsBindings CaptureDnsBindings()
+        {
+            return new DnsBindings(
+                _enableDnsOverUdpProxy,
+                _dnsOverUdpProxyPort,
+                _enableDnsOverTcpProxy,
+                _dnsOverTcpProxyPort,
+                _enableDnsOverHttp,
+                _dnsOverHttpPort,
+                _enableDnsOverTls,
+                _dnsOverTlsPort,
+                _enableDnsOverHttps,
+                _dnsOverHttpsPort,
+                _enableDnsOverQuic,
+                _dnsOverQuicPort,
+                _enableDnsOverHttp3,
+                _enableDnsOverHttpUnixSocket,
+                _dnsOverHttpUnixSocket ?? "",
+                _enableDnsOverHttpsUnixSocket,
+                _dnsOverHttpsUnixSocket ?? "");
+        }
+
+        internal static bool DnsBindingsDiffer(DnsBindings candidate, DnsBindings current)
+        {
+            return
+                (candidate.UdpProxyEnabled is not null && candidate.UdpProxyEnabled != current.UdpProxyEnabled) ||
+                (candidate.UdpProxyPort is not null && candidate.UdpProxyPort != current.UdpProxyPort) ||
+                (candidate.TcpProxyEnabled is not null && candidate.TcpProxyEnabled != current.TcpProxyEnabled) ||
+                (candidate.TcpProxyPort is not null && candidate.TcpProxyPort != current.TcpProxyPort) ||
+                (candidate.HttpEnabled is not null && candidate.HttpEnabled != current.HttpEnabled) ||
+                (candidate.HttpPort is not null && candidate.HttpPort != current.HttpPort) ||
+                (candidate.TlsEnabled is not null && candidate.TlsEnabled != current.TlsEnabled) ||
+                (candidate.TlsPort is not null && candidate.TlsPort != current.TlsPort) ||
+                (candidate.HttpsEnabled is not null && candidate.HttpsEnabled != current.HttpsEnabled) ||
+                (candidate.HttpsPort is not null && candidate.HttpsPort != current.HttpsPort) ||
+                (candidate.QuicEnabled is not null && candidate.QuicEnabled != current.QuicEnabled) ||
+                (candidate.QuicPort is not null && candidate.QuicPort != current.QuicPort) ||
+                (candidate.Http3Enabled is not null && candidate.Http3Enabled != current.Http3Enabled) ||
+                (candidate.HttpSocketEnabled is not null && candidate.HttpSocketEnabled != current.HttpSocketEnabled) ||
+                (candidate.HttpSocketPath is not null && candidate.HttpSocketPath != current.HttpSocketPath) ||
+                (candidate.HttpsSocketEnabled is not null && candidate.HttpsSocketEnabled != current.HttpsSocketEnabled) ||
+                (candidate.HttpsSocketPath is not null && candidate.HttpsSocketPath != current.HttpsSocketPath);
+        }
+
+        private void StageDnsBindings(DnsBindings bindings)
+        {
+            _enableDnsOverUdpProxy = bindings.UdpProxyEnabled ?? _enableDnsOverUdpProxy;
+            _dnsOverUdpProxyPort = bindings.UdpProxyPort ?? _dnsOverUdpProxyPort;
+            _enableDnsOverTcpProxy = bindings.TcpProxyEnabled ?? _enableDnsOverTcpProxy;
+            _dnsOverTcpProxyPort = bindings.TcpProxyPort ?? _dnsOverTcpProxyPort;
+            _enableDnsOverHttp = bindings.HttpEnabled ?? _enableDnsOverHttp;
+            _dnsOverHttpPort = bindings.HttpPort ?? _dnsOverHttpPort;
+            _enableDnsOverTls = bindings.TlsEnabled ?? _enableDnsOverTls;
+            _dnsOverTlsPort = bindings.TlsPort ?? _dnsOverTlsPort;
+            _enableDnsOverHttps = bindings.HttpsEnabled ?? _enableDnsOverHttps;
+            _dnsOverHttpsPort = bindings.HttpsPort ?? _dnsOverHttpsPort;
+            _enableDnsOverQuic = bindings.QuicEnabled ?? _enableDnsOverQuic;
+            _dnsOverQuicPort = bindings.QuicPort ?? _dnsOverQuicPort;
+            _enableDnsOverHttp3 = bindings.Http3Enabled ?? _enableDnsOverHttp3;
+            _enableDnsOverHttpUnixSocket = bindings.HttpSocketEnabled ?? _enableDnsOverHttpUnixSocket;
+            _dnsOverHttpUnixSocket = bindings.HttpSocketPath is null ? _dnsOverHttpUnixSocket : bindings.HttpSocketPath.Length == 0 ? null : bindings.HttpSocketPath;
+            _enableDnsOverHttpsUnixSocket = bindings.HttpsSocketEnabled ?? _enableDnsOverHttpsUnixSocket;
+            _dnsOverHttpsUnixSocket = bindings.HttpsSocketPath is null ? _dnsOverHttpsUnixSocket : bindings.HttpsSocketPath.Length == 0 ? null : bindings.HttpsSocketPath;
+        }
+
+        internal void StageManifestDnsBindings(DnsBindings bindings)
+        {
+            lock (_saveLock)
+            {
+                _previousManifestDnsBindings = CaptureDnsBindings();
+                StageDnsBindings(bindings);
+            }
+        }
+
+        internal void FinishManifestDnsBindings(bool committed)
+        {
+            lock (_saveLock)
+            {
+                if (!committed && _previousManifestDnsBindings.HasValue)
+                    StageDnsBindings(_previousManifestDnsBindings.Value);
+                _previousManifestDnsBindings = null;
+            }
+        }
+
+        internal void CheckManagedDnsBindings(DnsBindings bindings)
+        {
+            DnsBindings current = CaptureDnsBindings();
+            Check(ManagedDnsSettingsExtension.BindingUdpProxyEnabled, bindings.UdpProxyEnabled, current.UdpProxyEnabled, "udpProxy/enabled");
+            Check(ManagedDnsSettingsExtension.BindingUdpProxyPort, bindings.UdpProxyPort, current.UdpProxyPort, "udpProxy/port");
+            Check(ManagedDnsSettingsExtension.BindingTcpProxyEnabled, bindings.TcpProxyEnabled, current.TcpProxyEnabled, "tcpProxy/enabled");
+            Check(ManagedDnsSettingsExtension.BindingTcpProxyPort, bindings.TcpProxyPort, current.TcpProxyPort, "tcpProxy/port");
+            Check(ManagedDnsSettingsExtension.BindingHttpEnabled, bindings.HttpEnabled, current.HttpEnabled, "http/enabled");
+            Check(ManagedDnsSettingsExtension.BindingHttpPort, bindings.HttpPort, current.HttpPort, "http/port");
+            Check(ManagedDnsSettingsExtension.BindingTlsEnabled, bindings.TlsEnabled, current.TlsEnabled, "tls/enabled");
+            Check(ManagedDnsSettingsExtension.BindingTlsPort, bindings.TlsPort, current.TlsPort, "tls/port");
+            Check(ManagedDnsSettingsExtension.BindingHttpsEnabled, bindings.HttpsEnabled, current.HttpsEnabled, "https/enabled");
+            Check(ManagedDnsSettingsExtension.BindingHttpsPort, bindings.HttpsPort, current.HttpsPort, "https/port");
+            Check(ManagedDnsSettingsExtension.BindingQuicEnabled, bindings.QuicEnabled, current.QuicEnabled, "quic/enabled");
+            Check(ManagedDnsSettingsExtension.BindingQuicPort, bindings.QuicPort, current.QuicPort, "quic/port");
+            Check(ManagedDnsSettingsExtension.BindingHttp3Enabled, bindings.Http3Enabled, current.Http3Enabled, "https/http3Enabled");
+            Check(ManagedDnsSettingsExtension.BindingHttpSocketEnabled, bindings.HttpSocketEnabled, current.HttpSocketEnabled, "http/unixSocket/enabled");
+            Check(ManagedDnsSettingsExtension.BindingHttpSocketPath, bindings.HttpSocketPath, current.HttpSocketPath, "http/unixSocket/path");
+            Check(ManagedDnsSettingsExtension.BindingHttpsSocketEnabled, bindings.HttpsSocketEnabled, current.HttpsSocketEnabled, "https/unixSocket/enabled");
+            Check(ManagedDnsSettingsExtension.BindingHttpsSocketPath, bindings.HttpsSocketPath, current.HttpsSocketPath, "https/unixSocket/path");
+
+            void Check<T>(ManagedDnsSettingsExtension flag, T candidate, T currentValue, string field)
+            {
+                if (candidate is not null && _managedDnsSettingsExtension.HasFlag(flag) && !EqualityComparer<T>.Default.Equals(candidate, currentValue))
+                    throw new InvalidDataException($"/dns/listeners/{field}: Setting is managed by the configuration manifest.");
+            }
+        }
+
+        internal void CheckManagedDnsBindingDependencies(DnsBindings candidate, bool removingCertificate)
+        {
+            if (removingCertificate &&
+                ((_enableDnsOverTls && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingTlsEnabled)) ||
+                 (_enableDnsOverHttps && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsEnabled)) ||
+                 (_enableDnsOverHttp3 && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttp3Enabled)) ||
+                 (_enableDnsOverQuic && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingQuicEnabled)) ||
+                 (_enableDnsOverHttpsUnixSocket && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsSocketEnabled))))
+                throw new InvalidDataException("/dns/listeners/certificate: Required by a managed secure DNS listener.");
+            if (candidate.HttpsEnabled == false && _enableDnsOverHttp3 && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttp3Enabled))
+                throw new InvalidDataException("/dns/listeners/https/enabled: Required by managed HTTP/3.");
+            if (candidate.HttpSocketPath == "" && _enableDnsOverHttpUnixSocket && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpSocketEnabled))
+                throw new InvalidDataException("/dns/listeners/http/unixSocket/path: Required by a managed Unix socket.");
+            if (candidate.HttpsSocketPath == "" && _enableDnsOverHttpsUnixSocket && _managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsSocketEnabled))
+                throw new InvalidDataException("/dns/listeners/https/unixSocket/path: Required by a managed Unix socket.");
         }
 
         internal readonly record struct DnsListenerPolicy(bool? ClientSubnetSource, bool? HelpRedirect,
@@ -473,6 +660,7 @@ namespace DnsServerCore.Dns
 
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
+        DnsBindings? _previousManifestDnsBindings;
         readonly Timer _saveTimer;
         const int SAVE_TIMER_INITIAL_INTERVAL = 5000;
 
@@ -809,14 +997,14 @@ namespace DnsServerCore.Dns
             }
         }
 
-        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default)
+        private void SaveConfigFileInternal(string serverDomain = null, StatisticsSettings statistics = default, bool? appAutoUpdate = null, OutboundSocketSettings outbound = default, ClientSubnetSettings subnet = default, DnsLoggingSettings dnsLogging = default, RecursionPolicy recursion = default, CachePolicy cache = default, BlockingPolicy blocking = default, ForwardingPolicy forwarding = default, RateLimitPolicy rateLimits = default, DnsTuning tuning = default, DnsListenerPolicy listenerPolicy = default, ConfigurationProxy.Candidate proxy = default, DnsBindings? persistedBindings = null)
         {
             string tmpConfigFile = Path.Combine(_configFolder, "dns.tmp");
             string configFile = Path.Combine(_configFolder, "dns.config");
 
             using (FileStream fS = new FileStream(tmpConfigFile, FileMode.Create, FileAccess.Write))
             {
-                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy);
+                WriteConfigTo(fS, serverDomain, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, persistedBindings ?? _previousManifestDnsBindings ?? CaptureDnsBindings());
                 fS.Flush(flushToDisk: true);
             }
 
@@ -1045,6 +1233,40 @@ namespace DnsServerCore.Dns
                 yield return "/dns/listeners/http/realIpHeader";
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.ListenerReverseProxyAcl))
                 yield return "/dns/listeners/reverseProxyAcl";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingUdpProxyEnabled))
+                yield return "/dns/listeners/udpProxy/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingUdpProxyPort))
+                yield return "/dns/listeners/udpProxy/port";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingTcpProxyEnabled))
+                yield return "/dns/listeners/tcpProxy/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingTcpProxyPort))
+                yield return "/dns/listeners/tcpProxy/port";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpEnabled))
+                yield return "/dns/listeners/http/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpPort))
+                yield return "/dns/listeners/http/port";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingTlsEnabled))
+                yield return "/dns/listeners/tls/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingTlsPort))
+                yield return "/dns/listeners/tls/port";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsEnabled))
+                yield return "/dns/listeners/https/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsPort))
+                yield return "/dns/listeners/https/port";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingQuicEnabled))
+                yield return "/dns/listeners/quic/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingQuicPort))
+                yield return "/dns/listeners/quic/port";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttp3Enabled))
+                yield return "/dns/listeners/https/http3Enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpSocketEnabled))
+                yield return "/dns/listeners/http/unixSocket/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpSocketPath))
+                yield return "/dns/listeners/http/unixSocket/path";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsSocketEnabled))
+                yield return "/dns/listeners/https/unixSocket/enabled";
+            if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.BindingHttpsSocketPath))
+                yield return "/dns/listeners/https/unixSocket/path";
             foreach (string path in ConfigurationProxy.Paths(ManagedProxyFields))
                 yield return path;
             if (_managedDnsSettingsExtension.HasFlag(ManagedDnsSettingsExtension.RateLimitIpv4))
@@ -2104,110 +2326,58 @@ namespace DnsServerCore.Dns
             //optional protocols
             bool enableEDnsClientSubnetSourceAddress = version >= 3 && bR.ReadBoolean();
 
-            bool enableDnsOverUdpProxy = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverUdpProxy = enableDnsOverUdpProxy;
-
-            bool enableDnsOverTcpProxy = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverTcpProxy = enableDnsOverTcpProxy;
-
-            bool enableDnsOverHttp = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverHttp = enableDnsOverHttp;
-
-            if (version >= 4)
-            {
-                bool enableDnsOverHttpUnixSocket = bR.ReadBoolean();
-                if (apply && !isConfigTransfer)
-                    _enableDnsOverHttpUnixSocket = enableDnsOverHttpUnixSocket;
-            }
-            else if (apply)
-            {
-                _enableDnsOverHttpUnixSocket = false;
-            }
-
-            if (version >= 5)
-            {
-                bool enableDnsOverHttpsUnixSocket = bR.ReadBoolean();
-                if (apply && !isConfigTransfer)
-                    _enableDnsOverHttpsUnixSocket = enableDnsOverHttpsUnixSocket;
-            }
-            else if (apply)
-            {
-                _enableDnsOverHttpsUnixSocket = false;
-            }
-
-            bool enableDnsOverTls = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverTls = enableDnsOverTls;
-
-            bool enableDnsOverHttps = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverHttps = enableDnsOverHttps;
-
-            bool enableDnsOverHttp3 = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverHttp3 = enableDnsOverHttp3;
-
-            bool enableDnsOverQuic = bR.ReadBoolean();
-            if (apply && !isConfigTransfer)
-                _enableDnsOverQuic = enableDnsOverQuic;
-
+            bool udpProxyEnabled = bR.ReadBoolean();
+            bool tcpProxyEnabled = bR.ReadBoolean();
+            bool httpEnabled = bR.ReadBoolean();
+            bool httpSocketEnabled = version >= 4 && bR.ReadBoolean();
+            bool httpsSocketEnabled = version >= 5 && bR.ReadBoolean();
+            bool tlsEnabled = bR.ReadBoolean();
+            bool httpsEnabled = bR.ReadBoolean();
+            bool http3Enabled = bR.ReadBoolean();
+            bool quicEnabled = bR.ReadBoolean();
             bool enableDnsOverHttpHelpRedirect = version < 4 || bR.ReadBoolean();
-
-            int dnsOverUdpProxyPort = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _dnsOverUdpProxyPort = dnsOverUdpProxyPort;
-
-            int dnsOverTcpProxyPort = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _dnsOverTcpProxyPort = dnsOverTcpProxyPort;
-
-            int dnsOverHttpPort = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _dnsOverHttpPort = dnsOverHttpPort;
-
-            if (version >= 4)
-            {
-                string unixSocket = s.ReadShortString();
-                if (apply && !isConfigTransfer)
-                    _dnsOverHttpUnixSocket = unixSocket.Length == 0 ? null : unixSocket;
-            }
-            else
-            {
-                if (apply && !isConfigTransfer)
-                    _dnsOverHttpUnixSocket = null;
-            }
-
-            if (version >= 5)
-            {
-                string unixSocket = s.ReadShortString();
-                if (apply && !isConfigTransfer)
-                    _dnsOverHttpsUnixSocket = unixSocket.Length == 0 ? null : unixSocket;
-            }
-            else
-            {
-                if (apply && !isConfigTransfer)
-                    _dnsOverHttpsUnixSocket = null;
-            }
-
-            int dnsOverTlsPort = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _dnsOverTlsPort = dnsOverTlsPort;
-
-            int dnsOverHttpsPort = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _dnsOverHttpsPort = dnsOverHttpsPort;
-
-            int dnsOverQuicPort = bR.ReadInt32();
-            if (apply && !isConfigTransfer)
-                _dnsOverQuicPort = dnsOverQuicPort;
+            int udpProxyPort = bR.ReadInt32();
+            int tcpProxyPort = bR.ReadInt32();
+            int httpPort = bR.ReadInt32();
+            string httpSocketPath = version >= 4 ? s.ReadShortString() : "";
+            string httpsSocketPath = version >= 5 ? s.ReadShortString() : "";
+            int tlsPort = bR.ReadInt32();
+            int httpsPort = bR.ReadInt32();
+            int quicPort = bR.ReadInt32();
 
             NetworkAccessControl[] dnsReverseProxyNetworkACL = AuthZoneInfo.ReadNetworkACLFrom(bR);
 
             string dnsTlsCertificatePath = s.ReadShortString();
             string dnsTlsCertificatePassword = s.ReadShortString();
+
+            if (!isConfigTransfer)
+            {
+                var bindings = new DnsBindings(
+                    udpProxyEnabled,
+                    udpProxyPort,
+                    tcpProxyEnabled,
+                    tcpProxyPort,
+                    httpEnabled,
+                    httpPort,
+                    tlsEnabled,
+                    tlsPort,
+                    httpsEnabled,
+                    httpsPort,
+                    quicEnabled,
+                    quicPort,
+                    http3Enabled,
+                    httpSocketEnabled,
+                    httpSocketPath,
+                    httpsSocketEnabled,
+                    httpsSocketPath);
+                if (!readOwnership)
+                {
+                    CheckManagedDnsBindings(bindings);
+                    CheckManagedDnsBindingDependencies(bindings, removingCertificate: dnsTlsCertificatePath.Length == 0);
+                }
+                if (apply)
+                    StageDnsBindings(bindings);
+            }
 
             if (apply && !isConfigTransfer)
             {
@@ -2521,7 +2691,7 @@ namespace DnsServerCore.Dns
             return ownership;
         }
 
-        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy)
+        private void WriteConfigTo(Stream s, string serverDomain, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, DnsBindings persistedBindings)
         {
             BinaryWriter bW = new BinaryWriter(s);
 
@@ -2607,26 +2777,26 @@ namespace DnsServerCore.Dns
 
             //optional protocols
             bW.Write(listenerPolicy.ClientSubnetSource ?? _enableEDnsClientSubnetSourceAddress);
-            bW.Write(_enableDnsOverUdpProxy);
-            bW.Write(_enableDnsOverTcpProxy);
-            bW.Write(_enableDnsOverHttp);
-            bW.Write(_enableDnsOverHttpUnixSocket);
-            bW.Write(_enableDnsOverHttpsUnixSocket);
-            bW.Write(_enableDnsOverTls);
-            bW.Write(_enableDnsOverHttps);
-            bW.Write(_enableDnsOverHttp3);
-            bW.Write(_enableDnsOverQuic);
+            bW.Write(persistedBindings.UdpProxyEnabled.Value);
+            bW.Write(persistedBindings.TcpProxyEnabled.Value);
+            bW.Write(persistedBindings.HttpEnabled.Value);
+            bW.Write(persistedBindings.HttpSocketEnabled.Value);
+            bW.Write(persistedBindings.HttpsSocketEnabled.Value);
+            bW.Write(persistedBindings.TlsEnabled.Value);
+            bW.Write(persistedBindings.HttpsEnabled.Value);
+            bW.Write(persistedBindings.Http3Enabled.Value);
+            bW.Write(persistedBindings.QuicEnabled.Value);
 
             bW.Write(listenerPolicy.HelpRedirect ?? _enableDnsOverHttpHelpRedirect);
 
-            bW.Write(_dnsOverUdpProxyPort);
-            bW.Write(_dnsOverTcpProxyPort);
-            bW.Write(_dnsOverHttpPort);
-            s.WriteShortString(_dnsOverHttpUnixSocket ?? "");
-            s.WriteShortString(_dnsOverHttpsUnixSocket ?? "");
-            bW.Write(_dnsOverTlsPort);
-            bW.Write(_dnsOverHttpsPort);
-            bW.Write(_dnsOverQuicPort);
+            bW.Write(persistedBindings.UdpProxyPort.Value);
+            bW.Write(persistedBindings.TcpProxyPort.Value);
+            bW.Write(persistedBindings.HttpPort.Value);
+            s.WriteShortString(persistedBindings.HttpSocketPath ?? "");
+            s.WriteShortString(persistedBindings.HttpsSocketPath ?? "");
+            bW.Write(persistedBindings.TlsPort.Value);
+            bW.Write(persistedBindings.HttpsPort.Value);
+            bW.Write(persistedBindings.QuicPort.Value);
 
             AuthZoneInfo.WriteNetworkACLTo(listenerPolicy.ReverseProxyAcl ?? _dnsReverseProxyNetworkACL, bW);
 
@@ -8256,14 +8426,16 @@ namespace DnsServerCore.Dns
                 .SequenceEqual(candidate.Select(endpoint => endpoint.ToString()).Order(StringComparer.Ordinal), StringComparer.Ordinal);
         }
 
-        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, Action<Action> persist)
+        internal async Task ApplyManifestDnsSettingsAsync(string serverDomain, IReadOnlyList<IPEndPoint> endpoints, SourceNetworks sourceNetworks, AuthoritativeDefaults defaults, ResolverSettings resolverSettings, StatisticsSettings statistics, bool? appAutoUpdate, OutboundSocketSettings outbound, ClientSubnetSettings subnet, DnsLoggingSettings dnsLogging, RecursionPolicy recursion, CachePolicy cache, BlockingPolicy blocking, ForwardingPolicy forwarding, RateLimitPolicy rateLimits, DnsTuning tuning, DnsListenerPolicy listenerPolicy, DnsBindings bindings, ConfigurationProxy.Candidate proxy, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, Action<Action> persist)
         {
             IReadOnlyList<IPEndPoint> previous = _localEndPoints;
             bool owned = endpoints is not null;
             bool changed = owned && !HaveSameLocalEndPoints(previous, endpoints);
             bool domainChanged = serverDomain is not null && !string.Equals(serverDomain, _serverDomain, StringComparison.OrdinalIgnoreCase);
             bool tuningRestart = DnsTuningRequiresRestart(tuning);
-            bool restarted = tuningRestart || (changed && !alreadyActive);
+            DnsBindings previousBindings = CaptureDnsBindings();
+            bool bindingsChanged = dnsBindingsStaged || DnsBindingsDiffer(bindings, previousBindings);
+            bool restarted = !alreadyActive && (tuningRestart || changed || bindingsChanged);
             DnsTuning previousListenerTuning = CaptureListenerTuning();
             try
             {
@@ -8271,6 +8443,8 @@ namespace DnsServerCore.Dns
                 {
                     await StopAsync();
                     SetListenerTuning(tuning);
+                    if (bindingsChanged)
+                        StageManifestDnsBindings(bindings);
                     await StartAsync(true, endpoints ?? previous);
                 }
 
@@ -8278,6 +8452,40 @@ namespace DnsServerCore.Dns
                 {
                     ManagedDnsSettingsExtension previousExtendedOwnership = _managedDnsSettingsExtension;
                     ManagedDnsSettingsExtension extendedOwnership = (ManagedDnsSettingsExtension)proxy.Managed;
+                    if (bindings.UdpProxyEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingUdpProxyEnabled;
+                    if (bindings.UdpProxyPort is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingUdpProxyPort;
+                    if (bindings.TcpProxyEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingTcpProxyEnabled;
+                    if (bindings.TcpProxyPort is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingTcpProxyPort;
+                    if (bindings.HttpEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpEnabled;
+                    if (bindings.HttpPort is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpPort;
+                    if (bindings.TlsEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingTlsEnabled;
+                    if (bindings.TlsPort is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingTlsPort;
+                    if (bindings.HttpsEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpsEnabled;
+                    if (bindings.HttpsPort is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpsPort;
+                    if (bindings.QuicEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingQuicEnabled;
+                    if (bindings.QuicPort is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingQuicPort;
+                    if (bindings.Http3Enabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttp3Enabled;
+                    if (bindings.HttpSocketEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpSocketEnabled;
+                    if (bindings.HttpSocketPath is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpSocketPath;
+                    if (bindings.HttpsSocketEnabled is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpsSocketEnabled;
+                    if (bindings.HttpsSocketPath is not null)
+                        extendedOwnership |= ManagedDnsSettingsExtension.BindingHttpsSocketPath;
                     if (listenerPolicy.ClientSubnetSource.HasValue)
                         extendedOwnership |= ManagedDnsSettingsExtension.ListenerClientSubnetSource;
                     if (listenerPolicy.HelpRedirect.HasValue)
@@ -8542,7 +8750,7 @@ namespace DnsServerCore.Dns
                             ? previousDefaults.ZoneTransferNetworks : defaults.ZoneTransferNetworks,
                         defaults.NotifyNetworks is null || HaveSameNetworks(defaults.NotifyNetworks, previousDefaults.NotifyNetworks)
                             ? previousDefaults.NotifyNetworks : defaults.NotifyNetworks);
-                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
+                    if (!changed && !domainChanged && !ipv6Changed && !poolChanged && !excludedPortsChanged && !subnetChanged && !recursionChanged && !cacheChanged && !blockingChanged && !proxyChanged && !bindingsChanged && !listenerPolicyChanged && !forwardingChanged && !rateLimitsChanged && !tuningChanged && !dnsLoggingChanged && !inMemoryChanged && !retentionChanged && !appAutoUpdateChanged && (ownership == previousOwnership) && (extendedOwnership == previousExtendedOwnership) && (effectiveDefaults == previousDefaults) &&
                         (effectiveSourceNetworks == previousSourceNetworks) && (effectiveResolverSettings == previousResolverSettings))
                     {
                         persist(null);
@@ -8557,8 +8765,10 @@ namespace DnsServerCore.Dns
                         SetResolverSettings(effectiveResolverSettings);
                         SetSourceNetworks(effectiveSourceNetworks);
                         SetAuthoritativeDefaults(effectiveDefaults);
-                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy));
+                        persist(() => SaveConfigFileInternal(domainChanged ? serverDomain : null, statistics, appAutoUpdate, outbound, subnet, dnsLogging, recursion, cache, blocking, forwarding, rateLimits, tuning, listenerPolicy, proxy, CaptureDnsBindings()));
                         _pendingSave = false;
+                        if (bindingsChanged)
+                            FinishManifestDnsBindings(committed: true);
                     }
                     catch
                     {
@@ -8615,6 +8825,8 @@ namespace DnsServerCore.Dns
                 {
                     await StopAsync();
                     SetListenerTuning(previousListenerTuning);
+                    if (bindingsChanged)
+                        FinishManifestDnsBindings(committed: false);
                     await StartAsync(true, previous);
                 }
 

@@ -942,7 +942,7 @@ namespace DnsServerCore
         {
             await using (ZipArchive backupZip = new ZipArchive(zipStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy) &&
+                if (isConfigTransfer && dnsSettings && (_dnsServer.HasManagedClusterDnsSettings || _dnsServer.HasManagedDnsListenerPolicy || _dnsServer.HasManagedDnsBindings) &&
                     backupZip.GetEntry("dns.config") is ZipArchiveEntry dnsEntry)
                 {
                     bool checkDnsBody;
@@ -3123,7 +3123,7 @@ namespace DnsServerCore
             }
         }
 
-        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false)
+        private async Task ApplyManifestAsync(ConfigurationManifest manifest, IReadOnlyList<IPEndPoint> endpoints, ConfigurationProxy.Candidate proxy, bool alreadyActive = false, WebListeners listeners = default, bool listenersChanged = false, bool webAddressesChanged = false, bool listenerTuningStaged = false, bool dnsBindingsStaged = false)
         {
             string domain = manifest.GetServerDomain();
             bool regenerateCertificate = _webServiceUseSelfSignedTlsCertificate &&
@@ -3135,7 +3135,7 @@ namespace DnsServerCore
             try
             {
                 await ConfigurationPlan.ApplyAsync(manifest, _log, _dnsServer, endpoints, domain, _webServiceTlsPort, writeCertificate,
-                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive, listenerTuningStaged, proxy);
+                    (headers, persist) => ApplyManifestWebLiveSettings(headers, listeners, listenersChanged, persist), alreadyActive, listenerTuningStaged, dnsBindingsStaged, proxy);
             }
             catch
             {
@@ -3347,6 +3347,10 @@ namespace DnsServerCore
                     }
                 }
 
+                DnsServer.DnsBindings dnsBindings = ConfigurationPlan.GetDnsBindings(startupManifest);
+                DnsServer.DnsBindings previousDnsBindings = _dnsServer.CaptureDnsBindings();
+                ConfigurationPlan.ValidateDnsBindings(dnsBindings, previousDnsBindings, _dnsServer.HasDnsListenerCertificate);
+                bool dnsBindingsStaged = DnsServer.DnsBindingsDiffer(dnsBindings, previousDnsBindings);
                 WebListeners listeners = ConfigurationPlan.GetWebListeners(startupManifest);
                 DnsServer.DnsTuning tuning = ConfigurationPlan.GetDnsTuning(startupManifest);
                 DnsServer.DnsTuning previousListenerTuning = _dnsServer.CaptureListenerTuning();
@@ -3371,12 +3375,14 @@ namespace DnsServerCore
                         IReadOnlyList<IPEndPoint> endpoints = startupManifest?.GetDnsLocalEndPoints();
                         if (listenerTuningStaged)
                             _dnsServer.SetListenerTuning(tuning);
-                        await _dnsServer.StartAsync(throwIfBindFails || (endpoints is not null), endpoints ?? _dnsServer.LocalEndPoints);
+                        if (dnsBindingsStaged)
+                            _dnsServer.StageManifestDnsBindings(dnsBindings);
+                        await _dnsServer.StartAsync(throwIfBindFails || endpoints is not null || dnsBindings != default, endpoints ?? _dnsServer.LocalEndPoints);
                         _dhcpServer.Start();
                         if (startupManifest is not null)
                         {
                             bool webAddressesChanged = !previousWebListeners.Addresses.HasSameItems(_webServiceLocalAddresses);
-                            await ApplyManifestAsync(startupManifest, endpoints, proxy, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged);
+                            await ApplyManifestAsync(startupManifest, endpoints, proxy, alreadyActive: true, listeners, listenersChanged, webAddressesChanged, listenerTuningStaged, dnsBindingsStaged);
                         }
                     });
                 }
@@ -3385,6 +3391,8 @@ namespace DnsServerCore
                     await StopAsync();
                     if (listenerTuningStaged)
                         _dnsServer.SetListenerTuning(previousListenerTuning);
+                    if (dnsBindingsStaged)
+                        _dnsServer.FinishManifestDnsBindings(committed: false);
                     if (listeners.HasValues)
                     {
                         StageWebListeners(previousWebListeners);

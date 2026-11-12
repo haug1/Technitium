@@ -126,6 +126,23 @@ namespace DnsServerCore.Configuration
             ["/web/httpUnixSocket/path"] = Field<string>("webServiceHttpUnixSocket", null, restartWebService: true, canApply: true),
             ["/web/tlsUnixSocket/enabled"] = Field("webServiceEnableTlsUnixSocket", false, restartWebService: true, canApply: true),
             ["/web/tlsUnixSocket/path"] = Field<string>("webServiceTlsUnixSocket", null, restartWebService: true, canApply: true),
+            ["/dns/listeners/udpProxy/enabled"] = Field("enableDnsOverUdpProxy", false, canApply: true),
+            ["/dns/listeners/udpProxy/port"] = Field("dnsOverUdpProxyPort", 538, canApply: true),
+            ["/dns/listeners/tcpProxy/enabled"] = Field("enableDnsOverTcpProxy", false, canApply: true),
+            ["/dns/listeners/tcpProxy/port"] = Field("dnsOverTcpProxyPort", 538, canApply: true),
+            ["/dns/listeners/http/enabled"] = Field("enableDnsOverHttp", false, canApply: true),
+            ["/dns/listeners/http/port"] = Field("dnsOverHttpPort", 80, canApply: true),
+            ["/dns/listeners/tls/enabled"] = Field("enableDnsOverTls", false, canApply: true),
+            ["/dns/listeners/tls/port"] = Field("dnsOverTlsPort", 853, canApply: true),
+            ["/dns/listeners/https/enabled"] = Field("enableDnsOverHttps", false, canApply: true),
+            ["/dns/listeners/https/port"] = Field("dnsOverHttpsPort", 443, canApply: true),
+            ["/dns/listeners/quic/enabled"] = Field("enableDnsOverQuic", false, canApply: true),
+            ["/dns/listeners/quic/port"] = Field("dnsOverQuicPort", 853, canApply: true),
+            ["/dns/listeners/https/http3Enabled"] = Field("enableDnsOverHttp3", false, canApply: true),
+            ["/dns/listeners/http/unixSocket/enabled"] = Field("enableDnsOverHttpUnixSocket", false, canApply: true),
+            ["/dns/listeners/http/unixSocket/path"] = Field<string>("dnsOverHttpUnixSocket", null, canApply: true),
+            ["/dns/listeners/https/unixSocket/enabled"] = Field("enableDnsOverHttpsUnixSocket", false, canApply: true),
+            ["/dns/listeners/https/unixSocket/path"] = Field<string>("dnsOverHttpsUnixSocket", null, canApply: true),
             ["/dns/listeners/useClientSubnetAsSource"] = Field("enableEDnsClientSubnetSourceAddress", false, canApply: true),
             ["/dns/listeners/http/helpRedirect"] = Field("enableDnsOverHttpHelpRedirect", true, canApply: true),
             ["/dns/listeners/http/realIpHeader"] = Field("dnsOverHttpRealIpHeader", "X-Real-IP", canApply: true),
@@ -158,6 +175,10 @@ namespace DnsServerCore.Configuration
             RequireSettingsObject(currentSettings);
 
             ValidateProxyAndForwarders(manifest, currentSettings);
+            DnsServer.DnsBindings bindings = GetDnsBindings(manifest);
+            if (bindings != default)
+                ValidateDnsBindings(bindings, ReadCurrentDnsBindings(currentSettings),
+                    currentSettings.TryGetProperty("dnsListenerCertificateLoaded", out JsonElement loaded) && loaded.GetBoolean());
             int? declaredWebTlsPort = manifest.Settings.TryGetProperty("web", out JsonElement web) &&
                 web.TryGetProperty("tlsPort", out JsonElement tlsPort)
                 ? tlsPort.ValueKind == JsonValueKind.Null ? _settings["/web/tlsPort"].Default.GetInt32() : decimal.ToInt32(tlsPort.GetDecimal())
@@ -218,6 +239,8 @@ namespace DnsServerCore.Configuration
                     else if (proxy.ValueKind == JsonValueKind.Object && proxy.TryGetProperty("type", out JsonElement proxyType))
                         proxyType.WriteTo(writer);
                 }
+                if (currentSettings.TryGetProperty("dnsListenerCertificateLoaded", out JsonElement dnsCertificate))
+                    dnsCertificate.WriteTo(writer);
                 if (currentSettings.TryGetProperty("manifestProxyPassword", out JsonElement proxyPassword))
                     proxyPassword.WriteTo(writer);
                 if (currentSettings.TryGetProperty("clusterDomain", out JsonElement clusterDomain))
@@ -236,7 +259,7 @@ namespace DnsServerCore.Configuration
             return Convert.ToHexString(HMACSHA256.HashData(key, data.WrittenSpan));
         }
 
-        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, ConfigurationProxy.Candidate proxy)
+        internal static Task ApplyAsync(ConfigurationManifest manifest, LogManager log, DnsServer dns, IReadOnlyList<IPEndPoint> endpoints, string serverDomain, int webTlsPort, Action writeCertificate, Action<DnsWebService.WebLiveSettings, Action<Action>> applyWebLiveSettings, bool alreadyActive, bool listenerTuningStaged, bool dnsBindingsStaged, ConfigurationProxy.Candidate proxy)
         {
             CheckApplySupport(manifest);
 
@@ -248,7 +271,7 @@ namespace DnsServerCore.Configuration
             string folder = logging.ValueKind == JsonValueKind.Object && logging.TryGetProperty("folder", out JsonElement folderValue)
                 ? GetManifestLogFolder(folderValue, log) : null;
 
-            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), proxy, alreadyActive, listenerTuningStaged, writeDnsConfig =>
+            return dns.ApplyManifestDnsSettingsAsync(serverDomain, endpoints, GetSourceNetworks(manifest), GetAuthoritativeDefaults(manifest), GetResolverSettings(manifest), GetStatisticsSettings(manifest), GetAppAutoUpdate(manifest), GetOutboundSocketSettings(manifest, webTlsPort), GetClientSubnetSettings(manifest), GetDnsLoggingSettings(logging), GetRecursionPolicy(manifest), GetCachePolicy(manifest), GetBlockingPolicy(manifest), GetForwardingPolicy(manifest), GetRateLimitPolicy(manifest), GetDnsTuning(manifest), GetDnsListenerPolicy(manifest), GetDnsBindings(manifest), proxy, alreadyActive, listenerTuningStaged, dnsBindingsStaged, writeDnsConfig =>
                 dns.BlockListZoneManager.ApplyManifestSettings(GetBlockListInterval(manifest), GetBlockListSources(manifest), writeBlockListConfig =>
                     applyWebLiveSettings(GetWebLiveSettings(manifest), writeWebConfig => log.ApplyManifestSettings(
                 destination.HasValue ? Enum.Parse<LoggingType>(destination.Value.GetString()) : null,
@@ -257,6 +280,111 @@ namespace DnsServerCore.Configuration
                 localTime?.GetBoolean(),
                 folder,
                 writeDnsConfig, writeCertificate, writeBlockListConfig, writeWebConfig))));
+        }
+
+        internal static DnsServer.DnsBindings GetDnsBindings(ConfigurationManifest manifest)
+        {
+            if (manifest is null || !manifest.Settings.TryGetProperty("dns", out JsonElement dns) ||
+                !dns.TryGetProperty("listeners", out JsonElement listeners))
+                return default;
+
+            return new DnsServer.DnsBindings(
+                Read("udpProxy/enabled") is JsonElement udpProxyEnabled ? udpProxyEnabled.GetBoolean() : null,
+                Read("udpProxy/port") is JsonElement udpProxyPort ? decimal.ToInt32(udpProxyPort.GetDecimal()) : null,
+                Read("tcpProxy/enabled") is JsonElement tcpProxyEnabled ? tcpProxyEnabled.GetBoolean() : null,
+                Read("tcpProxy/port") is JsonElement tcpProxyPort ? decimal.ToInt32(tcpProxyPort.GetDecimal()) : null,
+                Read("http/enabled") is JsonElement httpEnabled ? httpEnabled.GetBoolean() : null,
+                Read("http/port") is JsonElement httpPort ? decimal.ToInt32(httpPort.GetDecimal()) : null,
+                Read("tls/enabled") is JsonElement tlsEnabled ? tlsEnabled.GetBoolean() : null,
+                Read("tls/port") is JsonElement tlsPort ? decimal.ToInt32(tlsPort.GetDecimal()) : null,
+                Read("https/enabled") is JsonElement httpsEnabled ? httpsEnabled.GetBoolean() : null,
+                Read("https/port") is JsonElement httpsPort ? decimal.ToInt32(httpsPort.GetDecimal()) : null,
+                Read("quic/enabled") is JsonElement quicEnabled ? quicEnabled.GetBoolean() : null,
+                Read("quic/port") is JsonElement quicPort ? decimal.ToInt32(quicPort.GetDecimal()) : null,
+                Read("https/http3Enabled") is JsonElement http3Enabled ? http3Enabled.GetBoolean() : null,
+                Read("http/unixSocket/enabled") is JsonElement httpSocketEnabled ? httpSocketEnabled.GetBoolean() : null,
+                Read("http/unixSocket/path") is JsonElement httpSocketPath ? ConfigurationManifest.ReadWebUnixSocketPath(httpSocketPath, "/dns/listeners/http/unixSocket/path") : null,
+                Read("https/unixSocket/enabled") is JsonElement httpsSocketEnabled ? httpsSocketEnabled.GetBoolean() : null,
+                Read("https/unixSocket/path") is JsonElement httpsSocketPath ? ConfigurationManifest.ReadWebUnixSocketPath(httpsSocketPath, "/dns/listeners/https/unixSocket/path") : null);
+
+            JsonElement? Read(string path)
+            {
+                JsonElement value = listeners;
+                foreach (string segment in path.Split('/'))
+                {
+                    if (!value.TryGetProperty(segment, out value))
+                        return null;
+                    if (value.ValueKind == JsonValueKind.Null)
+                        return _settings["/dns/listeners/" + path].Default;
+                }
+                return value;
+            }
+        }
+
+        private static DnsServer.DnsBindings ReadCurrentDnsBindings(JsonElement snapshot)
+        {
+            return new DnsServer.DnsBindings(
+                Read("udpProxy/enabled").GetBoolean(),
+                Read("udpProxy/port").GetInt32(),
+                Read("tcpProxy/enabled").GetBoolean(),
+                Read("tcpProxy/port").GetInt32(),
+                Read("http/enabled").GetBoolean(),
+                Read("http/port").GetInt32(),
+                Read("tls/enabled").GetBoolean(),
+                Read("tls/port").GetInt32(),
+                Read("https/enabled").GetBoolean(),
+                Read("https/port").GetInt32(),
+                Read("quic/enabled").GetBoolean(),
+                Read("quic/port").GetInt32(),
+                Read("https/http3Enabled").GetBoolean(),
+                Read("http/unixSocket/enabled").GetBoolean(),
+                Read("http/unixSocket/path").GetString() ?? "",
+                Read("https/unixSocket/enabled").GetBoolean(),
+                Read("https/unixSocket/path").GetString() ?? "");
+
+            JsonElement Read(string path)
+            {
+                Setting setting = _settings["/dns/listeners/" + path];
+                return snapshot.TryGetProperty(setting.ApiField, out JsonElement value) ? value : setting.Default;
+            }
+        }
+
+        internal static void ValidateDnsBindings(DnsServer.DnsBindings candidate, DnsServer.DnsBindings current, bool hasCertificate)
+        {
+            ValidateSocket(candidate.HttpSocketEnabled, candidate.HttpSocketPath, current.HttpSocketEnabled, current.HttpSocketPath, "http");
+            ValidateSocket(candidate.HttpsSocketEnabled, candidate.HttpsSocketPath, current.HttpsSocketEnabled, current.HttpsSocketPath, "https");
+
+            if (candidate.QuicEnabled == true || candidate.Http3Enabled == true)
+            {
+                try
+                {
+                    DnsServer.ValidateQuicSupport();
+                }
+                catch (DnsServerException)
+                {
+                    throw new InvalidDataException("/dns/listeners: QUIC is unavailable on this host.");
+                }
+            }
+
+            if (candidate.Http3Enabled == true || (candidate.HttpsEnabled.HasValue && (candidate.Http3Enabled ?? current.Http3Enabled) == true))
+            {
+                if ((candidate.HttpsEnabled ?? current.HttpsEnabled) != true)
+                    throw new InvalidDataException("/dns/listeners/https/http3Enabled: DNS-over-HTTPS must be enabled.");
+            }
+
+            if (!hasCertificate && (candidate.TlsEnabled == true || candidate.HttpsEnabled == true ||
+                candidate.HttpsSocketEnabled == true || candidate.QuicEnabled == true || candidate.Http3Enabled == true))
+                throw new InvalidDataException("/dns/listeners/certificate: An enabled secure DNS listener requires a loaded certificate.");
+
+            static void ValidateSocket(bool? enabled, string path, bool? currentEnabled, string currentPath, string protocol)
+            {
+                if ((enabled is null && path is null) || (enabled ?? currentEnabled) != true)
+                    return;
+                if (!DnsServer.IsUnixDomainSocketSupported())
+                    throw new InvalidDataException($"/dns/listeners/{protocol}/unixSocket/enabled: Unix domain sockets are unavailable on this host.");
+                if (string.IsNullOrEmpty(path ?? currentPath))
+                    throw new InvalidDataException($"/dns/listeners/{protocol}/unixSocket/path: A path is required when the socket is enabled.");
+            }
         }
 
         private static DnsServer.DnsListenerPolicy GetDnsListenerPolicy(ConfigurationManifest manifest)
@@ -659,7 +787,7 @@ namespace DnsServerCore.Configuration
         private static void CheckApplySupport(JsonElement value, string path)
         {
             if (path == "/dns/proxy" || (_settings.TryGetValue(path, out Setting setting) && setting.CanApply) ||
-                (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket"))
+                (value.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket"))
                 return;
 
             if ((value.ValueKind == JsonValueKind.Object) &&
@@ -1090,7 +1218,7 @@ namespace DnsServerCore.Configuration
                             value = current.GetString();
                         candidate = JsonSerializer.SerializeToElement(value);
                     }
-                    else if (path is "/web/httpUnixSocket/path" or "/web/tlsUnixSocket/path")
+                    else if (path is "/web/httpUnixSocket/path" or "/web/tlsUnixSocket/path" or "/dns/listeners/http/unixSocket/path" or "/dns/listeners/https/unixSocket/path")
                     {
                         string socket = ConfigurationManifest.ReadWebUnixSocketPath(desired, path);
                         candidate = JsonSerializer.SerializeToElement(socket.Length == 0 ? null : socket);
@@ -1126,8 +1254,12 @@ namespace DnsServerCore.Configuration
                     ConfigurationChangeKind kind = current.ValueKind == JsonValueKind.Null
                         ? ConfigurationChangeKind.Add
                         : candidate.ValueKind == JsonValueKind.Null ? ConfigurationChangeKind.Remove : ConfigurationChangeKind.Update;
-                    bool restartDns = path == DnsEndpointsPath || path is
+                    bool restartDns = path == DnsEndpointsPath || path.StartsWith("/dns/listeners/", StringComparison.Ordinal) &&
+                        path.EndsWith("/enabled", StringComparison.Ordinal) || path is
                         "/dns/tuning/tcpSendTimeoutMs" or "/dns/tuning/tcpReceiveTimeoutMs" or "/dns/tuning/quicIdleTimeoutMs" or
+                        "/dns/listeners/https/http3Enabled" or "/dns/listeners/http/unixSocket/path" or "/dns/listeners/https/unixSocket/path" or
+                        "/dns/listeners/udpProxy/port" or "/dns/listeners/tcpProxy/port" or "/dns/listeners/http/port" or
+                        "/dns/listeners/tls/port" or "/dns/listeners/https/port" or "/dns/listeners/quic/port" or
                         "/dns/tuning/quicMaxInboundStreams" or "/dns/tuning/listenBacklog" or "/dns/tuning/udpSendBufferKiB" or "/dns/tuning/udpReceiveBufferKiB";
                     changes.Add(new ConfigurationChange(path, kind, setting.RestartWebService, restartDns));
                 }
@@ -1135,7 +1267,7 @@ namespace DnsServerCore.Configuration
                 return;
             }
 
-            if (desired.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket")
+            if (desired.ValueKind == JsonValueKind.Null && path is "/web/httpUnixSocket" or "/web/tlsUnixSocket" or "/dns/listeners/http/unixSocket" or "/dns/listeners/https/unixSocket")
             {
                 Compare(desired, path + "/enabled", currentSettings, changes, log, declaredWebTlsPort);
                 Compare(desired, path + "/path", currentSettings, changes, log, declaredWebTlsPort);

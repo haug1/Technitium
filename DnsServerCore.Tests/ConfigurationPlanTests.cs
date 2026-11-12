@@ -726,6 +726,63 @@ namespace DnsServerCore.Tests
         }
 
         [Fact]
+        public async Task OptionalDnsBindingPersistsAndRecoversAfterABindFailure()
+        {
+            await using var server = await LoopbackWebService.StartAsync();
+            int port;
+            using (var available = new TcpListener(IPAddress.Loopback, 0))
+            {
+                available.Start();
+                port = ((IPEndPoint)available.LocalEndpoint).Port;
+            }
+
+            string manifest = Manifest(port);
+            JsonElement preview = await PreviewAsync(server, manifest);
+            Assert.Equal(2, preview.GetProperty("changes").GetArrayLength());
+            Assert.All(preview.GetProperty("changes").EnumerateArray(),
+                change => Assert.True(change.GetProperty("restartDnsService").GetBoolean()));
+            LoopbackWebService.AssertOk(await ApplyAsync(server, manifest, preview.GetProperty("revision").GetString()!));
+            await server.RestartAsync();
+            await AssertBoundAsync(port);
+            Assert.Empty((await PreviewAsync(server, manifest)).GetProperty("changes").EnumerateArray());
+
+            using var occupied = new TcpListener(IPAddress.Loopback, 0);
+            occupied.Start();
+            int occupiedPort = ((IPEndPoint)occupied.LocalEndpoint).Port;
+            string changed = Manifest(occupiedPort);
+            JsonElement candidate = await PreviewAsync(server, changed);
+            JsonElement rejected = await ApplyAsync(server, changed, candidate.GetProperty("revision").GetString()!);
+            Assert.Equal("error", rejected.GetProperty("status").GetString());
+            await AssertBoundAsync(port);
+            await server.QueryAsync("example.invalid", DnsResourceRecordType.A);
+            await server.RestartAsync();
+            await AssertBoundAsync(port);
+
+            JsonElement conflict = await server.CallAsync($"settings/set?dnsOverTcpProxyPort={occupiedPort}", server.AdminToken);
+            Assert.Equal("error", conflict.GetProperty("status").GetString());
+            Assert.Contains("/dns/listeners/tcpProxy/port", conflict.GetProperty("errorMessage").GetString());
+
+            occupied.Stop();
+            string path = Path.Combine(server.ConfigurationDirectory, ConfigurationManifest.DefaultFileName);
+            await File.WriteAllTextAsync(path, changed);
+            await server.RestartAsync();
+            await AssertBoundAsync(occupiedPort);
+            File.Delete(path);
+            await server.RestartAsync();
+            await AssertBoundAsync(occupiedPort);
+
+            static string Manifest(int port) => $$"""
+                {"schemaVersion":1,"dns":{"listeners":{"tcpProxy":{"enabled":true,"port":{{port}} } } } }
+                """;
+
+            static async Task AssertBoundAsync(int port)
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, port);
+            }
+        }
+
+        [Fact]
         public async Task StartupPersistsNewListenerTuningForAnAlreadyOwnedField()
         {
             const string initial = """{"schemaVersion":1,"dns":{"tuning":{"tcpReceiveTimeoutMs":8000}}}""";
